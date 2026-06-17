@@ -1,0 +1,120 @@
+# Canopy — Local Development Environment
+#
+# This stack provides the full dependency surface for local development and
+# integration testing. Services are wired with explicit health checks and
+# startup ordering so that the database migrations run only after PostgreSQL
+# is actually ready, and the cache layer is up before the backend starts.
+#
+#   postgres  — metadata persistence (catalog, sessions, playback history)
+#   redis     — cache layer (JadeCache: browse results, discovery pools)
+#   rustfs    — object storage (audio bytes, artwork, licenses)
+#   adminer   — database management UI (optional, dev-only)
+#
+# To start:
+#   docker compose up -d
+# To stop:
+#   docker compose down
+# To wipe all data (⚠️ destructive):
+#   docker compose down -v
+
+services:
+  postgres:
+    # PostgreSQL 18.4-trixie (Debian testing base). The official Docker image
+    # ships 18.4 under the trixie, bookworm, and alpine tags. Swap to alpine
+    # for a smaller footprint if desired: `postgres:18.4-alpine`.
+    image: postgres:18.4-trixie
+    container_name: canopy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CANOPY_POSTGRES_USER:-canopy}
+      POSTGRES_PASSWORD: ${CANOPY_POSTGRES_PASSWORD:-canopy}
+      POSTGRES_DB: ${CANOPY_POSTGRES_DB:-canopy}
+    ports:
+      - "${CANOPY_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - canopy-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  redis:
+    # Redis 8 — used by the JadeCache layer for browse results, discovery
+    # pools, and presigned-URL TTL tracking.
+    image: redis:8
+    container_name: canopy-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+    ports:
+      - "${CANOPY_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - canopy-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: canopy-rustfs
+    restart: unless-stopped
+    environment:
+      # RustFS configuration (adjust per RustFS docs as they evolve).
+      RUSTFS_BUCKET: ${CANOPY_RUSTFS_BUCKET:-pandawave-media}
+      RUSTFS_ACCESS_KEY: ${CANOPY_RUSTFS_ACCESS_KEY:-canopy}
+      RUSTFS_SECRET_KEY: ${CANOPY_RUSTFS_SECRET_KEY:-canopy-secret}
+    ports:
+      - "${CANOPY_RUSTFS_PORT:-9000}:9000"
+    volumes:
+      - rustfs_data:/data
+    networks:
+      - canopy-net
+    healthcheck:
+      # RustFS exposes an S3-compatible API; a simple TCP probe is enough
+      # until a dedicated health endpoint is documented.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  adminer:
+    image: adminer
+    container_name: canopy-adminer
+    restart: unless-stopped
+    ports:
+      - "${CANOPY_ADMINER_PORT:-8080}:8080"
+    networks:
+      - canopy-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - adminer
+    # Adminer is only started when explicitly requested:
+    #   docker compose --profile adminer up -d
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  rustfs_data:
+    driver: local
+
+networks:
+  canopy-net:
+    driver: bridge
+    name: canopy-net

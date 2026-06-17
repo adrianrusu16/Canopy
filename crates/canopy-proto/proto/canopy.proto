@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+package canopy;
+
+// The service that PandaEngine calls.
+service Canopy {
+  // ---------- Catalog ----------
+  rpc Browse(BrowseRequest) returns (BrowseResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
+
+  // ---------- Playback control (session) ----------
+  rpc Play(PlayRequest) returns (PlayResponse);
+  rpc Pause(PauseRequest) returns (PauseResponse);
+  rpc Seek(SeekRequest) returns (SeekResponse);
+  rpc SetPlaybackSpeed(SetPlaybackSpeedRequest) returns (SetPlaybackSpeedResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+
+  // ---------- Playback resolution (presigned URL) ----------
+  rpc ResolvePlayback(PlaybackRequest) returns (PlaybackSource);
+
+  // ---------- Discovery (shuffle channel) ----------
+  rpc DiscoveryNext(DiscoveryRequest) returns (DiscoveryTrack);
+
+  // ---------- Session / state ----------
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc UpdateSession(UpdateSessionRequest) returns (UpdateSessionResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+
+  // ---------- Miscellaneous ----------
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+/* -------------------------------------------------
+   Catalog messages
+   ------------------------------------------------- */
+message BrowseRequest {
+  // Optional filters – the engine can request a specific root or genre.
+  string parent_id = 1;        // empty => root
+  int32 limit = 2;
+  int32 offset = 3;
+  repeated string genres = 4;  // optional genre filter
+}
+message BrowseResponse {
+  repeated MediaItem items = 1;
+  int32 total_count = 2;
+  bool   has_more = 3;
+}
+message SearchRequest {
+  string query   = 1;
+  int32 limit    = 2;
+  int32 offset   = 3;
+}
+message SearchResponse {
+  repeated MediaItem items = 1;
+  int32 total_count = 2;
+}
+message GetMediaRequest {
+  string media_id = 1;
+}
+message GetMediaResponse {
+  MediaItem item = 1;
+}
+
+/* -------------------------------------------------
+   MediaItem – the minimal set the engine needs to render
+   a browse/search result and to later request playback.
+   ------------------------------------------------- */
+message MediaItem {
+  string id          = 1;   // stable engine‑side identifier
+  string title       = 2;
+  string artist      = 3;
+  string album       = 4;
+  string artwork_uri = 5;   // content://… URI that the Android resolver knows
+  int64  duration_ms = 6;   // -1 if unknown (e.g., live stream)
+  int32  bitrate_kbps= 7;
+  string mime_type   = 8;   // e.g., "audio/mp4"
+  bool   is_explicit = 9;
+}
+
+/* -------------------------------------------------
+   Playback control
+   ------------------------------------------------- */
+message PlayRequest {
+  string media_id   = 1;
+  int64  start_pos_ms = 2; // optional; default 0
+}
+message PlayResponse {
+  bool   success = 1;
+  string error_msg = 2;
+}
+message PauseRequest { }
+message PauseResponse { bool success = 1; }
+message SeekRequest {
+  int64 position_ms = 1;
+}
+message SeekResponse { bool success = 1; }
+message SetPlaybackSpeedRequest {
+  double speed = 1; // 0.5 … 2.0 typical
+}
+message SetPlaybackSpeedResponse { bool success = 1; }
+message StopRequest { }
+message StopResponse { bool success = 1; }
+
+/* -------------------------------------------------
+   Playback resolution — presigned URL for a track
+   ------------------------------------------------- */
+message PlaybackRequest {
+  string track_id = 1;
+}
+message PlaybackSource {
+  string track_id            = 1;
+  string stream_url          = 2;
+  string content_type        = 3;
+  string codec               = 4;
+  uint64 duration_ms         = 5;
+  uint64 expires_at_epoch_ms = 6;
+}
+
+/* -------------------------------------------------
+   Discovery — shuffle channel
+   ------------------------------------------------- */
+message DiscoveryRequest {
+  repeated string recently_played = 1; // track IDs to exclude
+  int32 limit                     = 2; // max items to return (0 => default)
+}
+message DiscoveryTrack {
+  MediaItem item = 1;
+}
+
+/* -------------------------------------------------
+   Session handling – the engine keeps a lightweight
+   session ID that maps to internal state (current
+   position, queue, etc.) on the backend.
+   ------------------------------------------------- */
+message GetSessionRequest {
+  string session_id = 1;
+}
+message GetSessionResponse {
+  string session_id        = 1;
+  string current_media_id  = 2;
+  int64  position_ms       = 3;
+  double playback_speed    = 4;
+  bool   is_playing      = 5;
+  // optional queue snapshot etc.
+}
+message UpdateSessionRequest {
+  string session_id = 1;
+  string media_id   = 2; // new media to load (optional)
+  int64  position_ms = 3; // seek to this position on load (optional)
+}
+message UpdateSessionResponse {
+  bool success = 1;
+}
+message EndSessionRequest {
+  string session_id = 1;
+}
+message EndSessionResponse { bool success = 1; }
+
+/* -------------------------------------------------
+   Health – simple liveness/readiness check.
+   ------------------------------------------------- */
+message HealthRequest { }
+message HealthResponse {
+  bool   healthy = 1;
+  string version = 2;
+}

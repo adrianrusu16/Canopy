@@ -1,0 +1,40 @@
+[package]
+name = "canopy-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canopy gRPC server: configuration, adapters and storage wiring."
+
+[lib]
+name = "canopy_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canopy"
+path = "src/main.rs"
+
+[dependencies]
+canopy-proto.workspace = true
+canopy-core.workspace = true
+
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+sqlx = { workspace = true, optional = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+pg = ["dep:sqlx"]
+fixture = ["canopy-core/serde"]
+
+[dev-dependencies]
+mockall.workspace = true
+tempfile.workspace = true

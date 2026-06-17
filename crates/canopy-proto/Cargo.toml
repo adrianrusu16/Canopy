@@ -1,0 +1,15 @@
+[package]
+name = "canopy-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared gRPC wire contract between PandaEngine and Canopy."
+
+[dependencies]
+tonic.workspace = true
+prost.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+tonic-prost-build.workspace = true

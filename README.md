@@ -1,0 +1,742 @@
+# PandaWave Architecture
+
+> This document describes the architecture of the **PandaWave** ecosystem as a whole. It lives in the **Canopy** repository — the Rust backend — because Canopy is the central control-plane component. Sections below cover the full system; the **Canopy Backend Structure** and **Canopy Responsibilities** sections are specific to this repo.
+
+## Status
+
+This document is the **target architecture**. Most of it is not yet implemented — the current codebase is an early prototype. The table below tracks reality so the design and the code stay honest with each other. The code is organized as a Cargo workspace (`canopy-proto` / `canopy-core` / `canopy-server`) with domain-oriented modules and repository ports, so the structure already matches the design even where the behavior is still a stub.
+
+| Area                      | Status         | Notes                                                                                       |
+| ------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (wire contract), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (domain services + `api::grpc` adapter + `jade_store`). |
+| gRPC server (`tonic`)     | 🟡 Prototype   | `ResolvePlayback` and `DiscoveryNext` RPCs are now wired via the target proto contract. `Search` and `Browse` still use the demo response shape (not streaming `SearchResult` yet). |
+| Configuration             | ✅ Implemented | Env-driven `Config` (`CANOPY_GRPC_ADDR`, `CANOPY_DATABASE_URL`) with sensible defaults. |
+| Catalog service           | 🟡 Prototype   | `CatalogService` over the `CatalogRepository` port; in-memory `jade_store` impl, no persistence. |
+| Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs are stubs. |
+| Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. Matching is still a trivial in-memory match, not PostgreSQL full-text/trigram. |
+| Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. The pre-shuffled materialized view (vs. in-memory pool) is still planned. |
+| Playback Resolver         | 🟡 Prototype   | `ResolverService` over the `AudioAssetRepository` + `UrlSigner` ports: codec-preference asset selection, TTL expiry, and HMAC-SHA256 presigned `PlaybackSource` URLs (stateless verify). `ResolvePlayback` gRPC RPC is wired. In-memory assets; PostgreSQL/RustFS backend still planned. |
+| Auth (end-user + service) | 🔴 Planned     | No mTLS / session-token enforcement yet.                                                     |
+| Provider Adapters         | 🔴 Planned     | Musopen/Pixabay/Internet Archive ingestion not implemented.                                 |
+| Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` dependency added, schema migrations, `docker-compose.yml`, and `PgCatalogRepository` / `PgSessionRepository` / `PgAudioAssetRepository` stubs implemented. Wired into `lib.rs` startup with auto-detection: connects to PostgreSQL when `pg` feature is enabled, falls back to in-memory stores on failure. In-memory stores still default when feature is off. |                                          |
+| Storage (RustFS)          | 🔴 Planned     | No RustFS integration in the request path yet.                                              |
+| Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
+| Health checks             | 🟡 Partial     | `HealthService` reports liveness + version + PostgreSQL connectivity (via `SELECT 1` probe when `pg` feature is on). RustFS reachability and degraded-state distinction still planned. |
+| CI / Verification         | 🟡 Partial     | GitHub Actions pipeline runs `cargo test`/`clippy`/`fmt` and `cargo build --release` on every PR and push to `main`. Migration checks, integration tests, and proto wire-compatibility gates are planned. |
+
+Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
+
+## Ecosystem Overview
+
+```mermaid
+flowchart TD
+
+    PW[PandaWave<br/>AAOS Media App]
+
+    PE[PandaEngine<br/>Rust Middleware]
+
+    CAN[Canopy<br/>Rust Backend]
+
+    DB[(PostgreSQL)]
+    FS[(RustFS)]
+
+    PW -->|AIDL| PE
+    PE -->|gRPC / tonic| CAN
+
+    CAN --> DB
+    CAN --> FS
+```
+
+---
+
+## Naming Hierarchy
+
+| Domain            | Name        |
+| ----------------- | ----------- |
+| Product           | PandaWave   |
+| Engine            | PandaEngine |
+| Backend           | Canopy      |
+| Design System     | BambooUI    |
+| Future OS         | PandaOS     |
+| Persistence Layer | JadeStore   |
+| Cache Layer       | JadeCache   |
+| Future Sync Layer | JadeSync    |
+
+---
+
+## Runtime Architecture
+
+```mermaid
+flowchart TB
+
+    subgraph PandaWave
+        UI[BambooUI]
+        MP[BambooMiniPlayer]
+        MS[MediaSession]
+        EXO[ExoPlayer]
+    end
+
+    subgraph PandaEngine
+        CMD[Command Dispatcher]
+        STATE[State Machine]
+        PLAY[Playback Coordinator]
+        SEARCH[Search Coordinator]
+        QUEUE[Queue Management]
+        REPO[Repository Layer]
+    end
+
+    subgraph Canopy
+        API[gRPC API]
+
+        AUTH[Auth]
+        CAT[Catalog]
+        DISC[Discovery]
+        SRCH[Search]
+        RES[Playback Resolver]
+        PROV[Provider Adapters]
+
+        STORE[JadeStore]
+        OBS[Observability]
+        HEALTH[Health]
+    end
+
+    DB[(PostgreSQL)]
+    FS[(RustFS)]
+
+    UI --> CMD
+
+    CMD --> STATE
+    CMD --> SEARCH
+    CMD --> PLAY
+
+    REPO --> API
+
+    API --> AUTH
+    API --> CAT
+    API --> DISC
+    API --> SRCH
+    API --> RES
+
+    CAT --> STORE
+    DISC --> STORE
+    SRCH --> STORE
+    RES --> STORE
+
+    PROV --> STORE
+
+    STORE --> DB
+    RES --> FS
+```
+
+---
+
+## Canopy Backend Structure
+
+Canopy is a Cargo **workspace**. The wire contract lives in its own crate so
+PandaEngine can depend on it without pulling in the backend, the domain is kept
+transport- and storage-agnostic in `canopy-core`, and the server crate holds the
+adapters and wiring. Dependencies point inwards only: `canopy-server →
+canopy-core` and `canopy-server → canopy-proto`.
+
+```text
+canopy/                         # workspace root
+├── crates/
+│   ├── canopy-proto/           # generated gRPC types (single source of truth)
+│   │   ├── proto/canopy.proto
+│   │   └── build.rs
+│   │
+│   ├── canopy-core/            # transport-agnostic domain
+│   │   ├── model.rs            # MediaItem, AudioAsset, PlaybackSource, Session, Page, ...
+│   │   ├── error.rs            # CanopyError / CanopyResult
+│   │   ├── repository.rs       # Catalog / Discovery / AudioAsset / Session ports
+│   │   └── signing.rs          # UrlSigner port (presigned-URL signing)
+│   │
+│   └── canopy-server/          # adapters + wiring (lib + `canopy` binary)
+│       ├── api/                # driving adapters
+│       │   ├── grpc.rs         # gRPC ⇄ domain, CanopyError → Status
+│       │   └── http.rs         # (planned)
+│       │
+│       ├── auth/               # (planned)
+│       ├── catalog/            # CatalogService
+│       ├── search/             # SearchService (normalization; pg_trgm planned)
+│       ├── discovery/          # DiscoveryService (diversity/exclusion; pre-shuffled view planned)
+│       ├── playback/           # PlaybackService (sessions) + ResolverService (presigned URLs)
+│       ├── signing/            # HmacUrlSigner (UrlSigner impl)
+│       ├── providers/          # (planned)
+│       ├── jade_store/         # persistence layer (in-memory; PG/RustFS planned)
+│       ├── observability/      # tracing init (metrics planned)
+│       ├── health/             # HealthService
+│       └── config.rs
+```
+
+> **Naming note.** The persistence layer is `jade_store` in code, matching the
+> **JadeStore** entry in the Naming Hierarchy above, rather than a generic
+> `storage`. Domain services depend on the repository **ports** in `canopy-core`,
+> so the in-memory store and the future PostgreSQL / RustFS backends are
+> interchangeable behind the same interfaces.
+
+---
+
+## Canopy Responsibilities
+
+### gRPC API Layer
+
+The gRPC API is Canopy's single control-plane contract with PandaEngine. It owns search, browse, discovery, playback resolution, and metadata retrieval. Audio bytes never travel over this channel — gRPC resolves *what* to play and *where* to get it; HTTP handles the actual streaming.
+
+```proto
+rpc Search(SearchRequest)
+    returns (stream SearchResult);
+
+rpc Browse(BrowseRequest)
+    returns (BrowseResponse);
+
+rpc ResolvePlayback(PlaybackRequest)
+    returns (PlaybackSource);
+
+rpc DiscoveryNext(DiscoveryRequest)
+    returns (DiscoveryTrack);
+```
+
+This proto is the single source of truth for the wire contract between PandaEngine and Canopy. It is defined once, in a shared `canopy_proto` crate, and consumed by both PandaEngine (as a client) and Canopy (as a server). Neither side maintains its own copy of these message shapes.
+
+---
+
+### Auth
+
+Canopy distinguishes two independent identities on every request:
+
+* **End-user identity** — PandaWave users authenticate once and carry a session token through PandaEngine to Canopy. This identity is what `playback_history` and personalization are scoped to.
+* **Service identity** — PandaEngine itself authenticates to Canopy as a trusted client via mTLS or a service credential, independent of which end user is active. This is what protects the gRPC API surface from being called by anything other than PandaEngine.
+
+Both checks run on every request: service identity establishes that the caller is PandaEngine, end-user identity establishes whose data is being read or written.
+
+---
+
+### Search Service
+
+Search runs on PostgreSQL full-text search with `pg_trgm` trigram similarity. Queries are normalized, matched via `ILIKE` against trigram-indexed columns, and results are paginated and streamed back to the client as they're found. This is the entire search implementation — there is no separate search engine or index to operate.
+
+Ranking and personalized suggestions are intentionally out of scope for the initial implementation. They are addressed only once trigram search has been observed to be insufficient for the catalog's actual size and query patterns, at which point a dedicated search engine becomes a deliberate, evidence-driven addition rather than a default.
+
+---
+
+### Catalog Service
+
+The catalog service owns artists, albums, tracks, and playlists, and serves the hierarchical browsing experience used for discovery navigation.
+
+---
+
+### Discovery Service
+
+Discovery serves the shuffle channel: randomized playback with diversity filtering and exclusion of recently played tracks. Track selection is sourced from a pre-shuffled materialized view rather than an `ORDER BY random()` query against the live catalog table, so selection cost stays flat as the catalog grows. The materialized view is refreshed on a schedule independent of request traffic.
+
+A recommendation engine is a future layer on top of this service; the initial implementation is uniform random selection with the diversity and exclusion rules above.
+
+---
+
+### Playback Resolver
+
+The playback resolver selects the correct audio asset for a track, generates a signed playback URL, and embeds an expiry directly in that URL. Validation of an in-flight playback token is stateless: the signature and expiry are checked in memory against the request, with no database lookup in the hot path. This matters because a single track playback generates many HTTP Range requests as ExoPlayer seeks and buffers, and each one validates the token independently.
+
+---
+
+### Provider Adapters
+
+Provider adapters ingest catalog content from external sources — Musopen, Pixabay Music, Internet Archive, and future providers — and are responsible for metadata extraction, license verification, and ongoing catalog synchronization. Every track ingested through a provider adapter carries a license record; a track with no resolvable license is not added to the catalog.
+
+---
+
+## Storage Architecture
+
+```mermaid
+flowchart LR
+
+    CAN[Canopy]
+
+    DB[(PostgreSQL)]
+    FS[(RustFS)]
+
+    CAN --> DB
+    CAN --> FS
+
+    DB --> META[Metadata]
+
+    FS --> AUDIO[Audio Files]
+    FS --> ART[Artwork]
+    FS --> LIC[Licenses]
+```
+
+PostgreSQL stores metadata; RustFS stores bytes. Canopy itself does not proxy audio data — `ResolvePlayback` returns a presigned RustFS URL with the expiry embedded, and ExoPlayer streams directly from RustFS using that URL. This keeps Canopy's own request path free of the bandwidth and CPU cost of serving audio, and isolates the streaming hot path to RustFS, which is the system actually responsible for serving bytes.
+
+RustFS is chosen for its S3-compatible API and Apache 2.0 license — fully permissive, with no copyleft or network-use obligations, which matters for a proprietary product. It is run as a single Rust-native binary alongside the rest of the stack, with no foreign runtime in the deployment.
+
+---
+
+### PostgreSQL
+
+Stores metadata only.
+
+```text
+artists
+albums
+tracks
+audio_assets
+licenses
+playlists
+users
+playback_history
+```
+
+No binary audio data stored in PostgreSQL.
+
+---
+
+### RustFS
+
+Bucket:
+
+```text
+pandawave-media
+```
+
+Structure:
+
+```text
+audio/
+└── tracks/
+    └── musopen/
+        ├── trk_001.mp3
+        ├── trk_002.mp3
+        └── trk_003.mp3
+
+artwork/
+├── artists/
+├── albums/
+└── tracks/
+
+licenses/
+└── musopen/
+```
+
+---
+
+## Database Schema
+
+```mermaid
+erDiagram
+
+    ARTISTS ||--o{ ALBUMS : owns
+
+    ARTISTS ||--o{ TRACKS : performs
+
+    ALBUMS ||--o{ TRACKS : contains
+
+    TRACKS ||--o{ AUDIO_ASSETS : has
+
+    LICENSES ||--o{ TRACKS : governs
+
+    ARTISTS {
+        uuid id
+        string name
+        string sort_name
+    }
+
+    ALBUMS {
+        uuid id
+        string title
+        uuid artist_id
+        int release_year
+    }
+
+    TRACKS {
+        uuid id
+        string title
+        uuid artist_id
+        uuid album_id
+        int duration_ms
+        uuid license_id
+    }
+
+    AUDIO_ASSETS {
+        uuid id
+        uuid track_id
+        string codec
+        string content_type
+        string object_key
+        bigint size_bytes
+        string checksum_sha256
+    }
+
+    LICENSES {
+        uuid id
+        string license_type
+        string source_url
+        string attribution_text
+    }
+```
+
+---
+
+## Playback Flow
+
+```mermaid
+sequenceDiagram
+
+    participant User
+    participant PandaWave
+    participant PandaEngine
+    participant Canopy
+    participant PostgreSQL
+    participant RustFS
+
+    User->>PandaWave: Play Track
+
+    PandaWave->>PandaEngine: play(trackId)
+
+    PandaEngine->>Canopy: ResolvePlayback(trackId)
+
+    Canopy->>PostgreSQL: Lookup metadata
+
+    PostgreSQL-->>Canopy: Track + Asset
+
+    Canopy-->>PandaEngine: PlaybackSource (presigned RustFS URL)
+
+    PandaEngine-->>PandaWave: PlaybackSource
+
+    PandaWave->>RustFS: HTTP GET (presigned URL)
+
+    RustFS-->>PandaWave: HTTP Stream
+
+    PandaWave-->>User: Playback
+```
+
+---
+
+## Streaming Architecture
+
+```mermaid
+sequenceDiagram
+
+    participant ExoPlayer
+    participant RustFS
+
+    ExoPlayer->>RustFS: GET (presigned URL)
+    Note over ExoPlayer,RustFS: Includes Range header
+
+    RustFS->>RustFS: Validate URL signature + expiry
+
+    RustFS-->>ExoPlayer: 206 Partial Content
+
+    Note over ExoPlayer: Buffer, Seek, Decode
+```
+
+Canopy is not in this path. Once `ResolvePlayback` has returned a presigned URL, every subsequent byte of audio is served directly by RustFS to ExoPlayer.
+
+---
+
+## PlaybackSource Contract
+
+```proto
+message PlaybackSource {
+    string track_id = 1;
+
+    string stream_url = 2;
+
+    string content_type = 3;
+
+    string codec = 4;
+
+    uint64 duration_ms = 5;
+
+    uint64 expires_at_epoch_ms = 6;
+}
+```
+
+Example:
+
+```json
+{
+  "track_id": "trk_123",
+  "stream_url": "https://rustfs.pandawave.internal/pandawave-media/audio/tracks/musopen/trk_123.mp3?signature=abc123&expires=1750200000",
+  "content_type": "audio/mpeg",
+  "codec": "mp3",
+  "duration_ms": 245000,
+  "expires_at_epoch_ms": 1750200000000
+}
+```
+
+---
+
+## Discovery Channel Flow
+
+```mermaid
+sequenceDiagram
+
+    participant PandaWave
+    participant PandaEngine
+    participant Canopy
+    participant PostgreSQL
+    participant RustFS
+
+    PandaWave->>PandaEngine: DiscoveryNext()
+
+    PandaEngine->>Canopy: DiscoveryNext()
+
+    Canopy->>PostgreSQL: Read pre-shuffled materialized view
+
+    PostgreSQL-->>Canopy: Selected track
+
+    Canopy-->>PandaEngine: DiscoveryTrack
+
+    PandaEngine->>Canopy: ResolvePlayback()
+
+    Canopy-->>PandaEngine: PlaybackSource
+
+    PandaEngine-->>PandaWave: PlaybackSource
+
+    PandaWave->>RustFS: Stream Audio (presigned URL)
+
+    RustFS-->>PandaWave: Audio Stream
+```
+
+---
+
+## Audio Asset Strategy
+
+```text
+audio_assets
+├── track_id
+├── codec
+├── object_key
+├── content_type
+├── size_bytes
+└── checksum_sha256
+```
+
+Each track has one audio asset per codec it's available in. A track is never duplicated across object keys for the same codec.
+
+```text
+Track:
+    Beethoven Symphony No. 5
+
+Audio Assets:
+
+    MP3
+    object_key=audio/tracks/musopen/trk_123.mp3
+
+Future:
+
+    Opus
+    object_key=audio/tracks/musopen/trk_123.opus
+
+    FLAC
+    object_key=audio/tracks/musopen/trk_123.flac
+```
+
+---
+
+## Observability
+
+PandaEngine and Canopy share a single trace per request. A correlation ID is generated at the earliest possible point — the FFI boundary in PandaEngine — and propagated across the gRPC call to Canopy via a `tonic` interceptor, the same mechanism already used for `x-client-name` metadata. Every span from the Android call site down to Canopy's database queries is part of one trace, not two disconnected ones.
+
+`tracing` is the instrumentation layer on both sides. Prometheus metrics are layered on top once the service is running in production.
+
+---
+
+## Health Checks
+
+Canopy's health endpoint reports actual dependency health, not process liveness. Before responding, it checks PostgreSQL connectivity and RustFS reachability, and distinguishes a fully healthy state from a degraded-but-functional one (for example, RustFS reachable but slow) rather than collapsing every condition into a binary up/down signal. PandaEngine's client maps these states directly to the `HEALTHY` / `REACHABLE` / `DEGRADED` values it already expects.
+
+---
+
+## CI / Verification
+
+The CI pipeline is implemented via **GitHub Actions** (`.github/workflows/ci.yml`). Every change to `main` and every pull request is gated by:
+
+```text
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --tests -- -D warnings
+cargo fmt --all -- --check
+cargo build --workspace --release
+```
+
+The workflow installs `protoc` so that the `canopy-proto` crate's `build.rs` compiles successfully in CI, and uses `Swatinem/rust-cache` for fast incremental builds.
+
+In addition, the pipeline will eventually verify that database migrations apply cleanly against a fresh PostgreSQL instance, run integration tests against real (containerized) PostgreSQL and RustFS instances rather than mocks alone, and check that changes to the shared `canopy_proto` crate don't break wire compatibility with PandaEngine before they merge.
+
+---
+
+## Local Development
+
+Canopy ships with a full `docker-compose.yml` stack for local development and integration testing. The stack includes:
+
+| Service | Image | Role | Port |
+| ------- | ----- | ---- | ---- |
+| PostgreSQL | `postgres:18.4-trixie` | Metadata persistence (catalog, sessions, playback history) | 5432 |
+| Redis | `redis:8` | Cache layer (JadeCache: browse results, discovery pools, presigned-URL TTL) | 6379 |
+| RustFS | `rustfs/rustfs:latest` | Object storage (audio bytes, artwork, licenses) | 9000 |
+| Adminer | `adminer` | Database management UI (dev-only, opt-in) | 8080 |
+
+### Quick Start
+
+```bash
+# 1. Copy the environment template and adjust as needed
+cp .env.example .env
+
+# 2. Start the full stack
+docker compose up -d
+
+# 3. Apply database migrations (install sqlx-cli once)
+cargo install sqlx-cli --no-default-features --features native-tls,postgres
+sqlx migrate run
+
+# 4. Run the server with PostgreSQL persistence
+cargo run --bin canopy --features canopy-server/pg
+```
+
+To start only the database and cache (without RustFS or Adminer):
+
+```bash
+docker compose up -d postgres redis
+```
+
+To start Adminer (optional, for browsing the database via web UI):
+
+```bash
+docker compose --profile adminer up -d
+# Visit http://localhost:8080
+```
+
+### Service Configuration
+
+All services are configurable via environment variables. A `.env.example` is included in the repo; copy it to `.env` and override values as needed.
+
+| Variable | Default | Description |
+| ---------- | ------- | ----------- |
+| `CANOPY_POSTGRES_USER` | `canopy` | PostgreSQL username |
+| `CANOPY_POSTGRES_PASSWORD` | `canopy` | PostgreSQL password |
+| `CANOPY_POSTGRES_DB` | `canopy` | PostgreSQL database name |
+| `CANOPY_POSTGRES_PORT` | `5432` | PostgreSQL host port |
+| `CANOPY_REDIS_PORT` | `6379` | Redis host port |
+| `CANOPY_RUSTFS_BUCKET` | `pandawave-media` | RustFS media bucket |
+| `CANOPY_RUSTFS_ACCESS_KEY` | `canopy` | RustFS access key |
+| `CANOPY_RUSTFS_SECRET_KEY` | `canopy-secret` | RustFS secret key |
+| `CANOPY_RUSTFS_PORT` | `9000` | RustFS host port |
+| `CANOPY_ADMINER_PORT` | `8080` | Adminer host port |
+| `CANOPY_GRPC_ADDR` | `[::1]:50051` | gRPC server bind address |
+| `CANOPY_DATABASE_URL` | `postgres://canopy:canopy@localhost:5432/canopy` | PostgreSQL connection string |
+
+### sqlx Compile-Time Checks
+
+The `PgCatalogRepository` and related stubs use `sqlx::query!` macros, which validate SQL against a live database at compile time. For offline builds (CI, or when the database is not running), generate query metadata with:
+
+```bash
+# Ensure the database is running and migrations are applied
+docker compose up -d postgres
+sqlx migrate run
+
+# Generate offline query data
+cargo sqlx prepare --workspace
+
+# Check the generated .sqlx/ files into git
+git add .sqlx
+```
+
+CI builds can then set `SQLX_OFFLINE=true` to skip the live database requirement. The GitHub Actions workflow will be updated in a future iteration to spin up a PostgreSQL service container and run `sqlx migrate run` before `cargo check`.
+
+### Running the Server
+
+```bash
+# Default: in-memory stores (no external dependencies, no database required)
+cargo run --bin canopy
+
+# With the full persistent stack (PostgreSQL + RustFS + Redis on the roadmap):
+# 1. Start the stack
+#    docker compose up -d
+#
+# 2. Run migrations
+#    sqlx migrate run
+#
+# 3. Run with the `pg` feature — the server auto-detects PostgreSQL and falls
+#    back to in-memory stores only if the connection fails.
+cargo run --bin canopy --features canopy-server/pg
+
+# Override the database URL:
+# CANOPY_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy \
+#   cargo run --bin canopy --features canopy-server/pg
+```
+
+When the `pg` feature is enabled, the server attempts to connect to the database URL configured in `CANOPY_DATABASE_URL`. If the connection succeeds, `PgCatalogRepository`, `PgSessionRepository`, and `PgAudioAssetRepository` are used; otherwise it logs a warning and transparently falls back to the in-memory demo stores. This lets the server start standalone without a database for quick iteration, while production and integration-test deployments use the persistent backend.
+
+The `HealthService` checks PostgreSQL connectivity when a pool is present; a failed probe marks the health response as `healthy: false`.
+
+### RustFS Setup
+
+RustFS is an S3-compatible object store that serves audio bytes and artwork directly to ExoPlayer via presigned URLs. Once the container is running, create the `pandawave-media` bucket and upload demo assets:
+
+```bash
+# Create the media bucket (using the default credentials from .env.example)
+# Adjust host/port if you've overridden CANOPY_RUSTFS_PORT.
+mc alias set canopy-rustfs http://localhost:9000 canopy canopy-secret
+mc mb canopy-rustfs/pandawave-media
+
+# Upload demo audio and artwork
+mc cp demo/audio/tracks/demo-1.m4a canopy-rustfs/pandawave-media/audio/tracks/demo-1.m4a
+mc cp demo/artwork/albums/demo-album.png canopy-rustfs/pandawave-media/artwork/albums/demo-album.png
+mc cp demo/artwork/tracks/demo-1.png canopy-rustfs/pandawave-media/artwork/tracks/demo-1.png
+```
+
+> **Note:** The `mc` (MinIO Client) tool is used here because RustFS is S3-compatible. Any S3-compatible client (AWS CLI, `rclone`, `aws-sdk-s3`) works. Replace credentials and endpoint with your `.env` values if you changed them.
+
+### Redis (JadeCache)
+
+Redis is started by default but is not yet wired into the server. The `JadeCache` layer will use it for:
+- Cached `Browse` responses (keyed by path + pagination params)
+- Pre-shuffled discovery pool snapshots
+- Presigned URL TTL tracking and rate-limiting
+
+Redis configuration is defined in `docker-compose.yml` with `allkeys-lru` eviction and AOF persistence. The server will auto-connect to `redis://localhost:6379` when the cache layer is implemented.
+
+---
+
+## Recommended Technology Stack
+
+```text
+Frontend
+├── Android Automotive OS
+├── Media3
+├── ExoPlayer
+└── BambooUI
+
+Middleware
+├── Rust
+├── Tokio
+└── tonic
+
+Backend
+├── Rust
+├── tonic
+├── axum
+├── sqlx
+└── tracing
+
+Storage
+├── PostgreSQL
+├── RustFS
+└── Redis (JadeCache — planned)
+
+Observability
+├── OpenTelemetry
+├── tracing
+└── Prometheus (future)
+
+Infrastructure
+├── Docker
+├── Docker Compose
+│   ├── postgres:18.4-trixie
+│   ├── redis:8
+│   ├── rustfs/rustfs:latest
+│   └── adminer (dev profile)
+└── GitHub Actions
+```

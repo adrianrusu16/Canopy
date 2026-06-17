@@ -1,0 +1,656 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Canopy gRPC API",
+    "version": "0.1.0",
+    "description": "gRPC backend for the PandaWave media ecosystem"
+  },
+  "servers": [
+    {
+      "url": "grpc://localhost:50051",
+      "description": "gRPC server"
+    }
+  ],
+  "paths": {
+    "/canopy.Canopy/Browse": {
+      "post": {
+        "summary": "Browse media items",
+        "operationId": "Browse",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/BrowseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/Search": {
+      "post": {
+        "summary": "Search media items",
+        "operationId": "Search",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/GetMedia": {
+      "post": {
+        "summary": "Get media item by ID",
+        "operationId": "GetMedia",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/GetMediaRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetMediaResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/Play": {
+      "post": {
+        "summary": "Play media",
+        "operationId": "Play",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/PlayRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/Pause": {
+      "post": {
+        "summary": "Pause media",
+        "operationId": "Pause",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/Seek": {
+      "post": {
+        "summary": "Seek media",
+        "operationId": "Seek",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/SeekRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeekResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/SetPlaybackSpeed": {
+      "post": {
+        "summary": "Set playback speed",
+        "operationId": "SetPlaybackSpeed",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPlaybackSpeedRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetPlaybackSpeedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/Stop": {
+      "post": {
+        "summary": "Stop media",
+        "operationId": "Stop",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/StopRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/GetSession": {
+      "post": {
+        "summary": "Get session",
+        "operationId": "GetSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/GetSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetSessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/UpdateSession": {
+      "post": {
+        "summary": "Update session",
+        "operationId": "UpdateSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateSessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/EndSession": {
+      "post": {
+        "summary": "End session",
+        "operationId": "EndSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/EndSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndSessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/Health": {
+      "post": {
+        "summary": "Health check",
+        "operationId": "Health",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/HealthRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BrowseRequest": {
+        "type": "object",
+        "properties": {
+          "parent_id": {
+            "type": "string",
+            "description": "Optional parent ID; empty => root"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum number of items to return"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Offset for pagination"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional genre filter"
+          }
+        }
+      },
+      "BrowseResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaItem"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SearchRequest": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query string"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "SearchResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaItem"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "GetMediaRequest": {
+        "type": "object",
+        "properties": {
+          "media_id": {
+            "type": "string",
+            "description": "Media item ID"
+          }
+        }
+      },
+      "GetMediaResponse": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/MediaItem"
+          }
+        }
+      },
+      "MediaItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable engine-side identifier"
+          },
+          "title": {
+            "type": "string"
+          },
+          "artist": {
+            "type": "string"
+          },
+          "album": {
+            "type": "string"
+          },
+          "artwork_uri": {
+            "type": "string",
+            "description": "content://… URI that the Android resolver knows"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "-1 if unknown (e.g., live stream)"
+          },
+          "bitrate_kbps": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "mime_type": {
+            "type": "string",
+            "description": "e.g., \"audio/mp4\""
+          },
+          "is_explicit": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PlayRequest": {
+        "type": "object",
+        "properties": {
+          "media_id": {
+            "type": "string"
+          },
+          "start_pos_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Optional start position in milliseconds; default 0"
+          }
+        }
+      },
+      "PlayResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "error_msg": {
+            "type": "string"
+          }
+        }
+      },
+      "PauseRequest": {
+        "type": "object",
+        "properties": {}
+      },
+      "PauseResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SeekRequest": {
+        "type": "object",
+        "properties": {
+          "position_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SeekResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SetPlaybackSpeedRequest": {
+        "type": "object",
+        "properties": {
+          "speed": {
+            "type": "number",
+            "format": "double",
+            "description": "Playback speed (0.5 … 2.0 typical)"
+          }
+        }
+      },
+      "SetPlaybackSpeedResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StopRequest": {
+        "type": "object",
+        "properties": {}
+      },
+      "StopResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GetSessionRequest": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          }
+        }
+      },
+      "GetSessionResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "current_media_id": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "playback_speed": {
+            "type": "number",
+            "format": "double"
+          },
+          "is_playing": {
+            "type": "boolean"
+          }
+        }
+      },
+      "UpdateSessionRequest": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "media_id": {
+            "type": "string",
+            "description": "New media to load (optional)"
+          },
+          "position_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seek to this position on load (optional)"
+          }
+        }
+      },
+      "UpdateSessionResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "EndSessionRequest": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          }
+        }
+      },
+      "EndSessionResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "HealthRequest": {
+        "type": "object",
+        "properties": {}
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "healthy": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
