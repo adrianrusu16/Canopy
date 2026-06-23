@@ -13,6 +13,10 @@ pub struct Config {
     pub grpc_addr: SocketAddr,
     /// PostgreSQL connection string for the persistence layer.
     pub database_url: String,
+    /// Maximum number of PostgreSQL connections in the pool.
+    pub pg_max_connections: u32,
+    /// Timeout (seconds) for acquiring a connection from the pool.
+    pub pg_acquire_timeout_secs: u64,
     /// RustFS (S3-compatible object storage) base URL.
     pub rustfs_url: String,
     /// RustFS bucket name for the media store.
@@ -29,8 +33,11 @@ impl Config {
     /// Default gRPC bind address used when `CANOPY_GRPC_ADDR` is not set.
     const DEFAULT_GRPC_ADDR: &'static str = "[::1]:50051";
     /// Default database URL used when `CANOPY_DATABASE_URL` is not set.
-    const DEFAULT_DATABASE_URL: &'static str =
-        "postgres://canopy:canopy@localhost:5432/canopy";
+    const DEFAULT_DATABASE_URL: &'static str = "postgres://canopy:canopy@localhost:5432/canopy";
+    /// Default max connections in the PostgreSQL pool.
+    const DEFAULT_PG_MAX_CONNECTIONS: u32 = 20;
+    /// Default timeout (seconds) for acquiring a pool connection.
+    const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 5;
     /// Default RustFS base URL.
     const DEFAULT_RUSTFS_URL: &'static str = "http://localhost:9000";
     /// Default RustFS media bucket name.
@@ -47,6 +54,8 @@ impl Config {
     /// Recognized variables:
     /// * `CANOPY_GRPC_ADDR` — socket address the gRPC server binds to.
     /// * `CANOPY_DATABASE_URL` — PostgreSQL connection string.
+    /// * `CANOPY_PG_MAX_CONNECTIONS` — max pool size (default 20).
+    /// * `CANOPY_PG_ACQUIRE_TIMEOUT_SECS` — pool acquire timeout (default 5).
     /// * `CANOPY_RUSTFS_URL` — RustFS base URL.
     /// * `CANOPY_RUSTFS_BUCKET` — RustFS media bucket name.
     /// * `CANOPY_RUSTFS_ACCESS_KEY` — RustFS access key.
@@ -60,8 +69,18 @@ impl Config {
         let database_url = env::var("CANOPY_DATABASE_URL")
             .unwrap_or_else(|_| Self::DEFAULT_DATABASE_URL.to_string());
 
-        let rustfs_url = env::var("CANOPY_RUSTFS_URL")
-            .unwrap_or_else(|_| Self::DEFAULT_RUSTFS_URL.to_string());
+        let pg_max_connections = env::var("CANOPY_PG_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(Self::DEFAULT_PG_MAX_CONNECTIONS);
+
+        let pg_acquire_timeout_secs = env::var("CANOPY_PG_ACQUIRE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(Self::DEFAULT_PG_ACQUIRE_TIMEOUT_SECS);
+
+        let rustfs_url =
+            env::var("CANOPY_RUSTFS_URL").unwrap_or_else(|_| Self::DEFAULT_RUSTFS_URL.to_string());
 
         let rustfs_bucket = env::var("CANOPY_RUSTFS_BUCKET")
             .unwrap_or_else(|_| Self::DEFAULT_RUSTFS_BUCKET.to_string());
@@ -72,12 +91,14 @@ impl Config {
         let rustfs_secret_key = env::var("CANOPY_RUSTFS_SECRET_KEY")
             .unwrap_or_else(|_| Self::DEFAULT_RUSTFS_SECRET_KEY.to_string());
 
-        let redis_url = env::var("CANOPY_REDIS_URL")
-            .unwrap_or_else(|_| Self::DEFAULT_REDIS_URL.to_string());
+        let redis_url =
+            env::var("CANOPY_REDIS_URL").unwrap_or_else(|_| Self::DEFAULT_REDIS_URL.to_string());
 
         Ok(Self {
             grpc_addr,
             database_url,
+            pg_max_connections,
+            pg_acquire_timeout_secs,
             rustfs_url,
             rustfs_bucket,
             rustfs_access_key,

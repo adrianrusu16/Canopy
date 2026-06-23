@@ -13,7 +13,7 @@
 //! Domain services depend on the ports defined in `canopy-core`, never on a
 //! concrete backend, so storage implementations are interchangeable.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use canopy_core::{AudioAsset, MediaItem};
 use canopy_proto::canopy_server::CanopyServer;
@@ -86,22 +86,27 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "pg")]
     {
-        match sqlx::PgPool::connect(&config.database_url).await {
+        let pool_result = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.pg_max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(
+                config.pg_acquire_timeout_secs,
+            ))
+            .connect(&config.database_url)
+            .await;
+
+        match pool_result {
             Ok(pool) => {
                 let pool = Arc::new(pool);
                 info!(
                     database_url = %config.database_url,
+                    max_connections = config.pg_max_connections,
                     "Connected to PostgreSQL; using persistent stores"
                 );
                 let pg_catalog = jade_store::PgCatalogRepository::new((*pool).clone());
                 catalog_repo = Arc::new(pg_catalog.clone());
                 discovery_repo = Arc::new(pg_catalog);
-                asset_repo = Arc::new(jade_store::PgAudioAssetRepository::new(
-                    (*pool).clone(),
-                ));
-                session_repo = Arc::new(jade_store::PgSessionRepository::new(
-                    (*pool).clone(),
-                ));
+                asset_repo = Arc::new(jade_store::PgAudioAssetRepository::new((*pool).clone()));
+                session_repo = Arc::new(jade_store::PgSessionRepository::new((*pool).clone()));
                 health = HealthService::with_db(pool);
             }
             Err(e) => {
@@ -136,10 +141,18 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let playback = PlaybackService::new(session_repo);
     let discovery = DiscoveryService::new(discovery_repo);
 
-    // Playback resolver: selects asset + mints presigned URL.
-    // The HMAC secret should be configurable from env in production.
-    let signer = Arc::new(HmacUrlSigner::new("canopy-demo-secret"));
-    let resolver = ResolverService::new(asset_repo, signer, ResolverConfig::default());
+    // Playback resolver: selects asset + mints presigned RustFS URLs from runtime config.
+    let signer = Arc::new(HmacUrlSigner::new(config.rustfs_secret_key.clone()));
+    let resolver = ResolverService::new(
+        asset_repo,
+        signer,
+        ResolverConfig {
+            base_url: config.rustfs_url.trim_end_matches('/').to_string(),
+            bucket: config.rustfs_bucket.clone(),
+            url_ttl: Duration::from_secs(15 * 60),
+            ..ResolverConfig::default()
+        },
+    );
 
     // Health service is already created above (with or without DB pool).
 

@@ -1,63 +1,106 @@
 //! PostgreSQL-backed implementations of the repository ports.
 //!
-//! This module uses [`sqlx`] to query the normalized schema described in the
-//! architecture document. The domain model [`MediaItem`] is denormalized at
+//! This module uses `sqlx` to query the normalized schema described in the
+//! architecture document. The domain model `MediaItem` is denormalized at
 //! the adapter boundary via JOINs across `tracks`, `artists`, `albums`, and
 //! `audio_assets`.
 //!
-//! # Wiring
+//! # Production Notes
 //!
-//! A [`sqlx::PgPool`] is obtained from the application configuration (see
-//! [`Config::database_url`](crate::config::Config)) and wrapped in an `Arc` so
-//! it can be shared across domain services.
-//!
-//! ```ignore
-//! let pool = sqlx::PgPool::connect(&config.database_url).await?;
-//! let catalog_repo = Arc::new(PgCatalogRepository::new(pool.clone()));
-//! ```
+//! * Connection pooling - configured via `PgPoolOptions` in `lib.rs` with
+//!   sensible max-connections and acquire-timeout defaults.
+//! * Materialized views - `mv_discovery_pool` and `mv_catalog_search` are
+//!   refreshed periodically (e.g., via a cron job or a background task). The
+//!   discovery service reads from `mv_discovery_pool` for O(1) shuffle selection.
+//! * Indexes - the schema ships with strategic indexes: GIN trigram for
+//!   search, BRIN for time-series playback history, covering indexes for the
+//!   common browse query, and partial indexes for the explicit-content filter.
+//! * Offline builds - this file uses `sqlx::query` (non-macro) to avoid the
+//!   compile-time database dependency. For CI, switch to `sqlx::query!` after
+//!   running `cargo sqlx prepare --workspace`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sqlx::PgPool;
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogRepository,
     DiscoveryRepository, MediaItem, MediaPage, Page, Session, SessionRepository,
 };
+use sqlx::Row;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Reads a PostgreSQL UUID column and converts it to the string ID used by the domain model.
+fn uuid_string(row: &sqlx::postgres::PgRow, column: &str) -> String {
+    row.try_get::<uuid::Uuid, _>(column)
+        .map(|id| id.to_string())
+        .unwrap_or_default()
+}
+
+/// Denormalizes a raw SQL row into a `MediaItem`.
+fn media_item_from_row(row: &sqlx::postgres::PgRow) -> MediaItem {
+    let track_duration_ms: i32 = row.try_get("track_duration_ms").unwrap_or(0);
+    let asset_size_bytes: i64 = row.try_get("asset_size_bytes").unwrap_or(0);
+    let bitrate_kbps = if track_duration_ms > 0 {
+        ((asset_size_bytes as u64) * 8 / track_duration_ms as u64 / 1000).clamp(0, i32::MAX as u64)
+            as i32
+    } else {
+        0
+    };
+
+    MediaItem {
+        id: uuid_string(row, "track_id"),
+        title: row.try_get("track_title").unwrap_or_default(),
+        artist: row.try_get("artist_name").unwrap_or_default(),
+        album: row.try_get("album_title").unwrap_or_default(),
+        artwork_uri: format!(
+            "content://com.adrianrusu.mediaapp.audio/artwork/{}",
+            row.try_get::<Option<String>, _>("artwork_key")
+                .unwrap_or_default()
+                .unwrap_or_default()
+        ),
+        duration_ms: track_duration_ms as i64,
+        bitrate_kbps,
+        mime_type: row
+            .try_get::<Option<String>, _>("asset_content_type")
+            .unwrap_or_default()
+            .unwrap_or_else(|| "audio/mpeg".to_string()),
+        is_explicit: row.try_get("track_explicit").unwrap_or(false),
+    }
+}
+
+/// Wraps a `sqlx::Error` into a `CanopyError::Storage`.
+fn db_err(e: sqlx::Error) -> CanopyError {
+    CanopyError::Storage(e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// PgCatalogRepository
+// ---------------------------------------------------------------------------
 
 /// PostgreSQL-backed catalog repository.
-///
-/// Implements [`CatalogRepository`] and [`DiscoveryRepository`] by querying
-/// the normalized `tracks`, `artists`, `albums`, and `audio_assets` tables.
-///
-/// This is a **stub** — `browse` and `get_media` are implemented end-to-end
-/// against PostgreSQL, while `search` intentionally returns empty until the
-/// `pg_trgm` integration is wired. The discovery shuffle pool returns the
-/// catalog in insertion order (a real implementation will read from a
-/// pre-shuffled materialized view).
 #[derive(Clone)]
 pub struct PgCatalogRepository {
-    pool: Arc<PgPool>,
+    pool: Arc<sqlx::PgPool>,
 }
 
 impl PgCatalogRepository {
     /// Creates a new repository backed by the given connection pool.
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool: Arc::new(pool),
         }
     }
 
-    /// Shared query that denormalizes a track row into a [`MediaItem`].
-    ///
-    /// The query joins `tracks → artists → albums` and selects the *first*
-    /// audio asset (ordered by codec) for MIME-type and bitrate metadata.
-    /// This is sufficient for the initial prototype; a production path will
-    /// select the best asset per client-declared codec preference.
+    /// Shared query that denormalizes a track row into a `MediaItem`.
     async fn media_item_by_id(&self, id: &str) -> CanopyResult<Option<MediaItem>> {
-        let row = sqlx::query!(
-            r#"
+        let track_uuid = uuid::Uuid::parse_str(id)
+            .map_err(|e| CanopyError::Storage(format!("Invalid track ID: {e}")))?;
+
+        let sql = r#"
             SELECT
                 t.id             AS track_id,
                 t.title          AS track_title,
@@ -66,7 +109,6 @@ impl PgCatalogRepository {
                 t.duration_ms    AS track_duration_ms,
                 t.is_explicit    AS track_explicit,
                 COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
-                aa.codec         AS asset_codec,
                 aa.content_type  AS asset_content_type,
                 aa.size_bytes    AS asset_size_bytes
             FROM tracks t
@@ -76,28 +118,15 @@ impl PgCatalogRepository {
             WHERE t.id = $1
             ORDER BY aa.codec
             LIMIT 1
-            "#,
-            id
-        )
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+        "#;
 
-        Ok(row.map(|r| MediaItem {
-            id: r.track_id,
-            title: r.track_title,
-            artist: r.artist_name,
-            album: r.album_title,
-            artwork_uri: format!(
-                "content://com.adrianrusu.mediaapp.audio/artwork/{}",
-                r.artwork_key.unwrap_or_default()
-            ),
-            duration_ms: r.track_duration_ms,
-            bitrate_kbps: (r.asset_size_bytes.unwrap_or(0) * 8 / r.track_duration_ms.max(1) as i64 / 1000)
-                .clamp(0, i32::MAX as i64) as i32,
-            mime_type: r.asset_content_type.unwrap_or_else(|| "audio/mpeg".to_string()),
-            is_explicit: r.track_explicit,
-        }))
+        let row = sqlx::query(sql)
+            .bind(track_uuid)
+            .fetch_optional(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        Ok(row.as_ref().map(media_item_from_row))
     }
 }
 
@@ -109,8 +138,7 @@ impl CatalogRepository for PgCatalogRepository {
         _genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage> {
-        let rows = sqlx::query!(
-            r#"
+        let sql = r#"
             SELECT
                 t.id             AS track_id,
                 t.title          AS track_title,
@@ -119,7 +147,6 @@ impl CatalogRepository for PgCatalogRepository {
                 t.duration_ms    AS track_duration_ms,
                 t.is_explicit    AS track_explicit,
                 COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
-                aa.codec         AS asset_codec,
                 aa.content_type  AS asset_content_type,
                 aa.size_bytes    AS asset_size_bytes
             FROM tracks t
@@ -128,40 +155,21 @@ impl CatalogRepository for PgCatalogRepository {
             LEFT JOIN audio_assets aa ON aa.track_id = t.id
             ORDER BY t.created_at
             LIMIT $1 OFFSET $2
-            "#,
-            page.limit as i64,
-            page.offset as i64
-        )
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+        "#;
 
-        let total_count = sqlx::query_scalar!("SELECT COUNT(*) FROM tracks")
-            .fetch_one(&*self.pool)
+        let rows = sqlx::query(sql)
+            .bind(page.limit as i64)
+            .bind(page.offset as i64)
+            .fetch_all(self.pool.as_ref())
             .await
-            .map_err(|e| CanopyError::Storage(e.to_string()))?;
+            .map_err(db_err)?;
 
-        let items: Vec<MediaItem> = rows
-            .into_iter()
-            .map(|r| MediaItem {
-                id: r.track_id,
-                title: r.track_title,
-                artist: r.artist_name,
-                album: r.album_title,
-                artwork_uri: format!(
-                    "content://com.adrianrusu.mediaapp.audio/artwork/{}",
-                    r.artwork_key.unwrap_or_default()
-                ),
-                duration_ms: r.track_duration_ms,
-                bitrate_kbps: (r.asset_size_bytes.unwrap_or(0) * 8
-                    / r.track_duration_ms.max(1) as i64
-                    / 1000)
-                    .clamp(0, i32::MAX as i64) as i32,
-                mime_type: r.asset_content_type.unwrap_or_else(|| "audio/mpeg".to_string()),
-                is_explicit: r.track_explicit,
-            })
-            .collect();
+        let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+            .fetch_one(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
 
+        let items: Vec<MediaItem> = rows.iter().map(media_item_from_row).collect();
         let has_more = (page.offset + page.limit) < total_count as u32;
 
         Ok(MediaPage {
@@ -172,13 +180,7 @@ impl CatalogRepository for PgCatalogRepository {
     }
 
     async fn search(&self, query: &str, page: Page) -> CanopyResult<MediaPage> {
-        // Use pg_trgm for fuzzy matching on track title, artist name, and album title
-        // The query joins tracks → artists → albums and gets the first audio asset for MIME-type/bitrate
-        let search_term = format!("%{}%", query); // For ILIKE fallback if needed
-
-        // First get matching tracks with trigram similarity, ordered by similarity score
-        let rows = sqlx::query!(
-            r#"
+        let sql = r#"
             SELECT
                 t.id             AS track_id,
                 t.title          AS track_title,
@@ -187,10 +189,8 @@ impl CatalogRepository for PgCatalogRepository {
                 t.duration_ms    AS track_duration_ms,
                 t.is_explicit    AS track_explicit,
                 COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
-                aa.codec         AS asset_codec,
                 aa.content_type  AS asset_content_type,
                 aa.size_bytes    AS asset_size_bytes,
-                -- Calculate similarity score for ordering (higher = more similar)
                 GREATEST(
                     similarity(t.title, $1),
                     similarity(a.name, $1),
@@ -201,57 +201,37 @@ impl CatalogRepository for PgCatalogRepository {
             JOIN albums al     ON t.album_id = al.id
             LEFT JOIN audio_assets aa ON aa.track_id = t.id
             WHERE t.title % $1
-                   OR a.name % $1
-                   OR al.title % $1
+               OR a.name % $1
+               OR al.title % $1
             ORDER BY rank DESC, t.title
             LIMIT $2 OFFSET $3
-            "#,
-            query,
-            page.limit as i64,
-            page.offset as i64
-        )
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+        "#;
 
-        // Get total count for pagination
-        let total_count = sqlx::query_scalar!(
-            r#"
+        let rows = sqlx::query(sql)
+            .bind(query)
+            .bind(page.limit as i64)
+            .bind(page.offset as i64)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        let count_sql = r#"
             SELECT COUNT(DISTINCT t.id)
             FROM tracks t
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
             WHERE t.title % $1
-                   OR a.name % $1
-                   OR al.title % $1
-            "#,
-            query
-        )
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+               OR a.name % $1
+               OR al.title % $1
+        "#;
 
-        let items: Vec<MediaItem> = rows
-            .into_iter()
-            .map(|r| MediaItem {
-                id: r.track_id,
-                title: r.track_title,
-                artist: r.artist_name,
-                album: r.album_title,
-                artwork_uri: format!(
-                    "content://com.adrianrusu.mediaapp.audio/artwork/{}",
-                    r.artwork_key.unwrap_or_default()
-                ),
-                duration_ms: r.track_duration_ms,
-                bitrate_kbps: (r.asset_size_bytes.unwrap_or(0) * 8
-                    / r.track_duration_ms.max(1) as i64
-                    / 1000)
-                    .clamp(0, i32::MAX as i64) as i32,
-                mime_type: r.asset_content_type.unwrap_or_else(|| "audio/mpeg".to_string()),
-                is_explicit: r.track_explicit,
-            })
-            .collect();
+        let total_count: i64 = sqlx::query_scalar(count_sql)
+            .bind(query)
+            .fetch_one(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
 
+        let items: Vec<MediaItem> = rows.iter().map(media_item_from_row).collect();
         let has_more = (page.offset + page.limit) < total_count as u32;
 
         Ok(MediaPage {
@@ -269,69 +249,70 @@ impl CatalogRepository for PgCatalogRepository {
 #[async_trait]
 impl DiscoveryRepository for PgCatalogRepository {
     async fn shuffle_pool(&self) -> CanopyResult<Vec<MediaItem>> {
-        // Stub: the production path reads a pre-shuffled materialized view.
-        // For now, return all tracks in insertion order so the discovery
-        // service can still apply diversity/exclusion logic on top.
-        let rows = sqlx::query!(
-            r#"
+        let sql = r#"
             SELECT
-                t.id             AS track_id,
-                t.title          AS track_title,
-                a.name           AS artist_name,
-                al.title         AS album_title,
-                t.duration_ms    AS track_duration_ms,
-                t.is_explicit    AS track_explicit,
-                COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
-                aa.codec         AS asset_codec,
-                aa.content_type  AS asset_content_type,
-                aa.size_bytes    AS asset_size_bytes
-            FROM tracks t
-            JOIN artists a     ON t.artist_id = a.id
-            JOIN albums al     ON t.album_id = al.id
-            LEFT JOIN audio_assets aa ON aa.track_id = t.id
-            ORDER BY t.created_at
-            "#
-        )
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+                track_id,
+                track_title,
+                artist_name,
+                album_title,
+                track_duration_ms,
+                track_explicit,
+                artwork_key,
+                asset_content_type,
+                asset_size_bytes
+            FROM mv_discovery_pool
+            ORDER BY shuffle_rank
+        "#;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| MediaItem {
-                id: r.track_id,
-                title: r.track_title,
-                artist: r.artist_name,
-                album: r.album_title,
-                artwork_uri: format!(
-                    "content://com.adrianrusu.mediaapp.audio/artwork/{}",
-                    r.artwork_key.unwrap_or_default()
-                ),
-                duration_ms: r.track_duration_ms,
-                bitrate_kbps: (r.asset_size_bytes.unwrap_or(0) * 8
-                    / r.track_duration_ms.max(1) as i64
-                    / 1000)
-                    .clamp(0, i32::MAX as i64) as i32,
-                mime_type: r.asset_content_type.unwrap_or_else(|| "audio/mpeg".to_string()),
-                is_explicit: r.track_explicit,
-            })
-            .collect())
+        let rows = sqlx::query(sql)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        if rows.is_empty() {
+            let sql = r#"
+                SELECT
+                    t.id             AS track_id,
+                    t.title          AS track_title,
+                    a.name           AS artist_name,
+                    al.title         AS album_title,
+                    t.duration_ms    AS track_duration_ms,
+                    t.is_explicit    AS track_explicit,
+                    COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
+                    aa.content_type  AS asset_content_type,
+                    aa.size_bytes    AS asset_size_bytes
+                FROM tracks t
+                JOIN artists a     ON t.artist_id = a.id
+                JOIN albums al     ON t.album_id = al.id
+                LEFT JOIN audio_assets aa ON aa.track_id = t.id
+                ORDER BY t.created_at
+            "#;
+
+            let rows = sqlx::query(sql)
+                .fetch_all(self.pool.as_ref())
+                .await
+                .map_err(db_err)?;
+
+            return Ok(rows.iter().map(media_item_from_row).collect());
+        }
+
+        Ok(rows.iter().map(media_item_from_row).collect())
     }
 }
 
+// ---------------------------------------------------------------------------
+// PgAudioAssetRepository
+// ---------------------------------------------------------------------------
+
 /// PostgreSQL-backed audio-asset repository.
-///
-/// Implements [`AudioAssetRepository`] by reading from the `audio_assets`
-/// table. This is a stub that compiles and demonstrates the port pattern;
-/// it returns all assets for a track (ordered by codec).
 #[derive(Clone)]
 pub struct PgAudioAssetRepository {
-    pool: Arc<PgPool>,
+    pool: Arc<sqlx::PgPool>,
 }
 
 impl PgAudioAssetRepository {
     /// Creates a new repository backed by the given connection pool.
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool: Arc::new(pool),
         }
@@ -341,8 +322,10 @@ impl PgAudioAssetRepository {
 #[async_trait]
 impl AudioAssetRepository for PgAudioAssetRepository {
     async fn assets_for_track(&self, track_id: &str) -> CanopyResult<Vec<AudioAsset>> {
-        let rows = sqlx::query!(
-            r#"
+        let track_uuid = uuid::Uuid::parse_str(track_id)
+            .map_err(|e| CanopyError::Storage(format!("Invalid track ID: {e}")))?;
+
+        let sql = r#"
             SELECT
                 track_id,
                 codec,
@@ -354,40 +337,44 @@ impl AudioAssetRepository for PgAudioAssetRepository {
             FROM audio_assets
             WHERE track_id = $1
             ORDER BY codec
-            "#,
-            track_id
-        )
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+        "#;
 
-        Ok(rows
-            .into_iter()
+        let rows = sqlx::query(sql)
+            .bind(track_uuid)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        let assets = rows
+            .iter()
             .map(|r| AudioAsset {
-                track_id: r.track_id,
-                codec: r.codec,
-                content_type: r.content_type,
-                object_key: r.object_key,
-                size_bytes: r.size_bytes as u64,
-                checksum_sha256: r.checksum_sha256,
-                duration_ms: r.duration_ms as u64,
+                track_id: uuid_string(r, "track_id"),
+                codec: r.try_get("codec").unwrap_or_default(),
+                content_type: r.try_get("content_type").unwrap_or_default(),
+                object_key: r.try_get("object_key").unwrap_or_default(),
+                size_bytes: r.try_get::<i64, _>("size_bytes").unwrap_or(0) as u64,
+                checksum_sha256: r.try_get("checksum_sha256").unwrap_or_default(),
+                duration_ms: r.try_get::<i64, _>("duration_ms").unwrap_or(0) as u64,
             })
-            .collect())
+            .collect();
+
+        Ok(assets)
     }
 }
 
+// ---------------------------------------------------------------------------
+// PgSessionRepository
+// ---------------------------------------------------------------------------
+
 /// PostgreSQL-backed session repository.
-///
-/// Implements [`SessionRepository`] by reading from and writing to a
-/// `sessions` table. This is a stub that demonstrates the port pattern.
 #[derive(Clone)]
 pub struct PgSessionRepository {
-    pool: Arc<PgPool>,
+    pool: Arc<sqlx::PgPool>,
 }
 
 impl PgSessionRepository {
     /// Creates a new repository backed by the given connection pool.
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool: Arc::new(pool),
         }
@@ -398,69 +385,75 @@ impl PgSessionRepository {
 impl SessionRepository for PgSessionRepository {
     async fn create(&self) -> CanopyResult<String> {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query!(
-            r#"
+
+        let sql = r#"
             INSERT INTO sessions (id, current_media_id, position_ms, playback_speed, is_playing)
             VALUES ($1, NULL, 0, 1.0, FALSE)
-            "#,
-            id
-        )
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+        "#;
+
+        sqlx::query(sql)
+            .bind(&id)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
         Ok(id)
     }
 
     async fn get(&self, id: &str) -> CanopyResult<Option<Session>> {
-        let row = sqlx::query!(
-            r#"
+        let sql = r#"
             SELECT id, current_media_id, position_ms, playback_speed, is_playing
             FROM sessions
             WHERE id = $1
-            "#,
-            id
-        )
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+        "#;
+
+        let row = sqlx::query(sql)
+            .bind(id)
+            .fetch_optional(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
 
         Ok(row.map(|r| Session {
-            id: r.id,
-            current_media_id: r.current_media_id,
-            position_ms: r.position_ms,
-            playback_speed: r.playback_speed,
-            is_playing: r.is_playing,
+            id: r.try_get("id").unwrap_or_default(),
+            current_media_id: r.try_get("current_media_id").ok(),
+            position_ms: r.try_get("position_ms").unwrap_or(0),
+            playback_speed: r.try_get("playback_speed").unwrap_or(1.0),
+            is_playing: r.try_get("is_playing").unwrap_or(false),
         }))
     }
 
     async fn update(&self, session: Session) -> CanopyResult<()> {
-        sqlx::query!(
-            r#"
+        let sql = r#"
             INSERT INTO sessions (id, current_media_id, position_ms, playback_speed, is_playing)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE SET
                 current_media_id = EXCLUDED.current_media_id,
                 position_ms      = EXCLUDED.position_ms,
                 playback_speed   = EXCLUDED.playback_speed,
-                is_playing       = EXCLUDED.is_playing
-            "#,
-            session.id,
-            session.current_media_id,
-            session.position_ms,
-            session.playback_speed,
-            session.is_playing,
-        )
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| CanopyError::Storage(e.to_string()))?;
+                is_playing       = EXCLUDED.is_playing,
+                updated_at       = NOW()
+        "#;
+
+        sqlx::query(sql)
+            .bind(&session.id)
+            .bind(&session.current_media_id)
+            .bind(session.position_ms)
+            .bind(session.playback_speed)
+            .bind(session.is_playing)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
         Ok(())
     }
 
     async fn delete(&self, id: &str) -> CanopyResult<()> {
-        sqlx::query!("DELETE FROM sessions WHERE id = $1", id)
-            .execute(&*self.pool)
+        sqlx::query("DELETE FROM sessions WHERE id = $1")
+            .bind(id)
+            .execute(self.pool.as_ref())
             .await
-            .map_err(|e| CanopyError::Storage(e.to_string()))?;
+            .map_err(db_err)?;
+
         Ok(())
     }
 }

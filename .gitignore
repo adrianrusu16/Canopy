@@ -1,1 +1,28 @@
-/target
+# Build artifacts
+target/
+
+# Claude Code (keep locally but don't track)
+.agents/
+.claude/
+skills-lock.json
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Graphify outputs (can be regenerated)
+graphify-out/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Misc
+.DS_Store
+Thumbs.db

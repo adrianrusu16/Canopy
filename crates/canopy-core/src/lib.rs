@@ -16,8 +16,8 @@ pub use model::{
     ProviderTrack, Session, UserIdentity,
 };
 pub use repository::{
-    AudioAssetRepository, CatalogIngest, CatalogRepository, DiscoveryRepository, SessionRepository,
-    IngestBatchResult,
+    AudioAssetRepository, CatalogIngest, CatalogRepository, DiscoveryRepository, IngestBatchResult,
+    SessionRepository,
 };
 
 pub use signing::UrlSigner;

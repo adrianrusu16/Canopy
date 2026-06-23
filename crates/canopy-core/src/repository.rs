@@ -85,10 +85,7 @@ pub trait CatalogIngest: Send + Sync {
 
     /// Ingests a batch of provider tracks, returning the number successfully
     /// written and a list of failures.
-    async fn ingest_batch(
-        &self,
-        tracks: Vec<ProviderTrack>,
-    ) -> CanopyResult<IngestBatchResult>;
+    async fn ingest_batch(&self, tracks: Vec<ProviderTrack>) -> CanopyResult<IngestBatchResult>;
 }
 
 /// Result of a batch ingestion operation.

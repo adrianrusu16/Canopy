@@ -5,6 +5,7 @@
 //! reachability, degraded states) described in the architecture is a planned
 //! addition.
 
+#[cfg(feature = "pg")]
 use std::sync::Arc;
 
 /// Outcome of a health probe.
@@ -35,7 +36,9 @@ impl HealthService {
     #[cfg(feature = "pg")]
     /// Creates a new health service that checks PostgreSQL connectivity.
     pub fn with_db(pool: Arc<sqlx::PgPool>) -> Self {
-        Self { db_pool: Some(pool) }
+        Self {
+            db_pool: Some(pool),
+        }
     }
 
     /// Returns the current health status.
@@ -43,9 +46,11 @@ impl HealthService {
     /// When a PostgreSQL pool is attached, a lightweight `SELECT 1` probe is
     /// run; failure marks the status as unhealthy.
     pub async fn check(&self) -> HealthStatus {
+        #[allow(unused_mut)]
         let mut healthy = true;
 
         #[cfg(feature = "pg")]
+        #[allow(clippy::collapsible_if)]
         if let Some(pool) = &self.db_pool {
             if sqlx::query("SELECT 1")
                 .fetch_optional(pool.as_ref())

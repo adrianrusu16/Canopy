@@ -19,7 +19,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use canopy_core::{CanopyError, CanopyResult, UserIdentity};
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;

@@ -7,7 +7,7 @@
 //! path.
 
 use canopy_core::UrlSigner;
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;

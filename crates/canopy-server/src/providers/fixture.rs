@@ -49,6 +49,7 @@ use crate::providers::adapter::ProviderAdapter;
 /// ]
 /// ```
 pub struct TestFixtureProvider {
+    #[allow(dead_code)]
     path: String,
     tracks: Vec<ProviderTrack>,
 }

@@ -15,7 +15,7 @@ INSERT INTO albums (id, title, artist_id, release_year, artwork_key) VALUES
     ('44444444-4444-4444-4444-444444444444', 'Demo Album', '33333333-3333-3333-3333-333333333333', 2024, 'artwork/albums/demo-album.png');
 
 INSERT INTO tracks (id, title, artist_id, album_id, duration_ms, license_id, is_explicit, artwork_key) VALUES
-    ('demo-1', 'Demo Track', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', 240000, '22222222-2222-2222-2222-222222222222', false, 'artwork/tracks/demo-1.png');
+    ('369d3897-8977-430c-b7dd-4a288505a22b', 'Demo Track', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', 240000, '22222222-2222-2222-2222-222222222222', false, 'artwork/tracks/demo-1.png');
 
 INSERT INTO audio_assets (track_id, codec, content_type, object_key, size_bytes, checksum_sha256, duration_ms) VALUES
-    ('demo-1', 'mp4', 'audio/mp4', 'audio/tracks/demo-1.m4a', 9600000, '0000000000000000000000000000000000000000000000000000000000000000', 240000);
+    ('369d3897-8977-430c-b7dd-4a288505a22b', 'mp4', 'audio/mp4', 'audio/tracks/demo-1.m4a', 9600000, '0000000000000000000000000000000000000000000000000000000000000000', 240000);
