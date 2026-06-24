@@ -11,18 +11,18 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (wire contract), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (domain services + `api::grpc` adapter + `jade_store`). |
 | gRPC server (`tonic`)     | 🟡 Prototype   | `ResolvePlayback` and `DiscoveryNext` RPCs are now wired via the target proto contract. `Search` and `Browse` still use the demo response shape (not streaming `SearchResult` yet). |
 | Configuration             | ✅ Implemented | Env-driven `Config` (`CANOPY_GRPC_ADDR`, `CANOPY_DATABASE_URL`) with sensible defaults. |
-| Catalog service           | 🟡 Prototype   | `CatalogService` over the `CatalogRepository` port; in-memory `jade_store` impl, no persistence. |
+| Catalog service           | 🟡 Prototype   | `CatalogService` over the `CatalogRepository` port; in-memory and PostgreSQL `jade_store` implementations are available, with browse/get/search backed by PostgreSQL when the `pg` feature is enabled. |
 | Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs are stubs. |
-| Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. Matching is still a trivial in-memory match, not PostgreSQL full-text/trigram. |
-| Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. The pre-shuffled materialized view (vs. in-memory pool) is still planned. |
-| Playback Resolver         | 🟡 Prototype   | `ResolverService` over the `AudioAssetRepository` + `UrlSigner` ports: codec-preference asset selection, TTL expiry, and HMAC-SHA256 presigned `PlaybackSource` URLs (stateless verify). `ResolvePlayback` gRPC RPC is wired. In-memory assets; PostgreSQL/RustFS backend still planned. |
+| Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
+| Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. PostgreSQL mode reads `mv_discovery_pool`, a pre-shuffled materialized view with one representative asset per track. |
+| Playback Resolver         | 🟡 Prototype   | `ResolverService` over the `AudioAssetRepository` + `UrlSigner` ports: codec-preference asset selection, TTL expiry, and HMAC-SHA256 presigned `PlaybackSource` URLs (stateless verify). `ResolvePlayback` gRPC RPC is wired; PostgreSQL mode reads persisted `audio_assets`, while RustFS request-path validation is still planned. |
 | Auth (end-user + service) | 🔴 Planned     | No mTLS / session-token enforcement yet.                                                     |
-| Provider Adapters         | 🔴 Planned     | Musopen/Pixabay/Internet Archive ingestion not implemented.                                 |
-| Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` dependency added, schema migrations, `docker-compose.yml`, and `PgCatalogRepository` / `PgSessionRepository` / `PgAudioAssetRepository` stubs implemented. Wired into `lib.rs` startup with auto-detection: connects to PostgreSQL when `pg` feature is enabled, falls back to in-memory stores on failure. In-memory stores still default when feature is off. |                                          |
+| Provider Adapters         | 🟡 Partial     | Provider-facing ports and fixture adapter exist; PostgreSQL `CatalogIngest` now transactionally upserts provider tracks, licenses, albums, artists, audio assets, and provider identity mappings. Musopen/Pixabay/Internet Archive adapters are still planned. |
+| Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` migrations, Docker Compose, typed repository ports, `PgCatalogRepository`, `PgSessionRepository`, `PgAudioAssetRepository`, and transactional provider ingest are implemented. PostgreSQL mode auto-detects the DB under the `pg` feature and falls back to in-memory stores on connection failure. |
 | Storage (RustFS)          | 🔴 Planned     | No RustFS integration in the request path yet.                                              |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
 | Health checks             | 🟡 Partial     | `HealthService` reports liveness + version + PostgreSQL connectivity (via `SELECT 1` probe when `pg` feature is on). RustFS reachability and degraded-state distinction still planned. |
-| CI / Verification         | 🟡 Partial     | GitHub Actions pipeline runs `cargo test`/`clippy`/`fmt` and `cargo build --release` on every PR and push to `main`. Migration checks, integration tests, and proto wire-compatibility gates are planned. |
+| CI / Verification         | 🟡 Partial     | GitHub Actions pipeline runs `cargo test`/`clippy`/`fmt` and `cargo build --release`. Local Postgres integration tests cover migrations, transactional provider ingest, multi-asset tracks, and discovery materialization; CI DB service wiring and proto compatibility gates are still planned. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
 
@@ -162,8 +162,8 @@ canopy/                         # workspace root
 │       ├── discovery/          # DiscoveryService (diversity/exclusion; pre-shuffled view planned)
 │       ├── playback/           # PlaybackService (sessions) + ResolverService (presigned URLs)
 │       ├── signing/            # HmacUrlSigner (UrlSigner impl)
-│       ├── providers/          # (planned)
-│       ├── jade_store/         # persistence layer (in-memory; PG/RustFS planned)
+│       ├── providers/          # provider adapter contracts + fixture ingestion
+│       ├── jade_store/         # persistence layer (in-memory + PostgreSQL adapters)
 │       ├── observability/      # tracing init (metrics planned)
 │       ├── health/             # HealthService
 │       └── config.rs
@@ -243,6 +243,8 @@ The playback resolver selects the correct audio asset for a track, generates a s
 ### Provider Adapters
 
 Provider adapters ingest catalog content from external sources — Musopen, Pixabay Music, Internet Archive, and future providers — and are responsible for metadata extraction, license verification, and ongoing catalog synchronization. Every track ingested through a provider adapter carries a license record; a track with no resolvable license is not added to the catalog.
+
+The core ingestion boundary is `CatalogIngest`: adapters produce `ProviderTrack` records and the PostgreSQL implementation persists them in one transaction. The transaction upserts artist, license, album, track metadata, per-codec `audio_assets`, and the `provider_tracks(provider, provider_track_id)` dedupe mapping. Re-ingesting the same provider track updates metadata and assets in place, which makes provider sync idempotent.
 
 ---
 
@@ -629,7 +631,7 @@ All services are configurable via environment variables. A `.env.example` is inc
 
 ### sqlx Compile-Time Checks
 
-The `PgCatalogRepository` and related stubs use `sqlx::query!` macros, which validate SQL against a live database at compile time. For offline builds (CI, or when the database is not running), generate query metadata with:
+The PostgreSQL repositories currently use runtime-checked `sqlx::query` calls so normal builds do not require a live database. Once the schema stabilizes further, the hot queries can move to `sqlx::query!` / `query_as!` with offline metadata. To prepare that mode:
 
 ```bash
 # Ensure the database is running and migrations are applied
@@ -643,7 +645,7 @@ cargo sqlx prepare --workspace
 git add .sqlx
 ```
 
-CI builds can then set `SQLX_OFFLINE=true` to skip the live database requirement. The GitHub Actions workflow will be updated in a future iteration to spin up a PostgreSQL service container and run `sqlx migrate run` before `cargo check`.
+CI builds can then set `SQLX_OFFLINE=true` to skip the live database requirement for compile-time checked queries. The GitHub Actions workflow will be updated in a future iteration to spin up a PostgreSQL service container and run `sqlx migrate run` before `cargo check`.
 
 ### Running the Server
 
@@ -670,6 +672,18 @@ cargo run --bin canopy --features canopy-server/pg
 When the `pg` feature is enabled, the server attempts to connect to the database URL configured in `CANOPY_DATABASE_URL`. If the connection succeeds, `PgCatalogRepository`, `PgSessionRepository`, and `PgAudioAssetRepository` are used; otherwise it logs a warning and transparently falls back to the in-memory demo stores. This lets the server start standalone without a database for quick iteration, while production and integration-test deployments use the persistent backend.
 
 The `HealthService` checks PostgreSQL connectivity when a pool is present; a failed probe marks the health response as `healthy: false`.
+
+### PostgreSQL Integration Tests
+
+The `canopy-server/pg` feature includes a database-backed integration test for migrations, provider ingest idempotency, multi-codec assets, browse deduplication, and `mv_discovery_pool` uniqueness. The test uses `CANOPY_TEST_DATABASE_URL` when set, otherwise `DATABASE_URL`; if neither is available it skips cleanly.
+
+```bash
+# Start PostgreSQL and apply migrations through the test harness
+docker compose up -d postgres
+
+CANOPY_TEST_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy \
+  cargo test --features canopy-server/pg
+```
 
 ### RustFS Setup
 

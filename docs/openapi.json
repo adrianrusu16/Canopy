@@ -347,6 +347,64 @@
           }
         }
       }
+    },
+    "/canopy.Canopy/ResolvePlayback": {
+      "post": {
+        "summary": "Resolve playback stream URL",
+        "operationId": "ResolvePlayback",
+        "description": "Selects an audio asset for a track and returns a time-limited presigned stream URL.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybackSource"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/DiscoveryNext": {
+      "post": {
+        "summary": "Get next discovery track",
+        "operationId": "DiscoveryNext",
+        "description": "Returns the next shuffle-channel track after applying recent-play exclusion and diversity rules.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoveryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoveryTrack"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -462,7 +520,7 @@
           },
           "artwork_uri": {
             "type": "string",
-            "description": "content://… URI that the Android resolver knows"
+            "description": "content://\u2026 URI that the Android resolver knows"
           },
           "duration_ms": {
             "type": "integer",
@@ -541,7 +599,7 @@
           "speed": {
             "type": "number",
             "format": "double",
-            "description": "Playback speed (0.5 … 2.0 typical)"
+            "description": "Playback speed (0.5 \u2026 2.0 typical)"
           }
         }
       },
@@ -650,7 +708,74 @@
             "type": "string"
           }
         }
+      },
+      "PlaybackRequest": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Track ID to resolve into a streamable playback source"
+          }
+        }
+      },
+      "PlaybackSource": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string"
+          },
+          "stream_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Presigned, time-limited object-storage URL"
+          },
+          "content_type": {
+            "type": "string",
+            "description": "MIME type served for the chosen asset"
+          },
+          "codec": {
+            "type": "string",
+            "description": "Codec short name for the chosen asset"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "expires_at_epoch_ms": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Epoch millisecond timestamp when the stream URL expires"
+          }
+        }
+      },
+      "DiscoveryRequest": {
+        "type": "object",
+        "properties": {
+          "recently_played": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Track IDs to exclude from the next discovery selection"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum items to consider or return; 0 uses the service default"
+          }
+        }
+      },
+      "DiscoveryTrack": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/MediaItem"
+          }
+        }
       }
     }
+  },
+  "x-canopy-docs": {
+    "persistenceStatus": "PostgreSQL provider ingest is transactional and idempotent by provider identity; discovery materialization uses one representative asset per track."
   }
 }

@@ -3,15 +3,15 @@
 //! This module uses `sqlx` to query the normalized schema described in the
 //! architecture document. The domain model `MediaItem` is denormalized at
 //! the adapter boundary via JOINs across `tracks`, `artists`, `albums`, and
-//! `audio_assets`.
+//! a single representative `audio_assets` row per track.
 //!
 //! # Production Notes
 //!
 //! * Connection pooling - configured via `PgPoolOptions` in `lib.rs` with
 //!   sensible max-connections and acquire-timeout defaults.
 //! * Materialized views - `mv_discovery_pool` and `mv_catalog_search` are
-//!   refreshed periodically (e.g., via a cron job or a background task). The
-//!   discovery service reads from `mv_discovery_pool` for O(1) shuffle selection.
+//!   refreshed after ingestion for now. A background refresher can replace
+//!   that once provider sync becomes high-volume.
 //! * Indexes - the schema ships with strategic indexes: GIN trigram for
 //!   search, BRIN for time-series playback history, covering indexes for the
 //!   common browse query, and partial indexes for the explicit-content filter.
@@ -24,14 +24,33 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogRepository,
-    DiscoveryRepository, MediaItem, MediaPage, Page, Session, SessionRepository,
+    AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogIngest, CatalogRepository,
+    DiscoveryRepository, IngestBatchResult, MediaItem, MediaPage, Page, ProviderTrack, Session,
+    SessionRepository,
 };
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row, Transaction};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const REPRESENTATIVE_ASSET_JOIN: &str = r#"
+    LEFT JOIN LATERAL (
+        SELECT codec, content_type, size_bytes
+        FROM audio_assets
+        WHERE track_id = t.id
+        ORDER BY
+            CASE codec
+                WHEN 'opus' THEN 0
+                WHEN 'mp4' THEN 1
+                WHEN 'mp3' THEN 2
+                WHEN 'flac' THEN 3
+                ELSE 4
+            END,
+            codec
+        LIMIT 1
+    ) aa ON TRUE
+"#;
 
 /// Reads a PostgreSQL UUID column and converts it to the string ID used by the domain model.
 fn uuid_string(row: &sqlx::postgres::PgRow, column: &str) -> String {
@@ -77,6 +96,175 @@ fn db_err(e: sqlx::Error) -> CanopyError {
     CanopyError::Storage(e.to_string())
 }
 
+fn invalid_arg(message: impl Into<String>) -> CanopyError {
+    CanopyError::InvalidArgument(message.into())
+}
+
+fn require_non_empty(value: &str, field: &str) -> CanopyResult<()> {
+    if value.trim().is_empty() {
+        return Err(invalid_arg(format!("provider track {field} is required")));
+    }
+
+    Ok(())
+}
+
+fn u64_to_i64(value: u64, field: &str) -> CanopyResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| invalid_arg(format!("{field} exceeds PostgreSQL BIGINT range")))
+}
+
+fn validate_provider_track(track: &ProviderTrack) -> CanopyResult<()> {
+    require_non_empty(&track.provider, "provider")?;
+    require_non_empty(&track.provider_id, "provider_id")?;
+    require_non_empty(&track.title, "title")?;
+    require_non_empty(&track.artist, "artist")?;
+    require_non_empty(&track.album, "album")?;
+    require_non_empty(&track.license.license_type, "license.license_type")?;
+    require_non_empty(&track.license.source_url, "license.source_url")?;
+
+    if track.duration_ms < 0 {
+        return Err(invalid_arg(
+            "provider track duration_ms must be non-negative",
+        ));
+    }
+
+    for asset in &track.assets {
+        require_non_empty(&asset.codec, "asset.codec")?;
+        require_non_empty(&asset.content_type, "asset.content_type")?;
+        require_non_empty(&asset.object_key, "asset.object_key")?;
+        require_non_empty(&asset.checksum_sha256, "asset.checksum_sha256")?;
+        if asset.checksum_sha256.len() != 64 {
+            return Err(invalid_arg(
+                "asset.checksum_sha256 must be 64 hex characters",
+            ));
+        }
+        let _ = u64_to_i64(asset.size_bytes, "asset.size_bytes")?;
+        let _ = u64_to_i64(asset.duration_ms, "asset.duration_ms")?;
+    }
+
+    Ok(())
+}
+
+fn sort_name(name: &str) -> String {
+    name.trim().to_string()
+}
+
+async fn find_or_insert_artist(
+    tx: &mut Transaction<'_, sqlx::Postgres>,
+    name: &str,
+) -> Result<uuid::Uuid, sqlx::Error> {
+    if let Some(id) = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT id FROM artists WHERE lower(name) = lower($1) ORDER BY created_at LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        return Ok(id);
+    }
+
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO artists (name, sort_name) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(name)
+    .bind(sort_name(name))
+    .fetch_one(&mut **tx)
+    .await
+}
+
+async fn find_or_insert_license(
+    tx: &mut Transaction<'_, sqlx::Postgres>,
+    track: &ProviderTrack,
+) -> Result<uuid::Uuid, sqlx::Error> {
+    if let Some(id) = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT id FROM licenses WHERE source_url = $1 ORDER BY created_at LIMIT 1",
+    )
+    .bind(&track.license.source_url)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        sqlx::query(
+            r#"
+                UPDATE licenses
+                SET license_type = $2,
+                    attribution_text = $3
+                WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(&track.license.license_type)
+        .bind(&track.license.attribution_text)
+        .execute(&mut **tx)
+        .await?;
+
+        return Ok(id);
+    }
+
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        r#"
+            INSERT INTO licenses (license_type, source_url, attribution_text)
+            VALUES ($1, $2, $3)
+            RETURNING id
+        "#,
+    )
+    .bind(&track.license.license_type)
+    .bind(&track.license.source_url)
+    .bind(&track.license.attribution_text)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+async fn find_or_insert_album(
+    tx: &mut Transaction<'_, sqlx::Postgres>,
+    artist_id: uuid::Uuid,
+    track: &ProviderTrack,
+) -> Result<uuid::Uuid, sqlx::Error> {
+    if let Some(id) = sqlx::query_scalar::<_, uuid::Uuid>(
+        r#"
+            SELECT id
+            FROM albums
+            WHERE artist_id = $1 AND lower(title) = lower($2)
+            ORDER BY created_at
+            LIMIT 1
+        "#,
+    )
+    .bind(artist_id)
+    .bind(&track.album)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        sqlx::query(
+            r#"
+                UPDATE albums
+                SET release_year = COALESCE($2, release_year),
+                    artwork_key = COALESCE($3, artwork_key)
+                WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(track.release_year)
+        .bind(&track.album_artwork_key)
+        .execute(&mut **tx)
+        .await?;
+
+        return Ok(id);
+    }
+
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        r#"
+            INSERT INTO albums (title, artist_id, release_year, artwork_key)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+        "#,
+    )
+    .bind(&track.album)
+    .bind(artist_id)
+    .bind(track.release_year)
+    .bind(&track.album_artwork_key)
+    .fetch_one(&mut **tx)
+    .await
+}
+
 // ---------------------------------------------------------------------------
 // PgCatalogRepository
 // ---------------------------------------------------------------------------
@@ -95,12 +283,25 @@ impl PgCatalogRepository {
         }
     }
 
+    async fn refresh_catalog_views(&self) -> CanopyResult<()> {
+        sqlx::query("REFRESH MATERIALIZED VIEW mv_discovery_pool")
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        sqlx::query("REFRESH MATERIALIZED VIEW mv_catalog_search")
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Shared query that denormalizes a track row into a `MediaItem`.
     async fn media_item_by_id(&self, id: &str) -> CanopyResult<Option<MediaItem>> {
         let track_uuid = uuid::Uuid::parse_str(id)
             .map_err(|e| CanopyError::Storage(format!("Invalid track ID: {e}")))?;
 
-        let sql = r#"
+        let sql = format!(
+            r#"
             SELECT
                 t.id             AS track_id,
                 t.title          AS track_title,
@@ -114,13 +315,13 @@ impl PgCatalogRepository {
             FROM tracks t
             JOIN artists a     ON t.artist_id = a.id
             JOIN albums al     ON t.album_id = al.id
-            LEFT JOIN audio_assets aa ON aa.track_id = t.id
+            {REPRESENTATIVE_ASSET_JOIN}
             WHERE t.id = $1
-            ORDER BY aa.codec
             LIMIT 1
-        "#;
+        "#
+        );
 
-        let row = sqlx::query(sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(track_uuid)
             .fetch_optional(self.pool.as_ref())
             .await
@@ -138,7 +339,8 @@ impl CatalogRepository for PgCatalogRepository {
         _genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage> {
-        let sql = r#"
+        let sql = format!(
+            r#"
             SELECT
                 t.id             AS track_id,
                 t.title          AS track_title,
@@ -152,12 +354,13 @@ impl CatalogRepository for PgCatalogRepository {
             FROM tracks t
             JOIN artists a     ON t.artist_id = a.id
             JOIN albums al     ON t.album_id = al.id
-            LEFT JOIN audio_assets aa ON aa.track_id = t.id
+            {REPRESENTATIVE_ASSET_JOIN}
             ORDER BY t.created_at
             LIMIT $1 OFFSET $2
-        "#;
+        "#
+        );
 
-        let rows = sqlx::query(sql)
+        let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(page.limit as i64)
             .bind(page.offset as i64)
             .fetch_all(self.pool.as_ref())
@@ -180,7 +383,8 @@ impl CatalogRepository for PgCatalogRepository {
     }
 
     async fn search(&self, query: &str, page: Page) -> CanopyResult<MediaPage> {
-        let sql = r#"
+        let sql = format!(
+            r#"
             SELECT
                 t.id             AS track_id,
                 t.title          AS track_title,
@@ -199,15 +403,16 @@ impl CatalogRepository for PgCatalogRepository {
             FROM tracks t
             JOIN artists a     ON t.artist_id = a.id
             JOIN albums al     ON t.album_id = al.id
-            LEFT JOIN audio_assets aa ON aa.track_id = t.id
+            {REPRESENTATIVE_ASSET_JOIN}
             WHERE t.title % $1
                OR a.name % $1
                OR al.title % $1
             ORDER BY rank DESC, t.title
             LIMIT $2 OFFSET $3
-        "#;
+        "#
+        );
 
-        let rows = sqlx::query(sql)
+        let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(query)
             .bind(page.limit as i64)
             .bind(page.offset as i64)
@@ -247,6 +452,176 @@ impl CatalogRepository for PgCatalogRepository {
 }
 
 #[async_trait]
+impl CatalogIngest for PgCatalogRepository {
+    async fn ingest(&self, track: ProviderTrack) -> CanopyResult<String> {
+        validate_provider_track(&track)?;
+
+        let raw_metadata = serde_json::to_value(&track)
+            .map_err(|e| CanopyError::Internal(format!("serialize provider metadata: {e}")))?;
+
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        let artist_id = find_or_insert_artist(&mut tx, &track.artist)
+            .await
+            .map_err(db_err)?;
+        let license_id = find_or_insert_license(&mut tx, &track)
+            .await
+            .map_err(db_err)?;
+        let album_id = find_or_insert_album(&mut tx, artist_id, &track)
+            .await
+            .map_err(db_err)?;
+
+        let existing_track_id = sqlx::query_scalar::<_, uuid::Uuid>(
+            r#"
+                SELECT track_id
+                FROM provider_tracks
+                WHERE provider = $1 AND provider_track_id = $2
+                FOR UPDATE
+            "#,
+        )
+        .bind(&track.provider)
+        .bind(&track.provider_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let track_id = if let Some(track_id) = existing_track_id {
+            sqlx::query(
+                r#"
+                    UPDATE tracks
+                    SET title = $2,
+                        artist_id = $3,
+                        album_id = $4,
+                        duration_ms = $5,
+                        license_id = $6,
+                        is_explicit = $7,
+                        artwork_key = $8,
+                        updated_at = NOW()
+                    WHERE id = $1
+                "#,
+            )
+            .bind(track_id)
+            .bind(&track.title)
+            .bind(artist_id)
+            .bind(album_id)
+            .bind(track.duration_ms as i32)
+            .bind(license_id)
+            .bind(track.is_explicit)
+            .bind(&track.artwork_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+            track_id
+        } else {
+            let track_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                r#"
+                    INSERT INTO tracks (
+                        title, artist_id, album_id, duration_ms,
+                        license_id, is_explicit, artwork_key
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    RETURNING id
+                "#,
+            )
+            .bind(&track.title)
+            .bind(artist_id)
+            .bind(album_id)
+            .bind(track.duration_ms as i32)
+            .bind(license_id)
+            .bind(track.is_explicit)
+            .bind(&track.artwork_key)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+            sqlx::query(
+                r#"
+                    INSERT INTO provider_tracks (track_id, provider, provider_track_id, raw_metadata)
+                    VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(track_id)
+            .bind(&track.provider)
+            .bind(&track.provider_id)
+            .bind(&raw_metadata)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+            track_id
+        };
+
+        sqlx::query(
+            r#"
+                UPDATE provider_tracks
+                SET raw_metadata = $3,
+                    fetched_at = NOW(),
+                    updated_at = NOW()
+                WHERE provider = $1 AND provider_track_id = $2
+            "#,
+        )
+        .bind(&track.provider)
+        .bind(&track.provider_id)
+        .bind(&raw_metadata)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        for asset in &track.assets {
+            sqlx::query(
+                r#"
+                    INSERT INTO audio_assets (
+                        track_id, codec, content_type, object_key,
+                        size_bytes, checksum_sha256, duration_ms
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (track_id, codec) DO UPDATE SET
+                        content_type = EXCLUDED.content_type,
+                        object_key = EXCLUDED.object_key,
+                        size_bytes = EXCLUDED.size_bytes,
+                        checksum_sha256 = EXCLUDED.checksum_sha256,
+                        duration_ms = EXCLUDED.duration_ms,
+                        updated_at = NOW()
+                "#,
+            )
+            .bind(track_id)
+            .bind(&asset.codec)
+            .bind(&asset.content_type)
+            .bind(&asset.object_key)
+            .bind(u64_to_i64(asset.size_bytes, "asset.size_bytes")?)
+            .bind(&asset.checksum_sha256)
+            .bind(u64_to_i64(asset.duration_ms, "asset.duration_ms")?)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+
+        tx.commit().await.map_err(db_err)?;
+        self.refresh_catalog_views().await?;
+
+        Ok(track_id.to_string())
+    }
+
+    async fn ingest_batch(&self, tracks: Vec<ProviderTrack>) -> CanopyResult<IngestBatchResult> {
+        let mut result = IngestBatchResult::default();
+
+        for track in tracks {
+            let label = format!("{}/{}", track.provider, track.provider_id);
+            match self.ingest(track).await {
+                Ok(_) => result.succeeded += 1,
+                Err(err) => {
+                    result.failed += 1;
+                    result.failures.push(format!("{label}: {err}"));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+#[async_trait]
 impl DiscoveryRepository for PgCatalogRepository {
     async fn shuffle_pool(&self) -> CanopyResult<Vec<MediaItem>> {
         let sql = r#"
@@ -270,7 +645,8 @@ impl DiscoveryRepository for PgCatalogRepository {
             .map_err(db_err)?;
 
         if rows.is_empty() {
-            let sql = r#"
+            let sql = format!(
+                r#"
                 SELECT
                     t.id             AS track_id,
                     t.title          AS track_title,
@@ -284,11 +660,12 @@ impl DiscoveryRepository for PgCatalogRepository {
                 FROM tracks t
                 JOIN artists a     ON t.artist_id = a.id
                 JOIN albums al     ON t.album_id = al.id
-                LEFT JOIN audio_assets aa ON aa.track_id = t.id
+                {REPRESENTATIVE_ASSET_JOIN}
                 ORDER BY t.created_at
-            "#;
+            "#
+            );
 
-            let rows = sqlx::query(sql)
+            let rows = sqlx::query(AssertSqlSafe(sql))
                 .fetch_all(self.pool.as_ref())
                 .await
                 .map_err(db_err)?;
