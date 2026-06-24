@@ -8,6 +8,7 @@ use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
 use canopy_server::jade_store::{InMemoryCatalog, InMemorySessionStore};
 use canopy_server::playback::PlaybackService;
+use canopy_server::providers::{ProviderAdapter, TestFixtureProvider};
 use canopy_server::search::SearchService;
 
 fn sample_items() -> Vec<MediaItem> {
@@ -192,4 +193,17 @@ async fn playback_controls_reject_invalid_inputs() {
     assert!(playback.play("sess_1", "trk_1".into(), -1).await.is_err());
     assert!(playback.seek("sess_1", -1).await.is_err());
     assert!(playback.set_playback_speed("sess_1", 0.0).await.is_err());
+}
+
+#[tokio::test]
+async fn fixture_provider_reads_wrapped_catalog_file() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("fixtures")
+        .join("catalog.json");
+    let provider = TestFixtureProvider::new(path).unwrap();
+
+    let tracks = provider.fetch_catalog().await.unwrap();
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[0].provider, "fixture");
 }

@@ -803,6 +803,7 @@
   },
   "x-canopy-docs": {
     "persistenceStatus": "PostgreSQL provider ingest is transactional and idempotent by provider identity; discovery materialization uses one representative asset per track.",
-    "sessionControlStatus": "Playback control RPCs mutate SessionRepository state; empty session_id maps to the default session."
+    "sessionControlStatus": "Playback control RPCs mutate SessionRepository state; empty session_id maps to the default session.",
+    "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC."
   }
 }

@@ -103,6 +103,20 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     "Connected to PostgreSQL; using persistent stores"
                 );
                 let pg_catalog = jade_store::PgCatalogRepository::new((*pool).clone());
+                if let Some(path) = config.provider_fixture_path.as_deref() {
+                    let fixture = providers::TestFixtureProvider::new(path)?;
+                    let ingestion = providers::IngestionService::new(Arc::new(pg_catalog.clone()));
+                    let result = ingestion.ingest_from_provider(&fixture).await?;
+                    info!(
+                        fixture_path = %path,
+                        succeeded = result.succeeded,
+                        failed = result.failed,
+                        "Ingested provider fixture into PostgreSQL catalog"
+                    );
+                    if !result.failures.is_empty() {
+                        tracing::warn!(failures = ?result.failures, "Provider fixture ingest had failures");
+                    }
+                }
                 catalog_repo = Arc::new(pg_catalog.clone());
                 discovery_repo = Arc::new(pg_catalog);
                 asset_repo = Arc::new(jade_store::PgAudioAssetRepository::new((*pool).clone()));
@@ -115,6 +129,11 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     database_url = %config.database_url,
                     "PostgreSQL connection failed; falling back to in-memory stores"
                 );
+                if config.provider_fixture_path.is_some() {
+                    tracing::warn!(
+                        "Skipping provider fixture ingest because PostgreSQL is unavailable"
+                    );
+                }
                 let catalog = demo_catalog();
                 catalog_repo = Arc::new(catalog.clone());
                 discovery_repo = Arc::new(catalog);

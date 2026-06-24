@@ -17,7 +17,7 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. PostgreSQL mode reads `mv_discovery_pool`, a pre-shuffled materialized view with one representative asset per track. |
 | Playback Resolver         | 🟡 Prototype   | `ResolverService` over the `AudioAssetRepository` + `UrlSigner` ports: codec-preference asset selection, TTL expiry, and HMAC-SHA256 presigned `PlaybackSource` URLs (stateless verify). `ResolvePlayback` gRPC RPC is wired; PostgreSQL mode reads persisted `audio_assets`, while RustFS request-path validation is still planned. |
 | Auth (end-user + service) | 🔴 Planned     | No mTLS / session-token enforcement yet.                                                     |
-| Provider Adapters         | 🟡 Partial     | Provider-facing ports and fixture adapter exist; PostgreSQL `CatalogIngest` now transactionally upserts provider tracks, licenses, albums, artists, audio assets, and provider identity mappings. Musopen/Pixabay/Internet Archive adapters are still planned. |
+| Provider Adapters         | 🟡 Partial     | Provider-facing ports and fixture adapter exist; PostgreSQL `CatalogIngest` transactionally upserts provider tracks, and `CANOPY_PROVIDER_FIXTURE_PATH` can ingest a local fixture at startup in PostgreSQL mode. Musopen/Pixabay/Internet Archive adapters are still planned. |
 | Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` migrations, Docker Compose, typed repository ports, `PgCatalogRepository`, `PgSessionRepository`, `PgAudioAssetRepository`, and transactional provider ingest are implemented. PostgreSQL mode auto-detects the DB under the `pg` feature and falls back to in-memory stores on connection failure. |
 | Storage (RustFS)          | 🔴 Planned     | No RustFS integration in the request path yet.                                              |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
@@ -632,6 +632,7 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_ADMINER_PORT` | `8080` | Adminer host port |
 | `CANOPY_GRPC_ADDR` | `[::1]:50051` | gRPC server bind address |
 | `CANOPY_DATABASE_URL` | `postgres://canopy:canopy@localhost:5432/canopy` | PostgreSQL connection string |
+| `CANOPY_PROVIDER_FIXTURE_PATH` | unset | Optional provider fixture JSON to ingest at startup when running with `canopy-server/pg` |
 
 ### sqlx Compile-Time Checks
 
@@ -674,6 +675,8 @@ cargo run --bin canopy --features canopy-server/pg
 ```
 
 When the `pg` feature is enabled, the server attempts to connect to the database URL configured in `CANOPY_DATABASE_URL`. If the connection succeeds, `PgCatalogRepository`, `PgSessionRepository`, and `PgAudioAssetRepository` are used; otherwise it logs a warning and transparently falls back to the in-memory demo stores. This lets the server start standalone without a database for quick iteration, while production and integration-test deployments use the persistent backend.
+
+If `CANOPY_PROVIDER_FIXTURE_PATH` is set in PostgreSQL mode, Canopy reads the fixture through `TestFixtureProvider` and ingests it with `CatalogIngest` before starting the gRPC server. The operation is idempotent by `provider_tracks(provider, provider_track_id)`, so the same fixture can be replayed during local development.
 
 The `HealthService` checks PostgreSQL connectivity when a pool is present; a failed probe marks the health response as `healthy: false`.
 

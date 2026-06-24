@@ -27,6 +27,8 @@ pub struct Config {
     pub rustfs_secret_key: String,
     /// Redis URL for the JadeCache layer.
     pub redis_url: String,
+    /// Optional provider fixture JSON path to ingest on startup in PostgreSQL mode.
+    pub provider_fixture_path: Option<String>,
 }
 
 impl Config {
@@ -61,6 +63,7 @@ impl Config {
     /// * `CANOPY_RUSTFS_ACCESS_KEY` — RustFS access key.
     /// * `CANOPY_RUSTFS_SECRET_KEY` — RustFS secret key.
     /// * `CANOPY_REDIS_URL` — Redis connection string.
+    /// * `CANOPY_PROVIDER_FIXTURE_PATH` — optional fixture JSON to ingest at startup in PostgreSQL mode.
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let grpc_addr = env::var("CANOPY_GRPC_ADDR")
             .unwrap_or_else(|_| Self::DEFAULT_GRPC_ADDR.to_string())
@@ -94,6 +97,10 @@ impl Config {
         let redis_url =
             env::var("CANOPY_REDIS_URL").unwrap_or_else(|_| Self::DEFAULT_REDIS_URL.to_string());
 
+        let provider_fixture_path = env::var("CANOPY_PROVIDER_FIXTURE_PATH")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+
         Ok(Self {
             grpc_addr,
             database_url,
@@ -104,6 +111,7 @@ impl Config {
             rustfs_access_key,
             rustfs_secret_key,
             redis_url,
+            provider_fixture_path,
         })
     }
 }

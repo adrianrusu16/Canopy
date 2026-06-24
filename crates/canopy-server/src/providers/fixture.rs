@@ -8,14 +8,14 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use canopy_core::{CanopyError, CanopyResult, ProviderTrack};
-use serde_json;
+use serde::Deserialize;
 
 use crate::providers::adapter::ProviderAdapter;
 
 /// Provider that reads [`ProviderTrack`] records from a JSON file.
 ///
-/// The JSON file is expected to be an array of objects matching the
-/// [`ProviderTrack`] serialization. Example:
+/// The JSON file may be either a bare array of [`ProviderTrack`] objects or a
+/// wrapped object with a `tracks` field. Example:
 ///
 /// ```json
 /// [
@@ -48,6 +48,21 @@ use crate::providers::adapter::ProviderAdapter;
 ///   }
 /// ]
 /// ```
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FixtureCatalog {
+    Tracks(Vec<ProviderTrack>),
+    Wrapped { tracks: Vec<ProviderTrack> },
+}
+
+impl FixtureCatalog {
+    fn into_tracks(self) -> Vec<ProviderTrack> {
+        match self {
+            Self::Tracks(tracks) | Self::Wrapped { tracks } => tracks,
+        }
+    }
+}
+
 pub struct TestFixtureProvider {
     #[allow(dead_code)]
     path: String,
@@ -64,9 +79,12 @@ impl TestFixtureProvider {
         let path = path.as_ref().to_string_lossy().to_string();
         let content =
             std::fs::read_to_string(&path).map_err(|e| CanopyError::Internal(e.to_string()))?;
-        let tracks: Vec<ProviderTrack> =
+        let catalog: FixtureCatalog =
             serde_json::from_str(&content).map_err(|e| CanopyError::Internal(e.to_string()))?;
-        Ok(Self { path, tracks })
+        Ok(Self {
+            path,
+            tracks: catalog.into_tracks(),
+        })
     }
 }
 
