@@ -141,11 +141,9 @@ async fn discovery_spreads_artists() {
 async fn session_lifecycle() {
     let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
 
-    // Unknown session reads back as default.
     let empty = playback.get_session("sess_1").await.unwrap();
     assert_eq!(empty.current_media_id, None);
 
-    // Update creates and mutates the session.
     playback
         .update_session("sess_1", Some("trk_1".into()), Some(5_000))
         .await
@@ -154,8 +152,44 @@ async fn session_lifecycle() {
     assert_eq!(updated.current_media_id.as_deref(), Some("trk_1"));
     assert_eq!(updated.position_ms, 5_000);
 
-    // End removes it.
     playback.end_session("sess_1").await.unwrap();
     let after = playback.get_session("sess_1").await.unwrap();
     assert_eq!(after.current_media_id, None);
+}
+
+#[tokio::test]
+async fn playback_controls_mutate_session_state() {
+    let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
+
+    let session_id = playback.play("", "trk_1".into(), 1_250).await.unwrap();
+    assert_eq!(session_id, PlaybackService::DEFAULT_SESSION_ID);
+
+    let playing = playback.get_session(&session_id).await.unwrap();
+    assert_eq!(playing.current_media_id.as_deref(), Some("trk_1"));
+    assert_eq!(playing.position_ms, 1_250);
+    assert!(playing.is_playing);
+
+    playback.seek(&session_id, 9_000).await.unwrap();
+    playback.set_playback_speed(&session_id, 1.5).await.unwrap();
+    playback.pause(&session_id).await.unwrap();
+
+    let paused = playback.get_session(&session_id).await.unwrap();
+    assert_eq!(paused.position_ms, 9_000);
+    assert_eq!(paused.playback_speed, 1.5);
+    assert!(!paused.is_playing);
+
+    playback.stop(&session_id).await.unwrap();
+    let stopped = playback.get_session(&session_id).await.unwrap();
+    assert_eq!(stopped.position_ms, 0);
+    assert!(!stopped.is_playing);
+}
+
+#[tokio::test]
+async fn playback_controls_reject_invalid_inputs() {
+    let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
+
+    assert!(playback.play("sess_1", "".into(), 0).await.is_err());
+    assert!(playback.play("sess_1", "trk_1".into(), -1).await.is_err());
+    assert!(playback.seek("sess_1", -1).await.is_err());
+    assert!(playback.set_playback_speed("sess_1", 0.0).await.is_err());
 }

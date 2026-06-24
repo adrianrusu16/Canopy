@@ -9,10 +9,10 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Area                      | Status         | Notes                                                                                       |
 | ------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
 | Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (wire contract), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (domain services + `api::grpc` adapter + `jade_store`). |
-| gRPC server (`tonic`)     | 🟡 Prototype   | `ResolvePlayback` and `DiscoveryNext` RPCs are now wired via the target proto contract. `Search` and `Browse` still use the demo response shape (not streaming `SearchResult` yet). |
+| gRPC server (`tonic`)     | 🟡 Prototype   | Catalog, session playback controls, `ResolvePlayback`, and `DiscoveryNext` are wired via the target proto contract. `Search` and `Browse` still use the unary demo response shape (not streaming `SearchResult` yet). |
 | Configuration             | ✅ Implemented | Env-driven `Config` (`CANOPY_GRPC_ADDR`, `CANOPY_DATABASE_URL`) with sensible defaults. |
 | Catalog service           | 🟡 Prototype   | `CatalogService` over the `CatalogRepository` port; in-memory and PostgreSQL `jade_store` implementations are available, with browse/get/search backed by PostgreSQL when the `pg` feature is enabled. |
-| Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs are stubs. |
+| Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs now mutate persisted session state. Queue semantics and multi-device conflict handling are still planned. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. PostgreSQL mode reads `mv_discovery_pool`, a pre-shuffled materialized view with one representative asset per track. |
 | Playback Resolver         | 🟡 Prototype   | `ResolverService` over the `AudioAssetRepository` + `UrlSigner` ports: codec-preference asset selection, TTL expiry, and HMAC-SHA256 presigned `PlaybackSource` URLs (stateless verify). `ResolvePlayback` gRPC RPC is wired; PostgreSQL mode reads persisted `audio_assets`, while RustFS request-path validation is still planned. |
@@ -181,7 +181,7 @@ canopy/                         # workspace root
 
 ### gRPC API Layer
 
-The gRPC API is Canopy's single control-plane contract with PandaEngine. It owns search, browse, discovery, playback resolution, and metadata retrieval. Audio bytes never travel over this channel — gRPC resolves *what* to play and *where* to get it; HTTP handles the actual streaming.
+The gRPC API is Canopy's single control-plane contract with PandaEngine. It owns search, browse, discovery, session playback controls, playback resolution, and metadata retrieval. Audio bytes never travel over this channel — gRPC resolves *what* to play and *where* to get it; HTTP handles the actual streaming.
 
 ```proto
 rpc Search(SearchRequest)
@@ -237,6 +237,10 @@ A recommendation engine is a future layer on top of this service; the initial im
 ### Playback Resolver
 
 The playback resolver selects the correct audio asset for a track, generates a signed playback URL, and embeds an expiry directly in that URL. Validation of an in-flight playback token is stateless: the signature and expiry are checked in memory against the request, with no database lookup in the hot path. This matters because a single track playback generates many HTTP Range requests as ExoPlayer seeks and buffers, and each one validates the token independently.
+
+### Playback Session Controls
+
+`Play`, `Pause`, `Seek`, `SetPlaybackSpeed`, and `Stop` mutate lightweight session state through the `SessionRepository` port. Requests may provide a `session_id`; empty IDs resolve to the backward-compatible `default` session, and `PlayResponse` returns the session that was updated. `Stop` pauses and resets position to zero while keeping the loaded media, leaving queue and multi-device reconciliation for a later session model.
 
 ---
 

@@ -134,32 +134,59 @@ impl Canopy for GrpcApi {
         }))
     }
 
-    async fn play(&self, _request: Request<PlayRequest>) -> Result<Response<PlayResponse>, Status> {
+    async fn play(&self, request: Request<PlayRequest>) -> Result<Response<PlayResponse>, Status> {
+        let req = request.into_inner();
+        let session_id = self
+            .playback
+            .play(&req.session_id, req.media_id, req.start_pos_ms)
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(PlayResponse {
             success: true,
             error_msg: String::new(),
+            session_id,
         }))
     }
 
     async fn pause(
         &self,
-        _request: Request<PauseRequest>,
+        request: Request<PauseRequest>,
     ) -> Result<Response<PauseResponse>, Status> {
+        let req = request.into_inner();
+        self.playback
+            .pause(&req.session_id)
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(PauseResponse { success: true }))
     }
 
-    async fn seek(&self, _request: Request<SeekRequest>) -> Result<Response<SeekResponse>, Status> {
+    async fn seek(&self, request: Request<SeekRequest>) -> Result<Response<SeekResponse>, Status> {
+        let req = request.into_inner();
+        self.playback
+            .seek(&req.session_id, req.position_ms)
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(SeekResponse { success: true }))
     }
 
     async fn set_playback_speed(
         &self,
-        _request: Request<SetPlaybackSpeedRequest>,
+        request: Request<SetPlaybackSpeedRequest>,
     ) -> Result<Response<SetPlaybackSpeedResponse>, Status> {
+        let req = request.into_inner();
+        self.playback
+            .set_playback_speed(&req.session_id, req.speed)
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(SetPlaybackSpeedResponse { success: true }))
     }
 
-    async fn stop(&self, _request: Request<StopRequest>) -> Result<Response<StopResponse>, Status> {
+    async fn stop(&self, request: Request<StopRequest>) -> Result<Response<StopResponse>, Status> {
+        let req = request.into_inner();
+        self.playback
+            .stop(&req.session_id)
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(StopResponse { success: true }))
     }
 

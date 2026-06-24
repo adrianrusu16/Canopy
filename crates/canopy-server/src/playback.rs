@@ -21,15 +21,104 @@ pub struct PlaybackService {
 }
 
 impl PlaybackService {
+    /// Session used by older clients that do not send an explicit session ID.
+    pub const DEFAULT_SESSION_ID: &'static str = "default";
+
     /// Creates a new service over the given session repository.
     pub fn new(sessions: Arc<dyn SessionRepository>) -> Self {
         Self { sessions }
     }
 
+    /// Resolves an optional wire session ID into a concrete session key.
+    pub fn resolve_session_id(id: &str) -> &str {
+        let id = id.trim();
+        if id.is_empty() {
+            Self::DEFAULT_SESSION_ID
+        } else {
+            id
+        }
+    }
+
     /// Fetches a session, returning a default (empty) session when unknown so
     /// the wire contract can always answer a `GetSession` call.
     pub async fn get_session(&self, id: &str) -> CanopyResult<Session> {
-        Ok(self.sessions.get(id).await?.unwrap_or_default())
+        let id = Self::resolve_session_id(id);
+        Ok(self.sessions.get(id).await?.unwrap_or_else(|| Session {
+            id: id.to_string(),
+            ..Session::default()
+        }))
+    }
+
+    /// Starts playback in a session, creating it if necessary.
+    pub async fn play(
+        &self,
+        id: &str,
+        media_id: String,
+        start_pos_ms: i64,
+    ) -> CanopyResult<String> {
+        if media_id.trim().is_empty() {
+            return Err(CanopyError::InvalidArgument(
+                "media_id is required".to_string(),
+            ));
+        }
+        if start_pos_ms < 0 {
+            return Err(CanopyError::InvalidArgument(
+                "start_pos_ms must be non-negative".to_string(),
+            ));
+        }
+
+        let session_id = Self::resolve_session_id(id).to_string();
+        let mut session = self.load_or_default(&session_id).await?;
+        session.current_media_id = Some(media_id);
+        session.position_ms = start_pos_ms;
+        session.is_playing = true;
+        self.sessions.update(session).await?;
+        Ok(session_id)
+    }
+
+    /// Pauses playback without clearing the loaded media.
+    pub async fn pause(&self, id: &str) -> CanopyResult<()> {
+        let session_id = Self::resolve_session_id(id).to_string();
+        let mut session = self.load_or_default(&session_id).await?;
+        session.is_playing = false;
+        self.sessions.update(session).await
+    }
+
+    /// Updates the playback position.
+    pub async fn seek(&self, id: &str, position_ms: i64) -> CanopyResult<()> {
+        if position_ms < 0 {
+            return Err(CanopyError::InvalidArgument(
+                "position_ms must be non-negative".to_string(),
+            ));
+        }
+
+        let session_id = Self::resolve_session_id(id).to_string();
+        let mut session = self.load_or_default(&session_id).await?;
+        session.position_ms = position_ms;
+        self.sessions.update(session).await
+    }
+
+    /// Updates playback speed.
+    pub async fn set_playback_speed(&self, id: &str, speed: f64) -> CanopyResult<()> {
+        if !(0.25..=4.0).contains(&speed) {
+            return Err(CanopyError::InvalidArgument(
+                "playback speed must be between 0.25 and 4.0".to_string(),
+            ));
+        }
+
+        let session_id = Self::resolve_session_id(id).to_string();
+        let mut session = self.load_or_default(&session_id).await?;
+        session.playback_speed = speed;
+        self.sessions.update(session).await
+    }
+
+    /// Stops playback and resets the current position, keeping the loaded media.
+    pub async fn stop(&self, id: &str) -> CanopyResult<()> {
+        let session_id = Self::resolve_session_id(id).to_string();
+        let mut session = self.load_or_default(&session_id).await?;
+        session.is_playing = false;
+        session.position_ms = 0;
+        self.sessions.update(session).await
     }
 
     /// Applies a partial update to a session, creating it if necessary.
@@ -39,15 +128,17 @@ impl PlaybackService {
         media_id: Option<String>,
         position_ms: Option<i64>,
     ) -> CanopyResult<()> {
-        let mut session = self.sessions.get(id).await?.unwrap_or_else(|| Session {
-            id: id.to_string(),
-            ..Session::default()
-        });
-        session.id = id.to_string();
+        let session_id = Self::resolve_session_id(id).to_string();
+        let mut session = self.load_or_default(&session_id).await?;
         if let Some(media_id) = media_id {
             session.current_media_id = Some(media_id);
         }
         if let Some(position_ms) = position_ms {
+            if position_ms < 0 {
+                return Err(CanopyError::InvalidArgument(
+                    "position_ms must be non-negative".to_string(),
+                ));
+            }
             session.position_ms = position_ms;
         }
         self.sessions.update(session).await
@@ -55,7 +146,14 @@ impl PlaybackService {
 
     /// Ends (removes) a session.
     pub async fn end_session(&self, id: &str) -> CanopyResult<()> {
-        self.sessions.delete(id).await
+        self.sessions.delete(Self::resolve_session_id(id)).await
+    }
+
+    async fn load_or_default(&self, id: &str) -> CanopyResult<Session> {
+        Ok(self.sessions.get(id).await?.unwrap_or_else(|| Session {
+            id: id.to_string(),
+            ..Session::default()
+        }))
     }
 }
 

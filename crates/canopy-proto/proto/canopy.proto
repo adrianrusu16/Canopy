@@ -84,22 +84,30 @@ message MediaItem {
 message PlayRequest {
   string media_id   = 1;
   int64  start_pos_ms = 2; // optional; default 0
+  string session_id = 3;   // optional; empty => default session
 }
 message PlayResponse {
   bool   success = 1;
   string error_msg = 2;
+  string session_id = 3; // session that was updated
 }
-message PauseRequest { }
+message PauseRequest {
+  string session_id = 1; // optional; empty => default session
+}
 message PauseResponse { bool success = 1; }
 message SeekRequest {
   int64 position_ms = 1;
+  string session_id = 2; // optional; empty => default session
 }
 message SeekResponse { bool success = 1; }
 message SetPlaybackSpeedRequest {
   double speed = 1; // 0.5 … 2.0 typical
+  string session_id = 2; // optional; empty => default session
 }
 message SetPlaybackSpeedResponse { bool success = 1; }
-message StopRequest { }
+message StopRequest {
+  string session_id = 1; // optional; empty => default session
+}
 message StopResponse { bool success = 1; }
 
 /* -------------------------------------------------
