@@ -3,6 +3,25 @@
 use std::env;
 use std::net::SocketAddr;
 
+/// Backing source used to mint playback stream URLs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MusicSource {
+    /// Local/S3-compatible object storage signed by Canopy.
+    Rustfs,
+    /// Supabase Storage signed URLs fetched by Canopy.
+    Supabase,
+}
+
+impl MusicSource {
+    fn from_env_value(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("supabase") {
+            Self::Supabase
+        } else {
+            Self::Rustfs
+        }
+    }
+}
+
 /// Runtime configuration for the Canopy server.
 ///
 /// Values are sourced from the environment with sensible defaults so the
@@ -17,6 +36,8 @@ pub struct Config {
     pub pg_max_connections: u32,
     /// Timeout (seconds) for acquiring a connection from the pool.
     pub pg_acquire_timeout_secs: u64,
+    /// Music source used for playback URL resolution.
+    pub music_source: MusicSource,
     /// RustFS (S3-compatible object storage) base URL.
     pub rustfs_url: String,
     /// RustFS bucket name for the media store.
@@ -25,6 +46,14 @@ pub struct Config {
     pub rustfs_access_key: String,
     /// RustFS secret key for presigned URL signing.
     pub rustfs_secret_key: String,
+    /// Supabase project URL used when Supabase is the music source.
+    pub supabase_url: String,
+    /// Supabase key used to request signed Storage URLs.
+    pub supabase_key: String,
+    /// Supabase Storage bucket containing music objects.
+    pub supabase_storage_bucket: String,
+    /// Signed URL lifetime when resolving Supabase playback.
+    pub supabase_signed_url_ttl_secs: u64,
     /// Redis URL for the JadeCache layer.
     pub redis_url: String,
     /// Whether health checks should probe RustFS reachability.
@@ -42,6 +71,8 @@ impl Config {
     const DEFAULT_PG_MAX_CONNECTIONS: u32 = 20;
     /// Default timeout (seconds) for acquiring a pool connection.
     const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 5;
+    /// Default music source.
+    const DEFAULT_MUSIC_SOURCE: &'static str = "rustfs";
     /// Default RustFS base URL.
     const DEFAULT_RUSTFS_URL: &'static str = "http://localhost:9000";
     /// Default RustFS media bucket name.
@@ -50,6 +81,8 @@ impl Config {
     const DEFAULT_RUSTFS_ACCESS_KEY: &'static str = "canopy";
     /// Default RustFS secret key.
     const DEFAULT_RUSTFS_SECRET_KEY: &'static str = "canopy-secret";
+    /// Default Supabase signed URL lifetime in seconds.
+    const DEFAULT_SUPABASE_SIGNED_URL_TTL_SECS: u64 = 15 * 60;
     /// Default Redis URL for the cache layer.
     const DEFAULT_REDIS_URL: &'static str = "redis://localhost:6379";
 
@@ -85,6 +118,10 @@ impl Config {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(Self::DEFAULT_PG_ACQUIRE_TIMEOUT_SECS);
 
+        let music_source = env::var("CANOPY_MUSIC_SOURCE")
+            .map(|v| MusicSource::from_env_value(&v))
+            .unwrap_or_else(|_| MusicSource::from_env_value(Self::DEFAULT_MUSIC_SOURCE));
+
         let rustfs_url =
             env::var("CANOPY_RUSTFS_URL").unwrap_or_else(|_| Self::DEFAULT_RUSTFS_URL.to_string());
 
@@ -96,6 +133,18 @@ impl Config {
 
         let rustfs_secret_key = env::var("CANOPY_RUSTFS_SECRET_KEY")
             .unwrap_or_else(|_| Self::DEFAULT_RUSTFS_SECRET_KEY.to_string());
+
+        let supabase_url = env::var("CANOPY_SUPABASE_URL").unwrap_or_default();
+
+        let supabase_key = env::var("CANOPY_SUPABASE_KEY").unwrap_or_default();
+
+        let supabase_storage_bucket =
+            env::var("CANOPY_SUPABASE_STORAGE_BUCKET").unwrap_or_else(|_| rustfs_bucket.clone());
+
+        let supabase_signed_url_ttl_secs = env::var("CANOPY_SUPABASE_SIGNED_URL_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(Self::DEFAULT_SUPABASE_SIGNED_URL_TTL_SECS);
 
         let redis_url =
             env::var("CANOPY_REDIS_URL").unwrap_or_else(|_| Self::DEFAULT_REDIS_URL.to_string());
@@ -115,10 +164,15 @@ impl Config {
             database_url,
             pg_max_connections,
             pg_acquire_timeout_secs,
+            music_source,
             rustfs_url,
             rustfs_bucket,
             rustfs_access_key,
             rustfs_secret_key,
+            supabase_url,
+            supabase_key,
+            supabase_storage_bucket,
+            supabase_signed_url_ttl_secs,
             redis_url,
             health_check_rustfs,
             provider_fixture_path,

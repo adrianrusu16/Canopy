@@ -756,6 +756,10 @@
           "track_id": {
             "type": "string",
             "description": "Track ID to resolve into a streamable playback source"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "Optional anonymous session ID to synchronize after resolving playback; empty uses the default session"
           }
         }
       },
@@ -768,7 +772,7 @@
           "stream_url": {
             "type": "string",
             "format": "uri",
-            "description": "Presigned, time-limited object-storage URL"
+            "description": "Signed, time-limited object-storage URL from RustFS or Supabase Storage"
           },
           "content_type": {
             "type": "string",
@@ -839,6 +843,9 @@
     "persistenceStatus": "PostgreSQL provider ingest is transactional and idempotent by provider identity; discovery materialization uses one representative asset per track.",
     "sessionControlStatus": "Playback control RPCs mutate SessionRepository state; empty session_id maps to the default session.",
     "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC.",
-    "healthStatus": "Health responses include aggregate status plus dependency details; RustFS probing is opt-in via CANOPY_HEALTH_CHECK_RUSTFS."
+    "healthStatus": "Health responses include aggregate status plus dependency details; RustFS probing is opt-in via CANOPY_HEALTH_CHECK_RUSTFS.",
+    "authModel": "Canopy is anonymous-by-default; session_id tracks playback state/history/preferences without requiring authentication. Token auth is optional future account-sync plumbing.",
+    "playbackResolution": "ResolvePlayback accepts track_id plus optional session_id. It selects an audio asset, returns a RustFS or Supabase signed URL, and loads the track into the resolved session.",
+    "supabaseMusicSource": "Set CANOPY_MUSIC_SOURCE=supabase with CANOPY_SUPABASE_URL, CANOPY_SUPABASE_KEY, CANOPY_SUPABASE_STORAGE_BUCKET, and CANOPY_SUPABASE_SIGNED_URL_TTL_SECS to fetch Supabase Storage signed URLs."
   }
 }

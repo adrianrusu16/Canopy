@@ -115,6 +115,7 @@ message StopResponse { bool success = 1; }
    ------------------------------------------------- */
 message PlaybackRequest {
   string track_id = 1;
+  string session_id = 2; // optional; empty => default session
 }
 message PlaybackSource {
   string track_id            = 1;

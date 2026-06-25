@@ -32,8 +32,9 @@ pub mod playback;
 pub mod providers;
 pub mod search;
 pub mod signing;
+pub mod supabase;
 
-pub use config::Config;
+pub use config::{Config, MusicSource};
 
 use api::grpc::GrpcApi;
 use catalog::CatalogService;
@@ -43,6 +44,7 @@ use jade_store::{InMemoryAudioAssetStore, InMemoryCatalog, InMemorySessionStore}
 use playback::{PlaybackService, ResolverConfig, ResolverService};
 use search::SearchService;
 use signing::HmacUrlSigner;
+use supabase::{SupabaseConfig, SupabaseStorageUrlProvider};
 
 /// Builds the demo catalog used by the prototype.
 fn demo_catalog() -> InMemoryCatalog {
@@ -172,18 +174,32 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let playback = PlaybackService::new(session_repo);
     let discovery = DiscoveryService::new(discovery_repo);
 
-    // Playback resolver: selects asset + mints presigned RustFS URLs from runtime config.
-    let signer = Arc::new(HmacUrlSigner::new(config.rustfs_secret_key.clone()));
-    let resolver = ResolverService::new(
-        asset_repo,
-        signer,
-        ResolverConfig {
-            base_url: config.rustfs_url.trim_end_matches('/').to_string(),
-            bucket: config.rustfs_bucket.clone(),
-            url_ttl: Duration::from_secs(15 * 60),
-            ..ResolverConfig::default()
-        },
-    );
+    // Playback resolver: selects an asset and mints a short-lived stream URL.
+    let resolver_config = ResolverConfig {
+        base_url: config.rustfs_url.trim_end_matches('/').to_string(),
+        bucket: config.rustfs_bucket.clone(),
+        url_ttl: Duration::from_secs(match config.music_source {
+            MusicSource::Rustfs => 15 * 60,
+            MusicSource::Supabase => config.supabase_signed_url_ttl_secs,
+        }),
+        ..ResolverConfig::default()
+    };
+    let resolver = match config.music_source {
+        MusicSource::Rustfs => {
+            let signer = Arc::new(HmacUrlSigner::new(config.rustfs_secret_key.clone()));
+            ResolverService::new(asset_repo, signer, resolver_config)
+        }
+        MusicSource::Supabase => ResolverService::with_url_provider(
+            asset_repo,
+            Arc::new(SupabaseStorageUrlProvider::new(SupabaseConfig {
+                project_url: config.supabase_url.clone(),
+                api_key: config.supabase_key.clone(),
+                bucket: config.supabase_storage_bucket.clone(),
+                signed_url_ttl_secs: config.supabase_signed_url_ttl_secs,
+            })),
+            resolver_config,
+        ),
+    };
 
     // Health service is already created above (with or without DB pool).
 

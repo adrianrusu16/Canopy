@@ -71,6 +71,13 @@ fn to_proto_items(page: MediaPage) -> Vec<ProtoMediaItem> {
     page.items.into_iter().map(to_proto_item).collect()
 }
 
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[async_trait]
 impl Canopy for GrpcApi {
     async fn browse(
@@ -271,7 +278,12 @@ impl Canopy for GrpcApi {
         let req = request.into_inner();
         let source = self
             .resolver
-            .resolve(&req.track_id)
+            .resolve_for_session(
+                &self.playback,
+                &req.session_id,
+                &req.track_id,
+                current_epoch_ms(),
+            )
             .await
             .map_err(to_status)?;
         Ok(Response::new(ProtoPlaybackSource {

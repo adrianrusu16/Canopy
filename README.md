@@ -15,11 +15,11 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs now mutate persisted session state. Queue semantics and multi-device conflict handling are still planned. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. PostgreSQL mode reads `mv_discovery_pool`, a pre-shuffled materialized view with one representative asset per track. |
-| Playback Resolver         | 🟡 Prototype   | `ResolverService` over the `AudioAssetRepository` + `UrlSigner` ports: codec-preference asset selection, TTL expiry, and HMAC-SHA256 presigned `PlaybackSource` URLs (stateless verify). `ResolvePlayback` gRPC RPC is wired; PostgreSQL mode reads persisted `audio_assets`, while RustFS request-path validation is still planned. |
-| Auth (end-user + service) | 🔴 Planned     | No mTLS / session-token enforcement yet.                                                     |
+| Playback Resolver         | ?? Prototype   | `ResolverService` over `AudioAssetRepository` plus pluggable URL providers: codec-preference asset selection, TTL expiry, RustFS HMAC URLs, or Supabase Storage signed URLs. `ResolvePlayback` also synchronizes the anonymous session when called. |
+| Auth                      | ?? Optional    | Canopy is anonymous-by-default. Session IDs keep playback state/history/preferences without requiring login; token auth code exists for a future optional account-sync layer, not request gating. |
 | Provider Adapters         | 🟡 Partial     | Provider-facing ports and fixture adapter exist; PostgreSQL `CatalogIngest` transactionally upserts provider tracks, and `CANOPY_PROVIDER_FIXTURE_PATH` can ingest a local fixture at startup in PostgreSQL mode. Musopen/Pixabay/Internet Archive adapters are still planned. |
 | Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` migrations, Docker Compose, typed repository ports, `PgCatalogRepository`, `PgSessionRepository`, `PgAudioAssetRepository`, and transactional provider ingest are implemented. PostgreSQL mode auto-detects the DB under the `pg` feature and falls back to in-memory stores on connection failure. |
-| Storage (RustFS)          | 🔴 Planned     | No RustFS integration in the request path yet.                                              |
+| Music storage             | ?? Partial     | RustFS HMAC URL generation and Supabase Storage signed URL fetching are available. Canopy stays out of the byte-serving path after `ResolvePlayback`. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
 | Health checks             | 🟡 Partial     | `HealthService` reports liveness, version, aggregate status, dependency details, PostgreSQL connectivity, and optional RustFS TCP reachability via `CANOPY_HEALTH_CHECK_RUSTFS=true`. |
 | CI / Verification         | 🟡 Partial     | GitHub Actions runs fmt, all-feature Clippy, default tests, PostgreSQL feature tests against a Postgres service container, and release build. Proto compatibility gates are still planned. |
@@ -203,12 +203,9 @@ This proto is the single source of truth for the wire contract between PandaEngi
 
 ### Auth
 
-Canopy distinguishes two independent identities on every request:
+Canopy is designed to work without authentication. Lightweight `session_id` values are the default identity boundary for playback state, history, library items, and preferences. Empty session IDs resolve to the `default` anonymous session so simple clients can start immediately.
 
-* **End-user identity** — PandaWave users authenticate once and carry a session token through PandaEngine to Canopy. This identity is what `playback_history` and personalization are scoped to.
-* **Service identity** — PandaEngine itself authenticates to Canopy as a trusted client via mTLS or a service credential, independent of which end user is active. This is what protects the gRPC API surface from being called by anything other than PandaEngine.
-
-Both checks run on every request: service identity establishes that the caller is PandaEngine, end-user identity establishes whose data is being read or written.
+The existing token verifier remains useful later as an optional account-sync layer, but it is not a request gate. A future authenticated mode can attach a user identity to an existing anonymous session and merge state without changing the catalog or playback resolver contracts.
 
 ---
 
@@ -236,11 +233,11 @@ A recommendation engine is a future layer on top of this service; the initial im
 
 ### Playback Resolver
 
-The playback resolver selects the correct audio asset for a track, generates a signed playback URL, and embeds an expiry directly in that URL. Validation of an in-flight playback token is stateless: the signature and expiry are checked in memory against the request, with no database lookup in the hot path. This matters because a single track playback generates many HTTP Range requests as ExoPlayer seeks and buffers, and each one validates the token independently.
+The playback resolver selects the correct audio asset for a track, generates a short-lived stream URL, and returns it in `PlaybackSource`. `CANOPY_MUSIC_SOURCE=rustfs` uses Canopy's HMAC signer for RustFS/S3-compatible object keys. `CANOPY_MUSIC_SOURCE=supabase` asks Supabase Storage for a signed URL and returns that URL to the player. In both modes Canopy is control-plane only: it resolves what to stream, then the player fetches bytes directly from object storage.
 
 ### Playback Session Controls
 
-`Play`, `Pause`, `Seek`, `SetPlaybackSpeed`, and `Stop` mutate lightweight session state through the `SessionRepository` port. Requests may provide a `session_id`; empty IDs resolve to the backward-compatible `default` session, and `PlayResponse` returns the session that was updated. `Stop` pauses and resets position to zero while keeping the loaded media, leaving queue and multi-device reconciliation for a later session model.
+`Play`, `Pause`, `Seek`, `SetPlaybackSpeed`, and `Stop` mutate lightweight session state through the `SessionRepository` port. Requests may provide a `session_id`; empty IDs resolve to the backward-compatible `default` session, and `PlayResponse` returns the session that was updated. `ResolvePlayback` also accepts `session_id` and loads the resolved track into that session after the stream URL is minted, which keeps anonymous playback state synchronized even when the client resolves URLs separately from `Play`.
 
 ---
 
@@ -436,7 +433,7 @@ sequenceDiagram
     Note over ExoPlayer: Buffer, Seek, Decode
 ```
 
-Canopy is not in this path. Once `ResolvePlayback` has returned a presigned URL, every subsequent byte of audio is served directly by RustFS to ExoPlayer.
+Canopy is not in this path. Once `ResolvePlayback` has returned a signed URL, every subsequent byte of audio is served directly by RustFS or Supabase Storage to ExoPlayer.
 
 ---
 
@@ -463,7 +460,7 @@ Example:
 ```json
 {
   "track_id": "trk_123",
-  "stream_url": "https://rustfs.pandawave.internal/pandawave-media/audio/tracks/musopen/trk_123.mp3?signature=abc123&expires=1750200000",
+  "stream_url": "https://project.supabase.co/storage/v1/object/sign/pandawave-media/audio/tracks/trk_123.mp3?token=abc123",
   "content_type": "audio/mpeg",
   "codec": "mp3",
   "duration_ms": 245000,
@@ -630,6 +627,11 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_RUSTFS_ACCESS_KEY` | `canopy` | RustFS access key |
 | `CANOPY_RUSTFS_SECRET_KEY` | `canopy-secret` | RustFS secret key |
 | `CANOPY_RUSTFS_PORT` | `9000` | RustFS host port |
+| `CANOPY_MUSIC_SOURCE` | `rustfs` | Playback URL source: `rustfs` or `supabase` |
+| `CANOPY_SUPABASE_URL` | unset | Supabase project URL when using Supabase Storage |
+| `CANOPY_SUPABASE_KEY` | unset | Supabase anon/service key used by Canopy to request signed URLs |
+| `CANOPY_SUPABASE_STORAGE_BUCKET` | `pandawave-media` | Supabase Storage bucket for music objects |
+| `CANOPY_SUPABASE_SIGNED_URL_TTL_SECS` | `900` | Supabase signed URL lifetime |
 | `CANOPY_ADMINER_PORT` | `8080` | Adminer host port |
 | `CANOPY_GRPC_ADDR` | `[::1]:50051` | gRPC server bind address |
 | `CANOPY_DATABASE_URL` | `postgres://canopy:canopy@localhost:5432/canopy` | PostgreSQL connection string |
@@ -679,7 +681,7 @@ When the `pg` feature is enabled, the server attempts to connect to the database
 
 If `CANOPY_PROVIDER_FIXTURE_PATH` is set in PostgreSQL mode, Canopy reads the fixture through `TestFixtureProvider` and ingests it with `CatalogIngest` before starting the gRPC server. The operation is idempotent by `provider_tracks(provider, provider_track_id)`, so the same fixture can be replayed during local development.
 
-The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-dependency details. It checks PostgreSQL connectivity when a pool is present; set `CANOPY_HEALTH_CHECK_RUSTFS=true` to include a RustFS TCP reachability probe.
+The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-dependency details. It checks PostgreSQL connectivity when a pool is present; set `CANOPY_HEALTH_CHECK_RUSTFS=true` to include a RustFS TCP reachability probe. Supabase playback URL signing is checked lazily when `ResolvePlayback` asks Supabase Storage for a signed URL.
 
 ### PostgreSQL Integration Tests
 
@@ -692,6 +694,22 @@ docker compose up -d postgres
 CANOPY_TEST_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy \
   cargo test --features canopy-server/pg
 ```
+
+### Supabase Music Source
+
+Set `CANOPY_MUSIC_SOURCE=supabase` when Supabase Storage should be the music source. Canopy expects `audio_assets.object_key` values to match paths inside `CANOPY_SUPABASE_STORAGE_BUCKET`; `ResolvePlayback` selects the best asset, requests a signed Supabase Storage URL, returns it to the client, and updates the supplied anonymous session.
+
+Required runtime values:
+
+```bash
+CANOPY_MUSIC_SOURCE=supabase
+CANOPY_SUPABASE_URL=https://<project-ref>.supabase.co
+CANOPY_SUPABASE_KEY=<anon-or-service-role-key>
+CANOPY_SUPABASE_STORAGE_BUCKET=pandawave-media
+CANOPY_SUPABASE_SIGNED_URL_TTL_SECS=900
+```
+
+Use the anon key only when Supabase Storage policies permit signing the relevant objects. Use a service role key for server-side private-bucket signing and keep it out of client builds.
 
 ### RustFS Setup
 

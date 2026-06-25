@@ -121,6 +121,24 @@ impl PlaybackService {
         self.sessions.update(session).await
     }
 
+    /// Loads media into a session without starting playback.
+    pub async fn load_media(&self, id: &str, media_id: String) -> CanopyResult<String> {
+        if media_id.trim().is_empty() {
+            return Err(CanopyError::InvalidArgument(
+                "media_id is required".to_string(),
+            ));
+        }
+
+        let session_id = Self::resolve_session_id(id).to_string();
+        let mut session = self.load_or_default(&session_id).await?;
+        if session.current_media_id.as_deref() != Some(media_id.as_str()) {
+            session.position_ms = 0;
+        }
+        session.current_media_id = Some(media_id);
+        self.sessions.update(session).await?;
+        Ok(session_id)
+    }
+
     /// Applies a partial update to a session, creating it if necessary.
     pub async fn update_session(
         &self,
@@ -184,6 +202,33 @@ impl Default for ResolverConfig {
     }
 }
 
+/// Mints a playable URL for an object-storage asset.
+#[async_trait::async_trait]
+pub trait PlaybackUrlProvider: Send + Sync {
+    /// Returns a stream URL valid until `expires_at_epoch_ms`.
+    async fn signed_url(&self, object_key: &str, expires_at_epoch_ms: u64) -> CanopyResult<String>;
+}
+
+struct RustfsUrlProvider {
+    signer: Arc<dyn UrlSigner>,
+    base_url: String,
+    bucket: String,
+}
+
+#[async_trait::async_trait]
+impl PlaybackUrlProvider for RustfsUrlProvider {
+    async fn signed_url(&self, object_key: &str, expires_at_epoch_ms: u64) -> CanopyResult<String> {
+        let signature = self.signer.sign(object_key, expires_at_epoch_ms);
+        let expires_epoch_s = expires_at_epoch_ms / 1_000;
+        Ok(format!(
+            "{base}/{bucket}/{key}?signature={signature}&expires={expires_epoch_s}",
+            base = self.base_url,
+            bucket = self.bucket,
+            key = object_key,
+        ))
+    }
+}
+
 /// Playback resolver: turns a track identifier into a presigned, time-limited
 /// [`PlaybackSource`].
 ///
@@ -193,7 +238,7 @@ impl Default for ResolverConfig {
 #[derive(Clone)]
 pub struct ResolverService {
     assets: Arc<dyn AudioAssetRepository>,
-    signer: Arc<dyn UrlSigner>,
+    url_provider: Arc<dyn PlaybackUrlProvider>,
     config: ResolverConfig,
 }
 
@@ -204,9 +249,23 @@ impl ResolverService {
         signer: Arc<dyn UrlSigner>,
         config: ResolverConfig,
     ) -> Self {
+        let url_provider = Arc::new(RustfsUrlProvider {
+            signer,
+            base_url: config.base_url.clone(),
+            bucket: config.bucket.clone(),
+        });
+        Self::with_url_provider(assets, url_provider, config)
+    }
+
+    /// Creates a resolver with a custom URL provider such as Supabase Storage.
+    pub fn with_url_provider(
+        assets: Arc<dyn AudioAssetRepository>,
+        url_provider: Arc<dyn PlaybackUrlProvider>,
+        config: ResolverConfig,
+    ) -> Self {
         Self {
             assets,
-            signer,
+            url_provider,
             config,
         }
     }
@@ -230,7 +289,10 @@ impl ResolverService {
             .ok_or_else(|| CanopyError::not_found("audio_asset", track_id))?;
 
         let expires_at_epoch_ms = now_epoch_ms + self.config.url_ttl.as_millis() as u64;
-        let stream_url = self.presign(&asset.object_key, expires_at_epoch_ms);
+        let stream_url = self
+            .url_provider
+            .signed_url(&asset.object_key, expires_at_epoch_ms)
+            .await?;
 
         Ok(PlaybackSource {
             track_id: track_id.to_string(),
@@ -240,6 +302,21 @@ impl ResolverService {
             duration_ms: asset.duration_ms,
             expires_at_epoch_ms,
         })
+    }
+
+    /// Resolves a track and synchronizes the lightweight anonymous session.
+    pub async fn resolve_for_session(
+        &self,
+        playback: &PlaybackService,
+        session_id: &str,
+        track_id: &str,
+        now_epoch_ms: u64,
+    ) -> CanopyResult<PlaybackSource> {
+        let source = self.resolve_at(track_id, now_epoch_ms).await?;
+        playback
+            .load_media(session_id, source.track_id.clone())
+            .await?;
+        Ok(source)
     }
 
     /// Picks the most preferred available asset, falling back to the first one
@@ -256,20 +333,6 @@ impl ResolverService {
         }
         assets.into_iter().next()
     }
-
-    /// Builds the full presigned URL for an object key.
-    fn presign(&self, object_key: &str, expires_at_epoch_ms: u64) -> String {
-        let signature = self.signer.sign(object_key, expires_at_epoch_ms);
-        // Object storage validates against an epoch-seconds `expires`; the
-        // millisecond value is carried separately in `PlaybackSource`.
-        let expires_epoch_s = expires_at_epoch_ms / 1_000;
-        format!(
-            "{base}/{bucket}/{key}?signature={signature}&expires={expires_epoch_s}",
-            base = self.config.base_url,
-            bucket = self.config.bucket,
-            key = object_key,
-        )
-    }
 }
 
 /// Current wall-clock time in epoch milliseconds.
@@ -283,8 +346,22 @@ fn now_epoch_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jade_store::InMemoryAudioAssetStore;
+
+    use crate::jade_store::{InMemoryAudioAssetStore, InMemorySessionStore};
     use crate::signing::HmacUrlSigner;
+
+    struct StaticUrlProvider;
+
+    #[async_trait::async_trait]
+    impl PlaybackUrlProvider for StaticUrlProvider {
+        async fn signed_url(
+            &self,
+            object_key: &str,
+            _expires_at_epoch_ms: u64,
+        ) -> CanopyResult<String> {
+            Ok(format!("https://media.test/{object_key}"))
+        }
+    }
 
     fn asset(track: &str, codec: &str, key: &str) -> AudioAsset {
         AudioAsset {
@@ -358,5 +435,38 @@ mod tests {
         let resolver = resolver(vec![]);
         let err = resolver.resolve_at("missing", 0).await.unwrap_err();
         assert!(matches!(err, CanopyError::NotFound { entity, .. } if entity == "audio_asset"));
+    }
+
+    #[tokio::test]
+    async fn resolve_for_session_updates_anonymous_session() {
+        let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
+        let resolver = ResolverService::with_url_provider(
+            Arc::new(InMemoryAudioAssetStore::with_assets(vec![asset(
+                "trk_1",
+                "mp3",
+                "audio/tracks/trk_1.mp3",
+            )])),
+            Arc::new(StaticUrlProvider),
+            ResolverConfig {
+                url_ttl: Duration::from_secs(600),
+                ..ResolverConfig::default()
+            },
+        );
+
+        let source = resolver
+            .resolve_for_session(&playback, "", "trk_1", 1_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            source.stream_url,
+            "https://media.test/audio/tracks/trk_1.mp3"
+        );
+        let session = playback
+            .get_session(PlaybackService::DEFAULT_SESSION_ID)
+            .await
+            .unwrap();
+        assert_eq!(session.current_media_id.as_deref(), Some("trk_1"));
+        assert_eq!(session.position_ms, 0);
     }
 }
