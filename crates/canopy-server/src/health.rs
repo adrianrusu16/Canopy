@@ -1,20 +1,56 @@
 //! Health service.
 //!
-//! Today this reports process liveness, the build version, and optionally
-//! PostgreSQL connectivity. The dependency-aware readiness check (RustFS
-//! reachability, degraded states) described in the architecture is a planned
-//! addition.
+//! Reports process liveness, build version, and dependency readiness.
+
+use std::time::Duration;
 
 #[cfg(feature = "pg")]
 use std::sync::Arc;
+
+/// Health state for the service or one dependency.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HealthState {
+    /// Fully healthy.
+    Healthy,
+    /// Reachable but not fully healthy.
+    Degraded,
+    /// Not ready to serve traffic.
+    Unhealthy,
+}
+
+impl HealthState {
+    /// Wire-friendly lowercase status.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Unhealthy => "unhealthy",
+        }
+    }
+}
+
+/// Outcome of a dependency health probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyStatus {
+    /// Dependency name.
+    pub name: String,
+    /// Dependency status.
+    pub status: HealthState,
+    /// Short diagnostic message.
+    pub message: String,
+}
 
 /// Outcome of a health probe.
 #[derive(Clone, Debug)]
 pub struct HealthStatus {
     /// Whether the service considers itself healthy.
     pub healthy: bool,
+    /// Aggregate health status.
+    pub status: HealthState,
     /// Build version of the running binary.
     pub version: String,
+    /// Per-dependency status details.
+    pub dependencies: Vec<DependencyStatus>,
 }
 
 /// Application service for health/readiness reporting.
@@ -22,6 +58,7 @@ pub struct HealthStatus {
 pub struct HealthService {
     #[cfg(feature = "pg")]
     db_pool: Option<Arc<sqlx::PgPool>>,
+    rustfs_endpoint: Option<String>,
 }
 
 impl HealthService {
@@ -30,7 +67,14 @@ impl HealthService {
         Self {
             #[cfg(feature = "pg")]
             db_pool: None,
+            rustfs_endpoint: None,
         }
+    }
+
+    /// Adds an optional RustFS endpoint probe.
+    pub fn with_rustfs(mut self, endpoint: Option<String>) -> Self {
+        self.rustfs_endpoint = endpoint;
+        self
     }
 
     #[cfg(feature = "pg")]
@@ -38,32 +82,145 @@ impl HealthService {
     pub fn with_db(pool: Arc<sqlx::PgPool>) -> Self {
         Self {
             db_pool: Some(pool),
+            rustfs_endpoint: None,
         }
     }
 
     /// Returns the current health status.
-    ///
-    /// When a PostgreSQL pool is attached, a lightweight `SELECT 1` probe is
-    /// run; failure marks the status as unhealthy.
     pub async fn check(&self) -> HealthStatus {
-        #[allow(unused_mut)]
-        let mut healthy = true;
+        let mut dependencies = Vec::new();
 
         #[cfg(feature = "pg")]
-        #[allow(clippy::collapsible_if)]
         if let Some(pool) = &self.db_pool {
-            if sqlx::query("SELECT 1")
-                .fetch_optional(pool.as_ref())
-                .await
-                .is_err()
-            {
-                healthy = false;
-            }
+            dependencies.push(check_postgres(pool).await);
         }
 
-        HealthStatus {
-            healthy,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+        if let Some(endpoint) = &self.rustfs_endpoint {
+            dependencies.push(check_tcp_endpoint("rustfs", endpoint).await);
         }
+
+        let status = aggregate(&dependencies);
+
+        HealthStatus {
+            healthy: status == HealthState::Healthy,
+            status,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            dependencies,
+        }
+    }
+}
+
+#[cfg(feature = "pg")]
+async fn check_postgres(pool: &Arc<sqlx::PgPool>) -> DependencyStatus {
+    match sqlx::query("SELECT 1").fetch_optional(pool.as_ref()).await {
+        Ok(_) => DependencyStatus {
+            name: "postgres".to_string(),
+            status: HealthState::Healthy,
+            message: "SELECT 1 succeeded".to_string(),
+        },
+        Err(err) => DependencyStatus {
+            name: "postgres".to_string(),
+            status: HealthState::Unhealthy,
+            message: err.to_string(),
+        },
+    }
+}
+
+async fn check_tcp_endpoint(name: &str, endpoint: &str) -> DependencyStatus {
+    let Some(addr) = endpoint_socket_addr(endpoint) else {
+        return DependencyStatus {
+            name: name.to_string(),
+            status: HealthState::Unhealthy,
+            message: format!("invalid endpoint: {endpoint}"),
+        };
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await;
+    match result {
+        Ok(Ok(_)) => DependencyStatus {
+            name: name.to_string(),
+            status: HealthState::Healthy,
+            message: format!("tcp connect succeeded: {addr}"),
+        },
+        Ok(Err(err)) => DependencyStatus {
+            name: name.to_string(),
+            status: HealthState::Unhealthy,
+            message: err.to_string(),
+        },
+        Err(_) => DependencyStatus {
+            name: name.to_string(),
+            status: HealthState::Unhealthy,
+            message: format!("tcp connect timed out: {addr}"),
+        },
+    }
+}
+
+fn endpoint_socket_addr(endpoint: &str) -> Option<String> {
+    let endpoint = endpoint.trim();
+    let without_scheme = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint);
+    let authority = without_scheme.split('/').next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    if authority.rsplit_once(':').is_some() {
+        Some(authority.to_string())
+    } else if endpoint.starts_with("https://") {
+        Some(format!("{authority}:443"))
+    } else {
+        Some(format!("{authority}:80"))
+    }
+}
+
+fn aggregate(dependencies: &[DependencyStatus]) -> HealthState {
+    if dependencies
+        .iter()
+        .any(|dep| dep.status == HealthState::Unhealthy)
+    {
+        HealthState::Unhealthy
+    } else if dependencies
+        .iter()
+        .any(|dep| dep.status == HealthState::Degraded)
+    {
+        HealthState::Degraded
+    } else {
+        HealthState::Healthy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_socket_addr_defaults_ports() {
+        assert_eq!(
+            endpoint_socket_addr("http://localhost:9000"),
+            Some("localhost:9000".to_string())
+        );
+        assert_eq!(
+            endpoint_socket_addr("https://rustfs.internal"),
+            Some("rustfs.internal:443".to_string())
+        );
+        assert_eq!(
+            endpoint_socket_addr("localhost"),
+            Some("localhost:80".to_string())
+        );
+    }
+
+    #[test]
+    fn aggregate_marks_unhealthy_dependency_as_unhealthy() {
+        let status = aggregate(&[DependencyStatus {
+            name: "postgres".to_string(),
+            status: HealthState::Unhealthy,
+            message: "down".to_string(),
+        }]);
+        assert_eq!(status, HealthState::Unhealthy);
     }
 }

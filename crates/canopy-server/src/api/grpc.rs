@@ -7,11 +7,11 @@ use canopy_proto::canopy_server::Canopy;
 use canopy_proto::{
     BrowseRequest, BrowseResponse, DiscoveryRequest, DiscoveryTrack, EndSessionRequest,
     EndSessionResponse, GetMediaRequest, GetMediaResponse, GetSessionRequest, GetSessionResponse,
-    HealthRequest, HealthResponse, MediaItem as ProtoMediaItem, PauseRequest, PauseResponse,
-    PlayRequest, PlayResponse, PlaybackRequest, PlaybackSource as ProtoPlaybackSource,
-    SearchRequest, SearchResponse, SeekRequest, SeekResponse, SetPlaybackSpeedRequest,
-    SetPlaybackSpeedResponse, StopRequest, StopResponse, UpdateSessionRequest,
-    UpdateSessionResponse,
+    HealthDependency, HealthRequest, HealthResponse, MediaItem as ProtoMediaItem, PauseRequest,
+    PauseResponse, PlayRequest, PlayResponse, PlaybackRequest,
+    PlaybackSource as ProtoPlaybackSource, SearchRequest, SearchResponse, SeekRequest,
+    SeekResponse, SetPlaybackSpeedRequest, SetPlaybackSpeedResponse, StopRequest, StopResponse,
+    UpdateSessionRequest, UpdateSessionResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -251,6 +251,16 @@ impl Canopy for GrpcApi {
         Ok(Response::new(HealthResponse {
             healthy: status.healthy,
             version: status.version,
+            status: status.status.as_str().to_string(),
+            dependencies: status
+                .dependencies
+                .into_iter()
+                .map(|dep| HealthDependency {
+                    name: dep.name,
+                    status: dep.status.as_str().to_string(),
+                    message: dep.message,
+                })
+                .collect(),
         }))
     }
 

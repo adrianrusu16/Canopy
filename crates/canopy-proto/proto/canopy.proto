@@ -172,4 +172,11 @@ message HealthRequest { }
 message HealthResponse {
   bool   healthy = 1;
   string version = 2;
+  string status = 3; // healthy | degraded | unhealthy
+  repeated HealthDependency dependencies = 4;
+}
+message HealthDependency {
+  string name = 1;
+  string status = 2;
+  string message = 3;
 }

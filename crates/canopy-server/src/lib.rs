@@ -121,7 +121,11 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 discovery_repo = Arc::new(pg_catalog);
                 asset_repo = Arc::new(jade_store::PgAudioAssetRepository::new((*pool).clone()));
                 session_repo = Arc::new(jade_store::PgSessionRepository::new((*pool).clone()));
-                health = HealthService::with_db(pool);
+                health = HealthService::with_db(pool).with_rustfs(
+                    config
+                        .health_check_rustfs
+                        .then(|| config.rustfs_url.clone()),
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -139,7 +143,11 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 discovery_repo = Arc::new(catalog);
                 asset_repo = Arc::new(demo_assets());
                 session_repo = Arc::new(InMemorySessionStore::default());
-                health = HealthService::new();
+                health = HealthService::new().with_rustfs(
+                    config
+                        .health_check_rustfs
+                        .then(|| config.rustfs_url.clone()),
+                );
             }
         }
     }
@@ -151,7 +159,11 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         discovery_repo = Arc::new(catalog);
         asset_repo = Arc::new(demo_assets());
         session_repo = Arc::new(InMemorySessionStore::default());
-        health = HealthService::new();
+        health = HealthService::new().with_rustfs(
+            config
+                .health_check_rustfs
+                .then(|| config.rustfs_url.clone()),
+        );
     }
 
     // Domain services over the ports.

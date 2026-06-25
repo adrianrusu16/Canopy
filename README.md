@@ -21,7 +21,7 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` migrations, Docker Compose, typed repository ports, `PgCatalogRepository`, `PgSessionRepository`, `PgAudioAssetRepository`, and transactional provider ingest are implemented. PostgreSQL mode auto-detects the DB under the `pg` feature and falls back to in-memory stores on connection failure. |
 | Storage (RustFS)          | 🔴 Planned     | No RustFS integration in the request path yet.                                              |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
-| Health checks             | 🟡 Partial     | `HealthService` reports liveness + version + PostgreSQL connectivity (via `SELECT 1` probe when `pg` feature is on). RustFS reachability and degraded-state distinction still planned. |
+| Health checks             | 🟡 Partial     | `HealthService` reports liveness, version, aggregate status, dependency details, PostgreSQL connectivity, and optional RustFS TCP reachability via `CANOPY_HEALTH_CHECK_RUSTFS=true`. |
 | CI / Verification         | 🟡 Partial     | GitHub Actions runs fmt, all-feature Clippy, default tests, PostgreSQL feature tests against a Postgres service container, and release build. Proto compatibility gates are still planned. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
@@ -679,7 +679,7 @@ When the `pg` feature is enabled, the server attempts to connect to the database
 
 If `CANOPY_PROVIDER_FIXTURE_PATH` is set in PostgreSQL mode, Canopy reads the fixture through `TestFixtureProvider` and ingests it with `CatalogIngest` before starting the gRPC server. The operation is idempotent by `provider_tracks(provider, provider_track_id)`, so the same fixture can be replayed during local development.
 
-The `HealthService` checks PostgreSQL connectivity when a pool is present; a failed probe marks the health response as `healthy: false`.
+The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-dependency details. It checks PostgreSQL connectivity when a pool is present; set `CANOPY_HEALTH_CHECK_RUSTFS=true` to include a RustFS TCP reachability probe.
 
 ### PostgreSQL Integration Tests
 

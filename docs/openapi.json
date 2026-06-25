@@ -732,6 +732,21 @@
           },
           "version": {
             "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ],
+            "description": "Aggregate readiness status"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthDependency"
+            }
           }
         }
       },
@@ -798,12 +813,32 @@
             "$ref": "#/components/schemas/MediaItem"
           }
         }
+      },
+      "HealthDependency": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
       }
     }
   },
   "x-canopy-docs": {
     "persistenceStatus": "PostgreSQL provider ingest is transactional and idempotent by provider identity; discovery materialization uses one representative asset per track.",
     "sessionControlStatus": "Playback control RPCs mutate SessionRepository state; empty session_id maps to the default session.",
-    "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC."
+    "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC.",
+    "healthStatus": "Health responses include aggregate status plus dependency details; RustFS probing is opt-in via CANOPY_HEALTH_CHECK_RUSTFS."
   }
 }
