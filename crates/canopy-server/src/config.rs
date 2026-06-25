@@ -52,6 +52,10 @@ pub struct Config {
     pub supabase_key: String,
     /// Supabase Storage bucket containing music objects.
     pub supabase_storage_bucket: String,
+    /// Supabase REST table/view containing music catalog rows.
+    pub supabase_catalog_table: String,
+    /// Whether startup should sync Supabase catalog rows into PostgreSQL.
+    pub supabase_sync_on_start: bool,
     /// Signed URL lifetime when resolving Supabase playback.
     pub supabase_signed_url_ttl_secs: u64,
     /// Redis URL for the JadeCache layer.
@@ -83,6 +87,8 @@ impl Config {
     const DEFAULT_RUSTFS_SECRET_KEY: &'static str = "canopy-secret";
     /// Default Supabase signed URL lifetime in seconds.
     const DEFAULT_SUPABASE_SIGNED_URL_TTL_SECS: u64 = 15 * 60;
+    /// Default Supabase catalog table/view name.
+    const DEFAULT_SUPABASE_CATALOG_TABLE: &'static str = "tracks";
     /// Default Redis URL for the cache layer.
     const DEFAULT_REDIS_URL: &'static str = "redis://localhost:6379";
 
@@ -99,6 +105,8 @@ impl Config {
     /// * `CANOPY_RUSTFS_SECRET_KEY` — RustFS secret key.
     /// * `CANOPY_REDIS_URL` — Redis connection string.
     /// * `CANOPY_HEALTH_CHECK_RUSTFS` — set `true` to include RustFS TCP reachability in health.
+    /// * `CANOPY_SUPABASE_CATALOG_TABLE` — Supabase REST table/view to read catalog rows from.
+    /// * `CANOPY_SUPABASE_SYNC_ON_START` — set `true` to ingest Supabase catalog rows at startup in PostgreSQL mode.
     /// * `CANOPY_PROVIDER_FIXTURE_PATH` — optional fixture JSON to ingest at startup in PostgreSQL mode.
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let grpc_addr = env::var("CANOPY_GRPC_ADDR")
@@ -146,6 +154,16 @@ impl Config {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(Self::DEFAULT_SUPABASE_SIGNED_URL_TTL_SECS);
 
+        let supabase_catalog_table = env::var("CANOPY_SUPABASE_CATALOG_TABLE")
+            .unwrap_or_else(|_| Self::DEFAULT_SUPABASE_CATALOG_TABLE.to_string());
+
+        let supabase_sync_on_start =
+            env::var("CANOPY_SUPABASE_SYNC_ON_START")
+                .ok()
+                .is_some_and(|v| {
+                    matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+                });
+
         let redis_url =
             env::var("CANOPY_REDIS_URL").unwrap_or_else(|_| Self::DEFAULT_REDIS_URL.to_string());
 
@@ -172,6 +190,8 @@ impl Config {
             supabase_url,
             supabase_key,
             supabase_storage_bucket,
+            supabase_catalog_table,
+            supabase_sync_on_start,
             supabase_signed_url_ttl_secs,
             redis_url,
             health_check_rustfs,

@@ -846,6 +846,7 @@
     "healthStatus": "Health responses include aggregate status plus dependency details; RustFS probing is opt-in via CANOPY_HEALTH_CHECK_RUSTFS.",
     "authModel": "Canopy is anonymous-by-default; session_id tracks playback state/history/preferences without requiring authentication. Token auth is optional future account-sync plumbing.",
     "playbackResolution": "ResolvePlayback accepts track_id plus optional session_id. It selects an audio asset, returns a RustFS or Supabase signed URL, and loads the track into the resolved session.",
-    "supabaseMusicSource": "Set CANOPY_MUSIC_SOURCE=supabase with CANOPY_SUPABASE_URL, CANOPY_SUPABASE_KEY, CANOPY_SUPABASE_STORAGE_BUCKET, and CANOPY_SUPABASE_SIGNED_URL_TTL_SECS to fetch Supabase Storage signed URLs."
+    "supabaseMusicSource": "Set CANOPY_MUSIC_SOURCE=supabase with CANOPY_SUPABASE_URL, CANOPY_SUPABASE_KEY, CANOPY_SUPABASE_STORAGE_BUCKET, and CANOPY_SUPABASE_SIGNED_URL_TTL_SECS to fetch Supabase Storage signed URLs.",
+    "supabaseCatalogSource": "SupabaseCatalogProvider reads normalized rows from CANOPY_SUPABASE_URL/rest/v1/CANOPY_SUPABASE_CATALOG_TABLE?select=* when CANOPY_SUPABASE_SYNC_ON_START=true in PostgreSQL mode, maps them into ProviderTrack, and ingests through CatalogIngest."
   }
 }

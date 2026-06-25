@@ -632,6 +632,8 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_SUPABASE_KEY` | unset | Supabase anon/service key used by Canopy to request signed URLs |
 | `CANOPY_SUPABASE_STORAGE_BUCKET` | `pandawave-media` | Supabase Storage bucket for music objects |
 | `CANOPY_SUPABASE_SIGNED_URL_TTL_SECS` | `900` | Supabase signed URL lifetime |
+| `CANOPY_SUPABASE_CATALOG_TABLE` | `tracks` | Supabase REST table/view used by the catalog adapter |
+| `CANOPY_SUPABASE_SYNC_ON_START` | `false` | In PostgreSQL mode, fetch and ingest Supabase catalog rows during startup |
 | `CANOPY_ADMINER_PORT` | `8080` | Adminer host port |
 | `CANOPY_GRPC_ADDR` | `[::1]:50051` | gRPC server bind address |
 | `CANOPY_DATABASE_URL` | `postgres://canopy:canopy@localhost:5432/canopy` | PostgreSQL connection string |
@@ -697,7 +699,7 @@ CANOPY_TEST_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy \
 
 ### Supabase Music Source
 
-Set `CANOPY_MUSIC_SOURCE=supabase` when Supabase Storage should be the music source. Canopy expects `audio_assets.object_key` values to match paths inside `CANOPY_SUPABASE_STORAGE_BUCKET`; `ResolvePlayback` selects the best asset, requests a signed Supabase Storage URL, returns it to the client, and updates the supplied anonymous session.
+Set `CANOPY_MUSIC_SOURCE=supabase` when Supabase Storage should be the music source. Canopy expects `audio_assets.object_key` values to match paths inside `CANOPY_SUPABASE_STORAGE_BUCKET`; `ResolvePlayback` selects the best asset, requests a signed Supabase Storage URL, returns it to the client, and updates the supplied anonymous session. Set `CANOPY_SUPABASE_SYNC_ON_START=true` in PostgreSQL mode to fetch normalized catalog rows from Supabase REST and ingest them before serving gRPC.
 
 Required runtime values:
 
@@ -707,9 +709,40 @@ CANOPY_SUPABASE_URL=https://<project-ref>.supabase.co
 CANOPY_SUPABASE_KEY=<anon-or-service-role-key>
 CANOPY_SUPABASE_STORAGE_BUCKET=pandawave-media
 CANOPY_SUPABASE_SIGNED_URL_TTL_SECS=900
+CANOPY_SUPABASE_CATALOG_TABLE=tracks
+CANOPY_SUPABASE_SYNC_ON_START=true
 ```
 
 Use the anon key only when Supabase Storage policies permit signing the relevant objects. Use a service role key for server-side private-bucket signing and keep it out of client builds.
+
+Expected Supabase catalog row shape:
+
+```json
+{
+  "id": "song-1",
+  "title": "Soft Signal",
+  "artist": "Canopy Test",
+  "album": "Backend Sessions",
+  "release_year": 2026,
+  "duration_ms": 181000,
+  "is_explicit": false,
+  "license_type": "Private",
+  "license_url": "https://example.test/license",
+  "attribution": "Canopy Test",
+  "assets": [
+    {
+      "codec": "mp3",
+      "content_type": "audio/mpeg",
+      "object_key": "audio/song-1.mp3",
+      "size_bytes": 1234,
+      "checksum_sha256": "abc",
+      "duration_ms": 181000
+    }
+  ],
+  "artwork_key": "artwork/song-1.png"
+}
+```
+
 
 ### RustFS Setup
 

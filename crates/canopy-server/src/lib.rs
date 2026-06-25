@@ -119,6 +119,25 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                         tracing::warn!(failures = ?result.failures, "Provider fixture ingest had failures");
                     }
                 }
+                if config.music_source == MusicSource::Supabase && config.supabase_sync_on_start {
+                    let provider =
+                        providers::SupabaseCatalogProvider::new(providers::SupabaseCatalogConfig {
+                            project_url: config.supabase_url.clone(),
+                            api_key: config.supabase_key.clone(),
+                            table: config.supabase_catalog_table.clone(),
+                        });
+                    let ingestion = providers::IngestionService::new(Arc::new(pg_catalog.clone()));
+                    let result = ingestion.ingest_from_provider(&provider).await?;
+                    info!(
+                        table = %config.supabase_catalog_table,
+                        succeeded = result.succeeded,
+                        failed = result.failed,
+                        "Ingested Supabase catalog into PostgreSQL catalog"
+                    );
+                    if !result.failures.is_empty() {
+                        tracing::warn!(failures = ?result.failures, "Supabase catalog ingest had failures");
+                    }
+                }
                 catalog_repo = Arc::new(pg_catalog.clone());
                 discovery_repo = Arc::new(pg_catalog);
                 asset_repo = Arc::new(jade_store::PgAudioAssetRepository::new((*pool).clone()));
