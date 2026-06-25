@@ -208,15 +208,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let catalog = CatalogService::new(catalog_repo.clone());
     let search = SearchService::new(catalog_repo);
     let playback = PlaybackService::new(session_repo);
-    let profile = ProfileService::new(
-        profile_repo.clone(),
-        AuthService::new(config.auth_token_secret.clone()),
-    );
-    let history = HistoryService::new(
-        profile_repo,
-        history_repo,
-        AuthService::new(config.auth_token_secret.clone()),
-    );
+    let auth = AuthService::new(config.auth_token_secret.clone());
+    let profile = ProfileService::new(profile_repo.clone());
+    let history = HistoryService::new(profile_repo, history_repo);
     let discovery = DiscoveryService::new(discovery_repo);
 
     // Playback resolver: selects an asset and mints a short-lived stream URL.
@@ -258,6 +252,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         health,
         resolver,
         discovery,
+        auth,
     });
 
     info!("Listening on {}", config.grpc_addr);

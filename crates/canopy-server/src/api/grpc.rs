@@ -2,7 +2,9 @@
 //! services, translating proto messages to and from the domain model.
 
 use async_trait::async_trait;
-use canopy_core::{MediaItem as DomainMediaItem, MediaPage, Page};
+use canopy_core::{
+    CanopyError, CanopyResult, MediaItem as DomainMediaItem, MediaPage, Page, UserIdentity,
+};
 use canopy_proto::canopy_server::Canopy;
 use canopy_proto::{
     BrowseRequest, BrowseResponse, DiscoveryRequest, DiscoveryTrack, EndSessionRequest,
@@ -18,6 +20,7 @@ use canopy_proto::{
 use tonic::{Request, Response, Status};
 
 use crate::api::to_status;
+use crate::auth::AuthService;
 use crate::catalog::CatalogService;
 use crate::discovery::DiscoveryService;
 use crate::health::HealthService;
@@ -36,6 +39,7 @@ pub struct GrpcServices {
     pub health: HealthService,
     pub resolver: ResolverService,
     pub discovery: DiscoveryService,
+    pub auth: AuthService,
 }
 
 /// gRPC entry point wiring the wire contract to the domain services.
@@ -48,6 +52,7 @@ pub struct GrpcApi {
     health: HealthService,
     resolver: ResolverService,
     discovery: DiscoveryService,
+    auth: AuthService,
 }
 
 impl GrpcApi {
@@ -62,6 +67,7 @@ impl GrpcApi {
             health: services.health,
             resolver: services.resolver,
             discovery: services.discovery,
+            auth: services.auth,
         }
     }
 }
@@ -91,6 +97,38 @@ fn to_proto_profile(profile: canopy_core::UserProfile) -> ProtoUserProfile {
         display_name: profile.display_name.unwrap_or_default(),
         history_enabled: profile.history_enabled,
     }
+}
+
+fn extract_identity(
+    metadata: &tonic::metadata::MetadataMap,
+    body_token: &str,
+    auth: &AuthService,
+) -> CanopyResult<UserIdentity> {
+    if let Some(raw) = metadata.get("authorization") {
+        let value = raw
+            .to_str()
+            .map_err(|_| CanopyError::unauthenticated("invalid authorization metadata"))?;
+        let Some(token) = value.strip_prefix("Bearer ") else {
+            return Err(CanopyError::unauthenticated(
+                "authorization must use Bearer token",
+            ));
+        };
+        return auth.verify(token.trim());
+    }
+
+    if let Some(raw) = metadata.get("x-canopy-auth-token") {
+        let token = raw
+            .to_str()
+            .map_err(|_| CanopyError::unauthenticated("invalid x-canopy-auth-token metadata"))?;
+        return auth.verify(token.trim());
+    }
+
+    let body_token = body_token.trim();
+    if !body_token.is_empty() {
+        return auth.verify(body_token);
+    }
+
+    Err(CanopyError::unauthenticated("missing auth token"))
 }
 
 fn current_epoch_ms() -> u64 {
@@ -276,10 +314,13 @@ impl Canopy for GrpcApi {
         &self,
         request: Request<UpsertProfileRequest>,
     ) -> Result<Response<UpsertProfileResponse>, Status> {
+        let metadata = request.metadata().clone();
         let req = request.into_inner();
+        let identity =
+            extract_identity(&metadata, &req.auth_token, &self.auth).map_err(to_status)?;
         let profile = self
             .profile
-            .upsert_profile(&req.auth_token, &req.display_name, req.history_enabled)
+            .upsert_profile(&identity, &req.display_name, req.history_enabled)
             .await
             .map_err(to_status)?;
         Ok(Response::new(UpsertProfileResponse {
@@ -291,11 +332,14 @@ impl Canopy for GrpcApi {
         &self,
         request: Request<RecordPlaybackHistoryRequest>,
     ) -> Result<Response<RecordPlaybackHistoryResponse>, Status> {
+        let metadata = request.metadata().clone();
         let req = request.into_inner();
+        let identity =
+            extract_identity(&metadata, &req.auth_token, &self.auth).map_err(to_status)?;
         let recorded = self
             .history
             .record_playback(
-                &req.auth_token,
+                &identity,
                 &req.track_id,
                 req.duration_ms,
                 req.completion_pct,
@@ -369,5 +413,98 @@ impl Canopy for GrpcApi {
         Ok(Response::new(DiscoveryTrack {
             item: Some(to_proto_item(item)),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthService;
+    use tonic::metadata::MetadataValue;
+
+    fn auth() -> AuthService {
+        AuthService::new("secret")
+    }
+
+    fn token_for(user_id: &str) -> String {
+        auth()
+            .mint(user_id, std::time::Duration::from_secs(3600))
+            .unwrap()
+    }
+
+    #[test]
+    fn extract_identity_reads_bearer_authorization_metadata() {
+        let mut request = Request::new(());
+        let token = token_for("user-1");
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {token}")).unwrap(),
+        );
+
+        let identity = extract_identity(request.metadata(), "", &auth()).unwrap();
+
+        assert_eq!(identity.user_id, "user-1");
+    }
+
+    #[test]
+    fn extract_identity_reads_direct_token_metadata() {
+        let mut request = Request::new(());
+        let token = token_for("user-2");
+        request.metadata_mut().insert(
+            "x-canopy-auth-token",
+            MetadataValue::try_from(token).unwrap(),
+        );
+
+        let identity = extract_identity(request.metadata(), "", &auth()).unwrap();
+
+        assert_eq!(identity.user_id, "user-2");
+    }
+
+    #[test]
+    fn extract_identity_prefers_authorization_over_direct_token_metadata() {
+        let mut request = Request::new(());
+        let bearer = token_for("bearer-user");
+        let direct = token_for("direct-user");
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {bearer}")).unwrap(),
+        );
+        request.metadata_mut().insert(
+            "x-canopy-auth-token",
+            MetadataValue::try_from(direct).unwrap(),
+        );
+
+        let identity = extract_identity(request.metadata(), "", &auth()).unwrap();
+
+        assert_eq!(identity.user_id, "bearer-user");
+    }
+
+    #[test]
+    fn extract_identity_uses_body_fallback_when_metadata_is_absent() {
+        let token = token_for("fallback-user");
+
+        let identity =
+            extract_identity(&tonic::metadata::MetadataMap::new(), &token, &auth()).unwrap();
+
+        assert_eq!(identity.user_id, "fallback-user");
+    }
+
+    #[test]
+    fn extract_identity_rejects_malformed_bearer_metadata() {
+        let mut request = Request::new(());
+        request
+            .metadata_mut()
+            .insert("authorization", MetadataValue::from_static("Token abc"));
+
+        let err = extract_identity(request.metadata(), "", &auth()).unwrap_err();
+
+        assert!(matches!(err, canopy_core::CanopyError::Unauthenticated(_)));
+    }
+
+    #[test]
+    fn extract_identity_rejects_missing_token() {
+        let err = extract_identity(&tonic::metadata::MetadataMap::new(), "", &auth()).unwrap_err();
+
+        assert!(matches!(err, canopy_core::CanopyError::Unauthenticated(_)));
     }
 }

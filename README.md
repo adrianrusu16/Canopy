@@ -211,9 +211,9 @@ This proto is the single source of truth for the wire contract between PandaEngi
 
 Canopy is designed to let anonymous users browse, search, and play music without logging in. Anonymous `session_id` values are operational playback state only; they are not users and must not own durable backend history, libraries, likes, or preferences. The client is responsible for any anonymous local cache.
 
-Durable user state starts at `UpsertProfile`. The client sends a login token, Canopy verifies it with `AuthService`, and the resulting external user identity creates or updates a `profiles` row. The profile includes `history_enabled`, so even logged-in playback history can remain an explicit opt-in. Future library, likes, preferences, and cross-device sync endpoints should hang from this profile boundary, not from anonymous sessions.
+Durable user state starts at `UpsertProfile`. Authenticated profile-scoped RPCs should send the end-user token in gRPC metadata as `authorization: Bearer <token>`. `x-canopy-auth-token` is accepted for clients that cannot set authorization metadata. Existing `auth_token` request fields remain as a temporary compatibility fallback, but new clients should not depend on them. Canopy verifies the token with `AuthService`, and the resulting external user identity creates or updates a `profiles` row. The profile includes `history_enabled`, so even logged-in playback history can remain an explicit opt-in. Future library, likes, preferences, and cross-device sync endpoints should hang from this profile boundary, not from anonymous sessions.
 
-`RecordPlaybackHistory` is the first profile-scoped durable state endpoint. It requires a login token, resolves the token to a profile, and records history only when `history_enabled=true`; disabled history returns a successful response with `recorded=false`.
+`RecordPlaybackHistory` is the first profile-scoped durable state endpoint. It requires a verified login token, resolves the identity to a profile, and records history only when `history_enabled=true`; disabled history returns a successful response with `recorded=false`.
 
 ---
 
