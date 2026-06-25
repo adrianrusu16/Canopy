@@ -22,7 +22,7 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Storage (RustFS)          | 🔴 Planned     | No RustFS integration in the request path yet.                                              |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
 | Health checks             | 🟡 Partial     | `HealthService` reports liveness + version + PostgreSQL connectivity (via `SELECT 1` probe when `pg` feature is on). RustFS reachability and degraded-state distinction still planned. |
-| CI / Verification         | 🟡 Partial     | GitHub Actions pipeline runs `cargo test`/`clippy`/`fmt` and `cargo build --release`. Local Postgres integration tests cover migrations, transactional provider ingest, multi-asset tracks, and discovery materialization; CI DB service wiring and proto compatibility gates are still planned. |
+| CI / Verification         | 🟡 Partial     | GitHub Actions runs fmt, all-feature Clippy, default tests, PostgreSQL feature tests against a Postgres service container, and release build. Proto compatibility gates are still planned. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
 
@@ -562,14 +562,15 @@ The CI pipeline is implemented via **GitHub Actions** (`.github/workflows/ci.yml
 ```text
 cargo check --workspace
 cargo test --workspace
-cargo clippy --workspace --tests -- -D warnings
+cargo clippy --workspace --all-features --tests -- -D warnings
 cargo fmt --all -- --check
+cargo test --workspace --features canopy-server/pg  # with PostgreSQL service container
 cargo build --workspace --release
 ```
 
 The workflow installs `protoc` so that the `canopy-proto` crate's `build.rs` compiles successfully in CI, and uses `Swatinem/rust-cache` for fast incremental builds.
 
-In addition, the pipeline will eventually verify that database migrations apply cleanly against a fresh PostgreSQL instance, run integration tests against real (containerized) PostgreSQL and RustFS instances rather than mocks alone, and check that changes to the shared `canopy_proto` crate don't break wire compatibility with PandaEngine before they merge.
+The test job starts a PostgreSQL service container and runs the `canopy-server/pg` integration suite, which applies migrations and verifies transactional provider ingest against a real database. RustFS integration tests and proto wire-compatibility gates are still planned.
 
 ---
 
