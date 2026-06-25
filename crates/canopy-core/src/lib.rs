@@ -13,11 +13,11 @@ pub mod signing;
 pub use error::{CanopyError, CanopyResult};
 pub use model::{
     AudioAsset, MediaItem, MediaPage, Page, PlaybackSource, ProviderAudioAsset, ProviderLicense,
-    ProviderTrack, Session, UserIdentity,
+    ProviderTrack, Session, UserIdentity, UserProfile,
 };
 pub use repository::{
     AudioAssetRepository, CatalogIngest, CatalogRepository, DiscoveryRepository, IngestBatchResult,
-    SessionRepository,
+    ProfileRepository, SessionRepository,
 };
 
 pub use signing::UrlSigner;

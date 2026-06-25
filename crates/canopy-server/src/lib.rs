@@ -29,6 +29,7 @@ pub mod health;
 pub mod jade_store;
 pub mod observability;
 pub mod playback;
+pub mod profile;
 pub mod providers;
 pub mod search;
 pub mod signing;
@@ -37,11 +38,13 @@ pub mod supabase;
 pub use config::{Config, MusicSource};
 
 use api::grpc::GrpcApi;
+use auth::AuthService;
 use catalog::CatalogService;
 use discovery::DiscoveryService;
 use health::HealthService;
 use jade_store::{InMemoryAudioAssetStore, InMemoryCatalog, InMemorySessionStore};
 use playback::{PlaybackService, ResolverConfig, ResolverService};
+use profile::ProfileService;
 use search::SearchService;
 use signing::HmacUrlSigner;
 use supabase::{SupabaseConfig, SupabaseStorageUrlProvider};
@@ -84,6 +87,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let discovery_repo: Arc<dyn canopy_core::DiscoveryRepository>;
     let asset_repo: Arc<dyn canopy_core::AudioAssetRepository>;
     let session_repo: Arc<dyn canopy_core::SessionRepository>;
+    let profile_repo: Arc<dyn canopy_core::ProfileRepository>;
     let health: HealthService;
 
     #[cfg(feature = "pg")]
@@ -142,6 +146,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 discovery_repo = Arc::new(pg_catalog);
                 asset_repo = Arc::new(jade_store::PgAudioAssetRepository::new((*pool).clone()));
                 session_repo = Arc::new(jade_store::PgSessionRepository::new((*pool).clone()));
+                profile_repo = Arc::new(jade_store::PgProfileRepository::new((*pool).clone()));
                 health = HealthService::with_db(pool).with_rustfs(
                     config
                         .health_check_rustfs
@@ -164,6 +169,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 discovery_repo = Arc::new(catalog);
                 asset_repo = Arc::new(demo_assets());
                 session_repo = Arc::new(InMemorySessionStore::default());
+                profile_repo = Arc::new(jade_store::InMemoryProfileStore::default());
                 health = HealthService::new().with_rustfs(
                     config
                         .health_check_rustfs
@@ -180,6 +186,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         discovery_repo = Arc::new(catalog);
         asset_repo = Arc::new(demo_assets());
         session_repo = Arc::new(InMemorySessionStore::default());
+        profile_repo = Arc::new(jade_store::InMemoryProfileStore::default());
         health = HealthService::new().with_rustfs(
             config
                 .health_check_rustfs
@@ -191,6 +198,10 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let catalog = CatalogService::new(catalog_repo.clone());
     let search = SearchService::new(catalog_repo);
     let playback = PlaybackService::new(session_repo);
+    let profile = ProfileService::new(
+        profile_repo,
+        AuthService::new(config.auth_token_secret.clone()),
+    );
     let discovery = DiscoveryService::new(discovery_repo);
 
     // Playback resolver: selects an asset and mints a short-lived stream URL.
@@ -223,7 +234,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Health service is already created above (with or without DB pool).
 
     // gRPC adapter.
-    let api = GrpcApi::new(catalog, search, playback, health, resolver, discovery);
+    let api = GrpcApi::new(
+        catalog, search, playback, profile, health, resolver, discovery,
+    );
 
     info!("Listening on {}", config.grpc_addr);
     Server::builder()

@@ -11,7 +11,8 @@ use canopy_proto::{
     PauseResponse, PlayRequest, PlayResponse, PlaybackRequest,
     PlaybackSource as ProtoPlaybackSource, SearchRequest, SearchResponse, SeekRequest,
     SeekResponse, SetPlaybackSpeedRequest, SetPlaybackSpeedResponse, StopRequest, StopResponse,
-    UpdateSessionRequest, UpdateSessionResponse,
+    UpdateSessionRequest, UpdateSessionResponse, UpsertProfileRequest, UpsertProfileResponse,
+    UserProfile as ProtoUserProfile,
 };
 use tonic::{Request, Response, Status};
 
@@ -20,6 +21,7 @@ use crate::catalog::CatalogService;
 use crate::discovery::DiscoveryService;
 use crate::health::HealthService;
 use crate::playback::{PlaybackService, ResolverService};
+use crate::profile::ProfileService;
 use crate::search::SearchService;
 
 /// gRPC entry point wiring the wire contract to the domain services.
@@ -27,6 +29,7 @@ pub struct GrpcApi {
     catalog: CatalogService,
     search: SearchService,
     playback: PlaybackService,
+    profile: ProfileService,
     health: HealthService,
     resolver: ResolverService,
     discovery: DiscoveryService,
@@ -38,6 +41,7 @@ impl GrpcApi {
         catalog: CatalogService,
         search: SearchService,
         playback: PlaybackService,
+        profile: ProfileService,
         health: HealthService,
         resolver: ResolverService,
         discovery: DiscoveryService,
@@ -46,6 +50,7 @@ impl GrpcApi {
             catalog,
             search,
             playback,
+            profile,
             health,
             resolver,
             discovery,
@@ -69,6 +74,15 @@ fn to_proto_item(item: DomainMediaItem) -> ProtoMediaItem {
 
 fn to_proto_items(page: MediaPage) -> Vec<ProtoMediaItem> {
     page.items.into_iter().map(to_proto_item).collect()
+}
+
+fn to_proto_profile(profile: canopy_core::UserProfile) -> ProtoUserProfile {
+    ProtoUserProfile {
+        profile_id: profile.id,
+        external_user_id: profile.external_user_id,
+        display_name: profile.display_name.unwrap_or_default(),
+        history_enabled: profile.history_enabled,
+    }
 }
 
 fn current_epoch_ms() -> u64 {
@@ -248,6 +262,21 @@ impl Canopy for GrpcApi {
             .await
             .map_err(to_status)?;
         Ok(Response::new(EndSessionResponse { success: true }))
+    }
+
+    async fn upsert_profile(
+        &self,
+        request: Request<UpsertProfileRequest>,
+    ) -> Result<Response<UpsertProfileResponse>, Status> {
+        let req = request.into_inner();
+        let profile = self
+            .profile
+            .upsert_profile(&req.auth_token, &req.display_name, req.history_enabled)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(UpsertProfileResponse {
+            profile: Some(to_proto_profile(profile)),
+        }))
     }
 
     async fn health(

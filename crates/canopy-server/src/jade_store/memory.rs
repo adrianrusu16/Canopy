@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyResult, CatalogRepository, DiscoveryRepository,
-    MediaItem, MediaPage, Page, Session, SessionRepository,
+    MediaItem, MediaPage, Page, ProfileRepository, Session, SessionRepository, UserProfile,
 };
 
 /// In-memory catalog backing store.
@@ -141,5 +141,40 @@ impl SessionRepository for InMemorySessionStore {
     async fn delete(&self, id: &str) -> CanopyResult<()> {
         self.sessions.lock().unwrap().remove(id);
         Ok(())
+    }
+}
+
+/// In-memory logged-in profile store.
+#[derive(Default)]
+pub struct InMemoryProfileStore {
+    profiles: Mutex<HashMap<String, UserProfile>>,
+}
+
+#[async_trait]
+impl ProfileRepository for InMemoryProfileStore {
+    async fn upsert_profile(
+        &self,
+        external_user_id: &str,
+        display_name: Option<&str>,
+        history_enabled: bool,
+    ) -> CanopyResult<UserProfile> {
+        let mut profiles = self.profiles.lock().unwrap();
+        let profile = profiles
+            .entry(external_user_id.to_string())
+            .or_insert_with(|| UserProfile {
+                id: uuid::Uuid::new_v4().to_string(),
+                external_user_id: external_user_id.to_string(),
+                ..UserProfile::default()
+            });
+        profile.display_name = display_name.map(ToString::to_string);
+        profile.history_enabled = history_enabled;
+        Ok(profile.clone())
+    }
+
+    async fn get_by_external_user_id(
+        &self,
+        external_user_id: &str,
+    ) -> CanopyResult<Option<UserProfile>> {
+        Ok(self.profiles.lock().unwrap().get(external_user_id).cloned())
     }
 }

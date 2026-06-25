@@ -405,6 +405,35 @@
           }
         }
       }
+    },
+    "/canopy.Canopy/UpsertProfile": {
+      "post": {
+        "summary": "Create or update logged-in profile",
+        "operationId": "UpsertProfile",
+        "description": "Requires a real login token. Anonymous sessions are not accepted and do not create durable backend state.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpsertProfileResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -836,6 +865,47 @@
             "type": "string"
           }
         }
+      },
+      "UpsertProfileRequest": {
+        "type": "object",
+        "properties": {
+          "auth_token": {
+            "type": "string",
+            "description": "Required logged-in user token; anonymous session IDs are not accepted"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "history_enabled": {
+            "type": "boolean",
+            "description": "Whether the logged-in user opts into durable backend playback history"
+          }
+        }
+      },
+      "UserProfile": {
+        "type": "object",
+        "properties": {
+          "profile_id": {
+            "type": "string"
+          },
+          "external_user_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "history_enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "UpsertProfileResponse": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/UserProfile"
+          }
+        }
       }
     }
   },
@@ -844,9 +914,10 @@
     "sessionControlStatus": "Playback control RPCs mutate SessionRepository state; empty session_id maps to the default session.",
     "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC.",
     "healthStatus": "Health responses include aggregate status plus dependency details; RustFS probing is opt-in via CANOPY_HEALTH_CHECK_RUSTFS.",
-    "authModel": "Canopy is anonymous-by-default; session_id tracks playback state/history/preferences without requiring authentication. Token auth is optional future account-sync plumbing.",
+    "authModel": "Anonymous users may browse, search, and play, but anonymous sessions are not durable users and receive no backend history, library, likes, or preferences. Durable state starts with UpsertProfile and a verified login token.",
     "playbackResolution": "ResolvePlayback accepts track_id plus optional session_id. It selects an audio asset, returns a RustFS or Supabase signed URL, and loads the track into the resolved session.",
     "supabaseMusicSource": "Set CANOPY_MUSIC_SOURCE=supabase with CANOPY_SUPABASE_URL, CANOPY_SUPABASE_KEY, CANOPY_SUPABASE_STORAGE_BUCKET, and CANOPY_SUPABASE_SIGNED_URL_TTL_SECS to fetch Supabase Storage signed URLs.",
-    "supabaseCatalogSource": "SupabaseCatalogProvider reads normalized rows from CANOPY_SUPABASE_URL/rest/v1/CANOPY_SUPABASE_CATALOG_TABLE?select=* when CANOPY_SUPABASE_SYNC_ON_START=true in PostgreSQL mode, maps them into ProviderTrack, and ingests through CatalogIngest."
+    "supabaseCatalogSource": "SupabaseCatalogProvider reads normalized rows from CANOPY_SUPABASE_URL/rest/v1/CANOPY_SUPABASE_CATALOG_TABLE?select=* when CANOPY_SUPABASE_SYNC_ON_START=true in PostgreSQL mode, maps them into ProviderTrack, and ingests through CatalogIngest.",
+    "profileStatus": "UpsertProfile verifies auth_token, upserts profiles(external_user_id), and stores history_enabled as the logged-in user history preference."
   }
 }

@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 
 use crate::error::CanopyResult;
-use crate::model::{AudioAsset, MediaItem, MediaPage, Page, ProviderTrack, Session};
+use crate::model::{AudioAsset, MediaItem, MediaPage, Page, ProviderTrack, Session, UserProfile};
 
 /// Read access to the catalog (artists, albums, tracks, playlists).
 #[async_trait]
@@ -65,6 +65,24 @@ pub trait SessionRepository: Send + Sync {
 
     /// Removes a session by identifier.
     async fn delete(&self, id: &str) -> CanopyResult<()>;
+}
+
+/// Persistence of durable logged-in user profiles.
+#[async_trait]
+pub trait ProfileRepository: Send + Sync {
+    /// Creates or updates a profile by real external user identity.
+    async fn upsert_profile(
+        &self,
+        external_user_id: &str,
+        display_name: Option<&str>,
+        history_enabled: bool,
+    ) -> CanopyResult<UserProfile>;
+
+    /// Fetches a profile by real external user identity, if present.
+    async fn get_by_external_user_id(
+        &self,
+        external_user_id: &str,
+    ) -> CanopyResult<Option<UserProfile>>;
 }
 
 /// Write access to the catalog for provider ingestion.

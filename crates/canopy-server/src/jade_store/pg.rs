@@ -25,8 +25,8 @@ use async_trait::async_trait;
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogIngest, CatalogRepository,
-    DiscoveryRepository, IngestBatchResult, MediaItem, MediaPage, Page, ProviderTrack, Session,
-    SessionRepository,
+    DiscoveryRepository, IngestBatchResult, MediaItem, MediaPage, Page, ProfileRepository,
+    ProviderTrack, Session, SessionRepository, UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
 
@@ -736,6 +736,83 @@ impl AudioAssetRepository for PgAudioAssetRepository {
             .collect();
 
         Ok(assets)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgProfileRepository
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL-backed logged-in profile repository.
+#[derive(Clone)]
+pub struct PgProfileRepository {
+    pool: Arc<sqlx::PgPool>,
+}
+
+impl PgProfileRepository {
+    /// Creates a new repository backed by the given connection pool.
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool: Arc::new(pool),
+        }
+    }
+}
+
+#[async_trait]
+impl ProfileRepository for PgProfileRepository {
+    async fn upsert_profile(
+        &self,
+        external_user_id: &str,
+        display_name: Option<&str>,
+        history_enabled: bool,
+    ) -> CanopyResult<UserProfile> {
+        let row = sqlx::query(
+            r#"
+                INSERT INTO profiles (external_user_id, display_name, history_enabled)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (external_user_id) DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    history_enabled = EXCLUDED.history_enabled,
+                    updated_at = NOW()
+                RETURNING id, external_user_id, display_name, history_enabled
+            "#,
+        )
+        .bind(external_user_id)
+        .bind(display_name)
+        .bind(history_enabled)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(profile_from_row(&row))
+    }
+
+    async fn get_by_external_user_id(
+        &self,
+        external_user_id: &str,
+    ) -> CanopyResult<Option<UserProfile>> {
+        let row = sqlx::query(
+            r#"
+                SELECT id, external_user_id, display_name, history_enabled
+                FROM profiles
+                WHERE external_user_id = $1
+            "#,
+        )
+        .bind(external_user_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(row.as_ref().map(profile_from_row))
+    }
+}
+
+fn profile_from_row(row: &sqlx::postgres::PgRow) -> UserProfile {
+    UserProfile {
+        id: uuid_string(row, "id"),
+        external_user_id: row.try_get("external_user_id").unwrap_or_default(),
+        display_name: row.try_get("display_name").unwrap_or_default(),
+        history_enabled: row.try_get("history_enabled").unwrap_or(false),
     }
 }
 

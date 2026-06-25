@@ -15,11 +15,11 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs now mutate persisted session state. Queue semantics and multi-device conflict handling are still planned. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. PostgreSQL mode reads `mv_discovery_pool`, a pre-shuffled materialized view with one representative asset per track. |
-| Playback Resolver         | ?? Prototype   | `ResolverService` over `AudioAssetRepository` plus pluggable URL providers: codec-preference asset selection, TTL expiry, RustFS HMAC URLs, or Supabase Storage signed URLs. `ResolvePlayback` also synchronizes the anonymous session when called. |
-| Auth                      | ?? Optional    | Canopy is anonymous-by-default. Session IDs keep playback state/history/preferences without requiring login; token auth code exists for a future optional account-sync layer, not request gating. |
+| Playback Resolver         | 🟡 Prototype   | `ResolverService` over `AudioAssetRepository` plus pluggable URL providers: codec-preference asset selection, TTL expiry, RustFS HMAC URLs, or Supabase Storage signed URLs. `ResolvePlayback` also synchronizes the anonymous session when called. |
+| Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable user state starts at `UpsertProfile`, which requires a real login token; anonymous users get no backend history, library, likes, or preferences. |
 | Provider Adapters         | 🟡 Partial     | Provider-facing ports and fixture adapter exist; PostgreSQL `CatalogIngest` transactionally upserts provider tracks, and `CANOPY_PROVIDER_FIXTURE_PATH` can ingest a local fixture at startup in PostgreSQL mode. Musopen/Pixabay/Internet Archive adapters are still planned. |
 | Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` migrations, Docker Compose, typed repository ports, `PgCatalogRepository`, `PgSessionRepository`, `PgAudioAssetRepository`, and transactional provider ingest are implemented. PostgreSQL mode auto-detects the DB under the `pg` feature and falls back to in-memory stores on connection failure. |
-| Music storage             | ?? Partial     | RustFS HMAC URL generation and Supabase Storage signed URL fetching are available. Canopy stays out of the byte-serving path after `ResolvePlayback`. |
+| Music storage             | 🟡 Partial     | RustFS HMAC URL generation and Supabase Storage signed URL fetching are available. Canopy stays out of the byte-serving path after `ResolvePlayback`. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
 | Health checks             | 🟡 Partial     | `HealthService` reports liveness, version, aggregate status, dependency details, PostgreSQL connectivity, and optional RustFS TCP reachability via `CANOPY_HEALTH_CHECK_RUSTFS=true`. |
 | CI / Verification         | 🟡 Partial     | GitHub Actions runs fmt, all-feature Clippy, default tests, PostgreSQL feature tests against a Postgres service container, and release build. Proto compatibility gates are still planned. |
@@ -195,6 +195,9 @@ rpc ResolvePlayback(PlaybackRequest)
 
 rpc DiscoveryNext(DiscoveryRequest)
     returns (DiscoveryTrack);
+
+rpc UpsertProfile(UpsertProfileRequest)
+    returns (UpsertProfileResponse);
 ```
 
 This proto is the single source of truth for the wire contract between PandaEngine and Canopy. It is defined once, in a shared `canopy_proto` crate, and consumed by both PandaEngine (as a client) and Canopy (as a server). Neither side maintains its own copy of these message shapes.
@@ -203,9 +206,9 @@ This proto is the single source of truth for the wire contract between PandaEngi
 
 ### Auth
 
-Canopy is designed to work without authentication. Lightweight `session_id` values are the default identity boundary for playback state, history, library items, and preferences. Empty session IDs resolve to the `default` anonymous session so simple clients can start immediately.
+Canopy is designed to let anonymous users browse, search, and play music without logging in. Anonymous `session_id` values are operational playback state only; they are not users and must not own durable backend history, libraries, likes, or preferences. The client is responsible for any anonymous local cache.
 
-The existing token verifier remains useful later as an optional account-sync layer, but it is not a request gate. A future authenticated mode can attach a user identity to an existing anonymous session and merge state without changing the catalog or playback resolver contracts.
+Durable user state starts at `UpsertProfile`. The client sends a login token, Canopy verifies it with `AuthService`, and the resulting external user identity creates or updates a `profiles` row. The profile includes `history_enabled`, so even logged-in playback history can remain an explicit opt-in. Future library, likes, preferences, and cross-device sync endpoints should hang from this profile boundary, not from anonymous sessions.
 
 ---
 
@@ -623,6 +626,7 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_POSTGRES_DB` | `canopy` | PostgreSQL database name |
 | `CANOPY_POSTGRES_PORT` | `5432` | PostgreSQL host port |
 | `CANOPY_REDIS_PORT` | `6379` | Redis host port |
+| `CANOPY_AUTH_TOKEN_SECRET` | `canopy-auth-secret` | Shared secret used to verify logged-in profile tokens |
 | `CANOPY_RUSTFS_BUCKET` | `pandawave-media` | RustFS media bucket |
 | `CANOPY_RUSTFS_ACCESS_KEY` | `canopy` | RustFS access key |
 | `CANOPY_RUSTFS_SECRET_KEY` | `canopy-secret` | RustFS secret key |

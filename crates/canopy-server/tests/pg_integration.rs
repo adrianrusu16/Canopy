@@ -1,10 +1,10 @@
 #![cfg(feature = "pg")]
 
 use canopy_core::{
-    AudioAssetRepository, CatalogIngest, CatalogRepository, Page, ProviderAudioAsset,
-    ProviderLicense, ProviderTrack,
+    AudioAssetRepository, CatalogIngest, CatalogRepository, Page, ProfileRepository,
+    ProviderAudioAsset, ProviderLicense, ProviderTrack,
 };
-use canopy_server::jade_store::{PgAudioAssetRepository, PgCatalogRepository};
+use canopy_server::jade_store::{PgAudioAssetRepository, PgCatalogRepository, PgProfileRepository};
 use sqlx::{Row, postgres::PgPoolOptions};
 
 async fn connect_test_pool() -> Option<sqlx::PgPool> {
@@ -166,4 +166,50 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
     assert_eq!(duplicate_discovery_rows, 0);
 
     cleanup_provider_track(&pool, "canopy-test", &provider_id).await;
+}
+
+#[tokio::test]
+async fn postgres_migrations_support_profile_upsert() {
+    let Some(pool) = connect_test_pool().await else {
+        eprintln!(
+            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
+        );
+        return;
+    };
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let external_user_id = format!("profile-{}", uuid::Uuid::new_v4());
+    let profiles = PgProfileRepository::new(pool.clone());
+
+    let created = profiles
+        .upsert_profile(&external_user_id, Some("Ada"), true)
+        .await
+        .expect("profile should be created");
+    assert_eq!(created.external_user_id, external_user_id);
+    assert_eq!(created.display_name.as_deref(), Some("Ada"));
+    assert!(created.history_enabled);
+
+    let updated = profiles
+        .upsert_profile(&created.external_user_id, Some("Ada Lovelace"), false)
+        .await
+        .expect("profile should update in place");
+    assert_eq!(updated.id, created.id);
+    assert_eq!(updated.display_name.as_deref(), Some("Ada Lovelace"));
+    assert!(!updated.history_enabled);
+
+    let fetched = profiles
+        .get_by_external_user_id(&updated.external_user_id)
+        .await
+        .expect("profile lookup should succeed")
+        .expect("profile should exist");
+    assert_eq!(fetched.id, created.id);
+
+    let _ = sqlx::query("DELETE FROM profiles WHERE external_user_id = $1")
+        .bind(&updated.external_user_id)
+        .execute(&pool)
+        .await;
 }

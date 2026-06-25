@@ -102,6 +102,19 @@ pub struct UserIdentity {
     pub user_id: String,
 }
 
+/// Durable profile for a real logged-in user.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserProfile {
+    /// Internal profile identifier.
+    pub id: String,
+    /// Stable identity from the login provider/token issuer.
+    pub external_user_id: String,
+    /// Optional display name supplied by the client/profile provider.
+    pub display_name: Option<String>,
+    /// Whether the user has opted into durable backend playback history.
+    pub history_enabled: bool,
+}
+
 /// A lightweight playback session.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Session {

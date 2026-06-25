@@ -10,7 +10,11 @@ mod memory;
 #[cfg(feature = "pg")]
 mod pg;
 
-pub use memory::{InMemoryAudioAssetStore, InMemoryCatalog, InMemorySessionStore};
+pub use memory::{
+    InMemoryAudioAssetStore, InMemoryCatalog, InMemoryProfileStore, InMemorySessionStore,
+};
 
 #[cfg(feature = "pg")]
-pub use pg::{PgAudioAssetRepository, PgCatalogRepository, PgSessionRepository};
+pub use pg::{
+    PgAudioAssetRepository, PgCatalogRepository, PgProfileRepository, PgSessionRepository,
+};

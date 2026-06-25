@@ -58,6 +58,8 @@ pub struct Config {
     pub supabase_sync_on_start: bool,
     /// Signed URL lifetime when resolving Supabase playback.
     pub supabase_signed_url_ttl_secs: u64,
+    /// Shared secret used to verify login/profile tokens.
+    pub auth_token_secret: String,
     /// Redis URL for the JadeCache layer.
     pub redis_url: String,
     /// Whether health checks should probe RustFS reachability.
@@ -89,6 +91,8 @@ impl Config {
     const DEFAULT_SUPABASE_SIGNED_URL_TTL_SECS: u64 = 15 * 60;
     /// Default Supabase catalog table/view name.
     const DEFAULT_SUPABASE_CATALOG_TABLE: &'static str = "tracks";
+    /// Default auth token secret for local development.
+    const DEFAULT_AUTH_TOKEN_SECRET: &'static str = "canopy-auth-secret";
     /// Default Redis URL for the cache layer.
     const DEFAULT_REDIS_URL: &'static str = "redis://localhost:6379";
 
@@ -164,6 +168,9 @@ impl Config {
                     matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
                 });
 
+        let auth_token_secret = env::var("CANOPY_AUTH_TOKEN_SECRET")
+            .unwrap_or_else(|_| Self::DEFAULT_AUTH_TOKEN_SECRET.to_string());
+
         let redis_url =
             env::var("CANOPY_REDIS_URL").unwrap_or_else(|_| Self::DEFAULT_REDIS_URL.to_string());
 
@@ -193,6 +200,7 @@ impl Config {
             supabase_catalog_table,
             supabase_sync_on_start,
             supabase_signed_url_ttl_secs,
+            auth_token_secret,
             redis_url,
             health_check_rustfs,
             provider_fixture_path,
