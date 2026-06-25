@@ -25,8 +25,9 @@ use async_trait::async_trait;
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogIngest, CatalogRepository,
-    DiscoveryRepository, IngestBatchResult, MediaItem, MediaPage, Page, ProfileRepository,
-    ProviderTrack, Session, SessionRepository, UserProfile,
+    DiscoveryRepository, IngestBatchResult, MediaItem, MediaPage, Page, PlaybackHistoryEvent,
+    PlaybackHistoryRepository, ProfileRepository, ProviderTrack, Session, SessionRepository,
+    UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
 
@@ -813,6 +814,50 @@ fn profile_from_row(row: &sqlx::postgres::PgRow) -> UserProfile {
         external_user_id: row.try_get("external_user_id").unwrap_or_default(),
         display_name: row.try_get("display_name").unwrap_or_default(),
         history_enabled: row.try_get("history_enabled").unwrap_or(false),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgPlaybackHistoryRepository
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL-backed durable playback-history repository.
+#[derive(Clone)]
+pub struct PgPlaybackHistoryRepository {
+    pool: Arc<sqlx::PgPool>,
+}
+
+impl PgPlaybackHistoryRepository {
+    /// Creates a new repository backed by the given connection pool.
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool: Arc::new(pool),
+        }
+    }
+}
+
+#[async_trait]
+impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
+    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()> {
+        let duration_ms = i32::try_from(event.duration_ms).map_err(|_| {
+            CanopyError::InvalidArgument("duration_ms exceeds database range".into())
+        })?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO playback_history (profile_id, track_id, duration_ms, completion_pct)
+                VALUES ($1::uuid, $2::uuid, $3, $4)
+            "#,
+        )
+        .bind(&event.profile_id)
+        .bind(&event.track_id)
+        .bind(duration_ms)
+        .bind(event.completion_pct)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(())
     }
 }
 

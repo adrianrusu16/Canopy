@@ -10,7 +10,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyResult, CatalogRepository, DiscoveryRepository,
-    MediaItem, MediaPage, Page, ProfileRepository, Session, SessionRepository, UserProfile,
+    MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackHistoryRepository, ProfileRepository,
+    Session, SessionRepository, UserProfile,
 };
 
 /// In-memory catalog backing store.
@@ -176,5 +177,26 @@ impl ProfileRepository for InMemoryProfileStore {
         external_user_id: &str,
     ) -> CanopyResult<Option<UserProfile>> {
         Ok(self.profiles.lock().unwrap().get(external_user_id).cloned())
+    }
+}
+
+/// In-memory playback-history store for tests and standalone prototype mode.
+#[derive(Default)]
+pub struct InMemoryPlaybackHistoryStore {
+    events: Mutex<Vec<PlaybackHistoryEvent>>,
+}
+
+impl InMemoryPlaybackHistoryStore {
+    /// Returns a snapshot of stored events for tests.
+    pub fn events(&self) -> CanopyResult<Vec<PlaybackHistoryEvent>> {
+        Ok(self.events.lock().unwrap().clone())
+    }
+}
+
+#[async_trait]
+impl PlaybackHistoryRepository for InMemoryPlaybackHistoryStore {
+    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()> {
+        self.events.lock().unwrap().push(event);
+        Ok(())
     }
 }

@@ -3,12 +3,12 @@
 //! The crate is organized around domain modules that mirror the architecture
 //! in the project README:
 //!
-//! * [`api`] — transport adapters (gRPC today, HTTP later).
+//! * [`api`] - transport adapters (gRPC today, HTTP later).
 //! * [`auth`], [`catalog`], [`search`], [`discovery`], [`playback`],
-//!   [`providers`], [`health`] — domain services and their (planned) seams.
-//! * [`jade_store`] — the persistence layer (in-memory today; PostgreSQL /
+//!   [`providers`], [`health`] - domain services and their (planned) seams.
+//! * [`jade_store`] - the persistence layer (in-memory today; PostgreSQL /
 //!   RustFS planned).
-//! * [`config`], [`observability`] — process wiring.
+//! * [`config`], [`observability`] - process wiring.
 //!
 //! Domain services depend on the ports defined in `canopy-core`, never on a
 //! concrete backend, so storage implementations are interchangeable.
@@ -26,6 +26,7 @@ pub mod catalog;
 pub mod config;
 pub mod discovery;
 pub mod health;
+pub mod history;
 pub mod jade_store;
 pub mod observability;
 pub mod playback;
@@ -37,12 +38,15 @@ pub mod supabase;
 
 pub use config::{Config, MusicSource};
 
-use api::grpc::GrpcApi;
+use api::grpc::{GrpcApi, GrpcServices};
 use auth::AuthService;
 use catalog::CatalogService;
 use discovery::DiscoveryService;
 use health::HealthService;
-use jade_store::{InMemoryAudioAssetStore, InMemoryCatalog, InMemorySessionStore};
+use history::HistoryService;
+use jade_store::{
+    InMemoryAudioAssetStore, InMemoryCatalog, InMemoryPlaybackHistoryStore, InMemorySessionStore,
+};
 use playback::{PlaybackService, ResolverConfig, ResolverService};
 use profile::ProfileService;
 use search::SearchService;
@@ -88,6 +92,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let asset_repo: Arc<dyn canopy_core::AudioAssetRepository>;
     let session_repo: Arc<dyn canopy_core::SessionRepository>;
     let profile_repo: Arc<dyn canopy_core::ProfileRepository>;
+    let history_repo: Arc<dyn canopy_core::PlaybackHistoryRepository>;
     let health: HealthService;
 
     #[cfg(feature = "pg")]
@@ -147,6 +152,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 asset_repo = Arc::new(jade_store::PgAudioAssetRepository::new((*pool).clone()));
                 session_repo = Arc::new(jade_store::PgSessionRepository::new((*pool).clone()));
                 profile_repo = Arc::new(jade_store::PgProfileRepository::new((*pool).clone()));
+                history_repo = Arc::new(jade_store::PgPlaybackHistoryRepository::new(
+                    (*pool).clone(),
+                ));
                 health = HealthService::with_db(pool).with_rustfs(
                     config
                         .health_check_rustfs
@@ -170,6 +178,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 asset_repo = Arc::new(demo_assets());
                 session_repo = Arc::new(InMemorySessionStore::default());
                 profile_repo = Arc::new(jade_store::InMemoryProfileStore::default());
+                history_repo = Arc::new(InMemoryPlaybackHistoryStore::default());
                 health = HealthService::new().with_rustfs(
                     config
                         .health_check_rustfs
@@ -187,6 +196,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         asset_repo = Arc::new(demo_assets());
         session_repo = Arc::new(InMemorySessionStore::default());
         profile_repo = Arc::new(jade_store::InMemoryProfileStore::default());
+        history_repo = Arc::new(InMemoryPlaybackHistoryStore::default());
         health = HealthService::new().with_rustfs(
             config
                 .health_check_rustfs
@@ -199,7 +209,12 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let search = SearchService::new(catalog_repo);
     let playback = PlaybackService::new(session_repo);
     let profile = ProfileService::new(
+        profile_repo.clone(),
+        AuthService::new(config.auth_token_secret.clone()),
+    );
+    let history = HistoryService::new(
         profile_repo,
+        history_repo,
         AuthService::new(config.auth_token_secret.clone()),
     );
     let discovery = DiscoveryService::new(discovery_repo);
@@ -234,9 +249,16 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Health service is already created above (with or without DB pool).
 
     // gRPC adapter.
-    let api = GrpcApi::new(
-        catalog, search, playback, profile, health, resolver, discovery,
-    );
+    let api = GrpcApi::new(GrpcServices {
+        catalog,
+        search,
+        playback,
+        profile,
+        history,
+        health,
+        resolver,
+        discovery,
+    });
 
     info!("Listening on {}", config.grpc_addr);
     Server::builder()

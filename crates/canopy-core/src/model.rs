@@ -115,6 +115,19 @@ pub struct UserProfile {
     pub history_enabled: bool,
 }
 
+/// A durable playback-history event for a real logged-in profile.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaybackHistoryEvent {
+    /// Internal profile identifier that owns the event.
+    pub profile_id: String,
+    /// Track identifier that was played.
+    pub track_id: String,
+    /// Duration listened, in milliseconds.
+    pub duration_ms: i64,
+    /// Completion percentage in the inclusive range `0.0..=1.0`.
+    pub completion_pct: f32,
+}
+
 /// A lightweight playback session.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Session {
@@ -148,7 +161,7 @@ pub struct ProviderLicense {
     pub attribution_text: String,
 }
 
-/// A provider audio asset — a single encoded representation of a track.
+/// A provider audio asset - a single encoded representation of a track.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ProviderAudioAsset {
     /// Codec short name, e.g. `mp3`, `opus`, `flac`.

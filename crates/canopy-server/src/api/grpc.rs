@@ -9,8 +9,9 @@ use canopy_proto::{
     EndSessionResponse, GetMediaRequest, GetMediaResponse, GetSessionRequest, GetSessionResponse,
     HealthDependency, HealthRequest, HealthResponse, MediaItem as ProtoMediaItem, PauseRequest,
     PauseResponse, PlayRequest, PlayResponse, PlaybackRequest,
-    PlaybackSource as ProtoPlaybackSource, SearchRequest, SearchResponse, SeekRequest,
-    SeekResponse, SetPlaybackSpeedRequest, SetPlaybackSpeedResponse, StopRequest, StopResponse,
+    PlaybackSource as ProtoPlaybackSource, RecordPlaybackHistoryRequest,
+    RecordPlaybackHistoryResponse, SearchRequest, SearchResponse, SeekRequest, SeekResponse,
+    SetPlaybackSpeedRequest, SetPlaybackSpeedResponse, StopRequest, StopResponse,
     UpdateSessionRequest, UpdateSessionResponse, UpsertProfileRequest, UpsertProfileResponse,
     UserProfile as ProtoUserProfile,
 };
@@ -20,9 +21,22 @@ use crate::api::to_status;
 use crate::catalog::CatalogService;
 use crate::discovery::DiscoveryService;
 use crate::health::HealthService;
+use crate::history::HistoryService;
 use crate::playback::{PlaybackService, ResolverService};
 use crate::profile::ProfileService;
 use crate::search::SearchService;
+
+/// Domain services exposed through the gRPC adapter.
+pub struct GrpcServices {
+    pub catalog: CatalogService,
+    pub search: SearchService,
+    pub playback: PlaybackService,
+    pub profile: ProfileService,
+    pub history: HistoryService,
+    pub health: HealthService,
+    pub resolver: ResolverService,
+    pub discovery: DiscoveryService,
+}
 
 /// gRPC entry point wiring the wire contract to the domain services.
 pub struct GrpcApi {
@@ -30,6 +44,7 @@ pub struct GrpcApi {
     search: SearchService,
     playback: PlaybackService,
     profile: ProfileService,
+    history: HistoryService,
     health: HealthService,
     resolver: ResolverService,
     discovery: DiscoveryService,
@@ -37,23 +52,16 @@ pub struct GrpcApi {
 
 impl GrpcApi {
     /// Creates a new gRPC adapter over the given domain services.
-    pub fn new(
-        catalog: CatalogService,
-        search: SearchService,
-        playback: PlaybackService,
-        profile: ProfileService,
-        health: HealthService,
-        resolver: ResolverService,
-        discovery: DiscoveryService,
-    ) -> Self {
+    pub fn new(services: GrpcServices) -> Self {
         Self {
-            catalog,
-            search,
-            playback,
-            profile,
-            health,
-            resolver,
-            discovery,
+            catalog: services.catalog,
+            search: services.search,
+            playback: services.playback,
+            profile: services.profile,
+            history: services.history,
+            health: services.health,
+            resolver: services.resolver,
+            discovery: services.discovery,
         }
     }
 }
@@ -277,6 +285,24 @@ impl Canopy for GrpcApi {
         Ok(Response::new(UpsertProfileResponse {
             profile: Some(to_proto_profile(profile)),
         }))
+    }
+
+    async fn record_playback_history(
+        &self,
+        request: Request<RecordPlaybackHistoryRequest>,
+    ) -> Result<Response<RecordPlaybackHistoryResponse>, Status> {
+        let req = request.into_inner();
+        let recorded = self
+            .history
+            .record_playback(
+                &req.auth_token,
+                &req.track_id,
+                req.duration_ms,
+                req.completion_pct,
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(RecordPlaybackHistoryResponse { recorded }))
     }
 
     async fn health(

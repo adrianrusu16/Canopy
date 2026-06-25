@@ -7,7 +7,10 @@
 use async_trait::async_trait;
 
 use crate::error::CanopyResult;
-use crate::model::{AudioAsset, MediaItem, MediaPage, Page, ProviderTrack, Session, UserProfile};
+use crate::model::{
+    AudioAsset, MediaItem, MediaPage, Page, PlaybackHistoryEvent, ProviderTrack, Session,
+    UserProfile,
+};
 
 /// Read access to the catalog (artists, albums, tracks, playlists).
 #[async_trait]
@@ -83,6 +86,13 @@ pub trait ProfileRepository: Send + Sync {
         &self,
         external_user_id: &str,
     ) -> CanopyResult<Option<UserProfile>>;
+}
+
+/// Persistence of durable playback history for logged-in profiles.
+#[async_trait]
+pub trait PlaybackHistoryRepository: Send + Sync {
+    /// Records one playback-history event for a real profile.
+    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()>;
 }
 
 /// Write access to the catalog for provider ingestion.

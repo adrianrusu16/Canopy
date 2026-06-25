@@ -1,4 +1,4 @@
-//! JadeStore — the persistence layer.
+//! JadeStore - the persistence layer.
 //!
 //! This module is the home of all storage-backend implementations of the
 //! [`canopy_core`] repository ports. Today it ships in-memory
@@ -11,10 +11,12 @@ mod memory;
 mod pg;
 
 pub use memory::{
-    InMemoryAudioAssetStore, InMemoryCatalog, InMemoryProfileStore, InMemorySessionStore,
+    InMemoryAudioAssetStore, InMemoryCatalog, InMemoryPlaybackHistoryStore, InMemoryProfileStore,
+    InMemorySessionStore,
 };
 
 #[cfg(feature = "pg")]
 pub use pg::{
-    PgAudioAssetRepository, PgCatalogRepository, PgProfileRepository, PgSessionRepository,
+    PgAudioAssetRepository, PgCatalogRepository, PgPlaybackHistoryRepository, PgProfileRepository,
+    PgSessionRepository,
 };

@@ -1,10 +1,13 @@
 #![cfg(feature = "pg")]
 
 use canopy_core::{
-    AudioAssetRepository, CatalogIngest, CatalogRepository, Page, ProfileRepository,
-    ProviderAudioAsset, ProviderLicense, ProviderTrack,
+    AudioAssetRepository, CatalogIngest, CatalogRepository, Page, PlaybackHistoryEvent,
+    PlaybackHistoryRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense,
+    ProviderTrack,
 };
-use canopy_server::jade_store::{PgAudioAssetRepository, PgCatalogRepository, PgProfileRepository};
+use canopy_server::jade_store::{
+    PgAudioAssetRepository, PgCatalogRepository, PgPlaybackHistoryRepository, PgProfileRepository,
+};
 use sqlx::{Row, postgres::PgPoolOptions};
 
 async fn connect_test_pool() -> Option<sqlx::PgPool> {
@@ -210,6 +213,111 @@ async fn postgres_migrations_support_profile_upsert() {
 
     let _ = sqlx::query("DELETE FROM profiles WHERE external_user_id = $1")
         .bind(&updated.external_user_id)
+        .execute(&pool)
+        .await;
+}
+
+#[tokio::test]
+async fn postgres_migrations_support_profile_scoped_history() {
+    let Some(pool) = connect_test_pool().await else {
+        eprintln!(
+            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
+        );
+        return;
+    };
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let profiles = PgProfileRepository::new(pool.clone());
+    let history = PgPlaybackHistoryRepository::new(pool.clone());
+    let external_user_id = format!("history-user-{}", uuid::Uuid::new_v4());
+    let profile = profiles
+        .upsert_profile(&external_user_id, Some("Ada"), true)
+        .await
+        .expect("profile should be created");
+
+    let artist_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO artists (name, sort_name)
+            VALUES ($1, $2)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("History Artist {external_user_id}"))
+    .bind(format!("history artist {external_user_id}"))
+    .fetch_one(&pool)
+    .await
+    .expect("artist should be inserted");
+
+    let album_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO albums (title, artist_id)
+            VALUES ($1, $2::uuid)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("History Album {external_user_id}"))
+    .bind(&artist_id)
+    .fetch_one(&pool)
+    .await
+    .expect("album should be inserted");
+
+    let track_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO tracks (title, artist_id, album_id, duration_ms)
+            VALUES ($1, $2::uuid, $3::uuid, 1000)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("History Track {external_user_id}"))
+    .bind(&artist_id)
+    .bind(&album_id)
+    .fetch_one(&pool)
+    .await
+    .expect("track should be inserted");
+
+    history
+        .record(PlaybackHistoryEvent {
+            profile_id: profile.id.clone(),
+            track_id: track_id.clone(),
+            duration_ms: 1000,
+            completion_pct: 0.75,
+        })
+        .await
+        .expect("history should be recorded");
+
+    let count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM playback_history
+            WHERE profile_id = $1::uuid AND track_id = $2::uuid
+        "#,
+    )
+    .bind(&profile.id)
+    .bind(&track_id)
+    .fetch_one(&pool)
+    .await
+    .expect("history count should be queryable");
+
+    assert_eq!(count, 1);
+
+    let _ = sqlx::query("DELETE FROM profiles WHERE id = $1::uuid")
+        .bind(&profile.id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM tracks WHERE id = $1::uuid")
+        .bind(&track_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM albums WHERE id = $1::uuid")
+        .bind(&album_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM artists WHERE id = $1::uuid")
+        .bind(&artist_id)
         .execute(&pool)
         .await;
 }

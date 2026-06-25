@@ -434,6 +434,35 @@
           }
         }
       }
+    },
+    "/canopy.Canopy/RecordPlaybackHistory": {
+      "post": {
+        "summary": "Record logged-in playback history",
+        "operationId": "RecordPlaybackHistory",
+        "description": "Requires a real login token and an existing profile. Anonymous sessions are not accepted and never create backend history.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordPlaybackHistoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordPlaybackHistoryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -906,6 +935,38 @@
             "$ref": "#/components/schemas/UserProfile"
           }
         }
+      },
+      "RecordPlaybackHistoryRequest": {
+        "type": "object",
+        "properties": {
+          "auth_token": {
+            "type": "string",
+            "description": "Required logged-in user token; anonymous session IDs are not accepted"
+          },
+          "track_id": {
+            "type": "string",
+            "description": "Required catalog track id"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Listened duration in milliseconds"
+          },
+          "completion_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Playback completion percentage in the inclusive range 0.0..1.0"
+          }
+        }
+      },
+      "RecordPlaybackHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "recorded": {
+            "type": "boolean",
+            "description": "False when the profile exists but history_enabled is false"
+          }
+        }
       }
     }
   },
@@ -914,10 +975,11 @@
     "sessionControlStatus": "Playback control RPCs mutate SessionRepository state; empty session_id maps to the default session.",
     "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC.",
     "healthStatus": "Health responses include aggregate status plus dependency details; RustFS probing is opt-in via CANOPY_HEALTH_CHECK_RUSTFS.",
-    "authModel": "Anonymous users may browse, search, and play, but anonymous sessions are not durable users and receive no backend history, library, likes, or preferences. Durable state starts with UpsertProfile and a verified login token.",
+    "authModel": "Anonymous users may browse, search, and play, but anonymous sessions are not durable users and receive no backend history, library, likes, or preferences. Durable state starts with UpsertProfile and a verified login token; opt-in playback history is recorded through RecordPlaybackHistory.",
     "playbackResolution": "ResolvePlayback accepts track_id plus optional session_id. It selects an audio asset, returns a RustFS or Supabase signed URL, and loads the track into the resolved session.",
     "supabaseMusicSource": "Set CANOPY_MUSIC_SOURCE=supabase with CANOPY_SUPABASE_URL, CANOPY_SUPABASE_KEY, CANOPY_SUPABASE_STORAGE_BUCKET, and CANOPY_SUPABASE_SIGNED_URL_TTL_SECS to fetch Supabase Storage signed URLs.",
     "supabaseCatalogSource": "SupabaseCatalogProvider reads normalized rows from CANOPY_SUPABASE_URL/rest/v1/CANOPY_SUPABASE_CATALOG_TABLE?select=* when CANOPY_SUPABASE_SYNC_ON_START=true in PostgreSQL mode, maps them into ProviderTrack, and ingests through CatalogIngest.",
-    "profileStatus": "UpsertProfile verifies auth_token, upserts profiles(external_user_id), and stores history_enabled as the logged-in user history preference."
+    "profileStatus": "UpsertProfile verifies auth_token, upserts profiles(external_user_id), and stores history_enabled as the logged-in user history preference.",
+    "historyStatus": "RecordPlaybackHistory requires a verified login token and an existing profile. It records profile-scoped history only when history_enabled=true; anonymous sessions never create backend history."
   }
 }
