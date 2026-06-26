@@ -8,12 +8,16 @@ use canopy_core::{
 use canopy_proto::canopy_server::Canopy;
 use canopy_proto::{
     BrowseRequest, BrowseResponse, DiscoveryRequest, DiscoveryTrack, EndSessionRequest,
-    EndSessionResponse, GetMediaRequest, GetMediaResponse, GetSessionRequest, GetSessionResponse,
-    HealthDependency, HealthRequest, HealthResponse, MediaItem as ProtoMediaItem, PauseRequest,
-    PauseResponse, PlayRequest, PlayResponse, PlaybackRequest,
-    PlaybackSource as ProtoPlaybackSource, RecordPlaybackHistoryRequest,
-    RecordPlaybackHistoryResponse, SearchRequest, SearchResponse, SeekRequest, SeekResponse,
-    SetPlaybackSpeedRequest, SetPlaybackSpeedResponse, StopRequest, StopResponse,
+    EndSessionResponse, GetMediaRequest, GetMediaResponse, GetPreferencesRequest,
+    GetPreferencesResponse, GetSessionRequest, GetSessionResponse, HealthDependency, HealthRequest,
+    HealthResponse, LikeTrackRequest, LikeTrackResponse, ListLibraryItemsRequest,
+    ListLibraryItemsResponse, ListLikedTracksRequest, ListLikedTracksResponse,
+    MediaItem as ProtoMediaItem, PauseRequest, PauseResponse, PlayRequest, PlayResponse,
+    PlaybackRequest, PlaybackSource as ProtoPlaybackSource, RecordPlaybackHistoryRequest,
+    RecordPlaybackHistoryResponse, RemoveLibraryItemRequest, RemoveLibraryItemResponse,
+    SaveLibraryItemRequest, SaveLibraryItemResponse, SearchRequest, SearchResponse, SeekRequest,
+    SeekResponse, SetPlaybackSpeedRequest, SetPlaybackSpeedResponse, StopRequest, StopResponse,
+    UnlikeTrackRequest, UnlikeTrackResponse, UpdatePreferencesRequest, UpdatePreferencesResponse,
     UpdateSessionRequest, UpdateSessionResponse, UpsertProfileRequest, UpsertProfileResponse,
     UserProfile as ProtoUserProfile,
 };
@@ -25,7 +29,10 @@ use crate::catalog::CatalogService;
 use crate::discovery::DiscoveryService;
 use crate::health::HealthService;
 use crate::history::HistoryService;
+use crate::library::LibraryService;
+use crate::likes::LikeService;
 use crate::playback::{PlaybackService, ResolverService};
+use crate::preferences::PreferencesService;
 use crate::profile::ProfileService;
 use crate::search::SearchService;
 
@@ -36,6 +43,9 @@ pub struct GrpcServices {
     pub playback: PlaybackService,
     pub profile: ProfileService,
     pub history: HistoryService,
+    pub library: LibraryService,
+    pub likes: LikeService,
+    pub preferences: PreferencesService,
     pub health: HealthService,
     pub resolver: ResolverService,
     pub discovery: DiscoveryService,
@@ -49,6 +59,9 @@ pub struct GrpcApi {
     playback: PlaybackService,
     profile: ProfileService,
     history: HistoryService,
+    library: LibraryService,
+    likes: LikeService,
+    preferences: PreferencesService,
     health: HealthService,
     resolver: ResolverService,
     discovery: DiscoveryService,
@@ -64,6 +77,9 @@ impl GrpcApi {
             playback: services.playback,
             profile: services.profile,
             history: services.history,
+            library: services.library,
+            likes: services.likes,
+            preferences: services.preferences,
             health: services.health,
             resolver: services.resolver,
             discovery: services.discovery,
@@ -129,6 +145,13 @@ fn extract_identity(
     }
 
     Err(CanopyError::unauthenticated("missing auth token"))
+}
+
+fn extract_metadata_identity(
+    metadata: &tonic::metadata::MetadataMap,
+    auth: &AuthService,
+) -> CanopyResult<UserIdentity> {
+    extract_identity(metadata, "", auth)
 }
 
 fn current_epoch_ms() -> u64 {
@@ -347,6 +370,146 @@ impl Canopy for GrpcApi {
             .await
             .map_err(to_status)?;
         Ok(Response::new(RecordPlaybackHistoryResponse { recorded }))
+    }
+
+    async fn save_library_item(
+        &self,
+        request: Request<SaveLibraryItemRequest>,
+    ) -> Result<Response<SaveLibraryItemResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.library
+            .save_track(&identity, &req.track_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(SaveLibraryItemResponse { saved: true }))
+    }
+
+    async fn remove_library_item(
+        &self,
+        request: Request<RemoveLibraryItemRequest>,
+    ) -> Result<Response<RemoveLibraryItemResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.library
+            .remove_track(&identity, &req.track_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(RemoveLibraryItemResponse { removed: true }))
+    }
+
+    async fn list_library_items(
+        &self,
+        request: Request<ListLibraryItemsRequest>,
+    ) -> Result<Response<ListLibraryItemsResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let page = self
+            .library
+            .list_tracks(
+                &identity,
+                Page {
+                    limit: req.limit as u32,
+                    offset: req.offset as u32,
+                },
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ListLibraryItemsResponse {
+            total_count: page.total_count,
+            has_more: page.has_more,
+            items: to_proto_items(page),
+        }))
+    }
+
+    async fn like_track(
+        &self,
+        request: Request<LikeTrackRequest>,
+    ) -> Result<Response<LikeTrackResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.likes
+            .like_track(&identity, &req.track_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(LikeTrackResponse { liked: true }))
+    }
+
+    async fn unlike_track(
+        &self,
+        request: Request<UnlikeTrackRequest>,
+    ) -> Result<Response<UnlikeTrackResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.likes
+            .unlike_track(&identity, &req.track_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(UnlikeTrackResponse { unliked: true }))
+    }
+
+    async fn list_liked_tracks(
+        &self,
+        request: Request<ListLikedTracksRequest>,
+    ) -> Result<Response<ListLikedTracksResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let page = self
+            .likes
+            .list_liked_tracks(
+                &identity,
+                Page {
+                    limit: req.limit as u32,
+                    offset: req.offset as u32,
+                },
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ListLikedTracksResponse {
+            total_count: page.total_count,
+            has_more: page.has_more,
+            items: to_proto_items(page),
+        }))
+    }
+
+    async fn get_preferences(
+        &self,
+        request: Request<GetPreferencesRequest>,
+    ) -> Result<Response<GetPreferencesResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let _req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let preferences = self
+            .preferences
+            .get_preferences(&identity)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GetPreferencesResponse {
+            preferences_json: preferences.values_json,
+        }))
+    }
+
+    async fn update_preferences(
+        &self,
+        request: Request<UpdatePreferencesRequest>,
+    ) -> Result<Response<UpdatePreferencesResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let preferences = self
+            .preferences
+            .update_preferences(&identity, &req.preferences_json)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(UpdatePreferencesResponse {
+            preferences_json: preferences.values_json,
+        }))
     }
 
     async fn health(
