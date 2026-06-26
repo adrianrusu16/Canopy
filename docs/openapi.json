@@ -463,6 +463,238 @@
           }
         }
       }
+    },
+    "/canopy.Canopy/SaveLibraryItem": {
+      "post": {
+        "summary": "Save track to logged-in library",
+        "operationId": "SaveLibraryItem",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveLibraryItemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveLibraryItemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/RemoveLibraryItem": {
+      "post": {
+        "summary": "Remove track from logged-in library",
+        "operationId": "RemoveLibraryItem",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state. Removing an absent item is idempotent and still succeeds.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveLibraryItemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoveLibraryItemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/ListLibraryItems": {
+      "post": {
+        "summary": "List logged-in library items",
+        "operationId": "ListLibraryItems",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state. Results are profile-owned saved tracks ordered newest first.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/ListLibraryItemsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListLibraryItemsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/LikeTrack": {
+      "post": {
+        "summary": "Like track for logged-in profile",
+        "operationId": "LikeTrack",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/LikeTrackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/LikeTrackResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/UnlikeTrack": {
+      "post": {
+        "summary": "Unlike track for logged-in profile",
+        "operationId": "UnlikeTrack",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state. Removing an absent like is idempotent and still succeeds.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/UnlikeTrackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnlikeTrackResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/ListLikedTracks": {
+      "post": {
+        "summary": "List logged-in liked tracks",
+        "operationId": "ListLikedTracks",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state. Results are profile-owned liked tracks ordered newest first.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/ListLikedTracksRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListLikedTracksResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/GetPreferences": {
+      "post": {
+        "summary": "Get logged-in profile preferences",
+        "operationId": "GetPreferences",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state. Missing preferences return an empty JSON object.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/GetPreferencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetPreferencesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/UpdatePreferences": {
+      "post": {
+        "summary": "Update logged-in profile preferences",
+        "operationId": "UpdatePreferences",
+        "description": "Requires gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create backend durable state. preferences_json must be a JSON object string.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePreferencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatePreferencesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -967,6 +1199,175 @@
             "description": "False when the profile exists but history_enabled is false"
           }
         }
+      },
+      "SaveLibraryItemRequest": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Required catalog track id to save"
+          }
+        }
+      },
+      "SaveLibraryItemResponse": {
+        "type": "object",
+        "properties": {
+          "saved": {
+            "type": "boolean",
+            "description": "True when the track is saved after the request"
+          }
+        }
+      },
+      "RemoveLibraryItemRequest": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Required catalog track id to remove from the library"
+          }
+        }
+      },
+      "RemoveLibraryItemResponse": {
+        "type": "object",
+        "properties": {
+          "removed": {
+            "type": "boolean",
+            "description": "True when the idempotent remove request succeeds"
+          }
+        }
+      },
+      "ListLibraryItemsRequest": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum number of saved tracks to return"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Offset for pagination"
+          }
+        }
+      },
+      "ListLibraryItemsResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaItem"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LikeTrackRequest": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Required catalog track id to like"
+          }
+        }
+      },
+      "LikeTrackResponse": {
+        "type": "object",
+        "properties": {
+          "liked": {
+            "type": "boolean",
+            "description": "True when the track is liked after the request"
+          }
+        }
+      },
+      "UnlikeTrackRequest": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Required catalog track id to unlike"
+          }
+        }
+      },
+      "UnlikeTrackResponse": {
+        "type": "object",
+        "properties": {
+          "unliked": {
+            "type": "boolean",
+            "description": "True when the idempotent unlike request succeeds"
+          }
+        }
+      },
+      "ListLikedTracksRequest": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum number of liked tracks to return"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Offset for pagination"
+          }
+        }
+      },
+      "ListLikedTracksResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaItem"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GetPreferencesRequest": {
+        "type": "object",
+        "properties": {}
+      },
+      "GetPreferencesResponse": {
+        "type": "object",
+        "properties": {
+          "preferences_json": {
+            "type": "string",
+            "description": "Profile-owned preferences as a JSON object string"
+          }
+        }
+      },
+      "UpdatePreferencesRequest": {
+        "type": "object",
+        "properties": {
+          "preferences_json": {
+            "type": "string",
+            "description": "Profile-owned preferences JSON object string to validate and store"
+          }
+        }
+      },
+      "UpdatePreferencesResponse": {
+        "type": "object",
+        "properties": {
+          "preferences_json": {
+            "type": "string",
+            "description": "Canonical stored profile-owned preferences JSON object string"
+          }
+        }
       }
     }
   },
@@ -980,6 +1381,9 @@
     "supabaseMusicSource": "Set CANOPY_MUSIC_SOURCE=supabase with CANOPY_SUPABASE_URL, CANOPY_SUPABASE_KEY, CANOPY_SUPABASE_STORAGE_BUCKET, and CANOPY_SUPABASE_SIGNED_URL_TTL_SECS to fetch Supabase Storage signed URLs.",
     "supabaseCatalogSource": "SupabaseCatalogProvider reads normalized rows from CANOPY_SUPABASE_URL/rest/v1/CANOPY_SUPABASE_CATALOG_TABLE?select=* when CANOPY_SUPABASE_SYNC_ON_START=true in PostgreSQL mode, maps them into ProviderTrack, and ingests through CatalogIngest.",
     "profileStatus": "UpsertProfile verifies metadata auth, upserts profiles(external_user_id), and stores history_enabled as the logged-in user history preference.",
-    "historyStatus": "RecordPlaybackHistory requires metadata auth and an existing profile. It records profile-scoped history only when history_enabled=true; anonymous sessions never create backend history."
+    "historyStatus": "RecordPlaybackHistory requires metadata auth and an existing profile. It records profile-scoped history only when history_enabled=true; anonymous sessions never create backend history.",
+    "libraryStatus": "Library RPCs require metadata auth and persist profile-owned saved tracks only for logged-in users; anonymous sessions never create backend library rows.",
+    "likesStatus": "Like RPCs require metadata auth and persist profile-owned positive track likes only for logged-in users.",
+    "preferencesStatus": "Preference RPCs require metadata auth and store a profile-owned JSON object; anonymous client preferences remain client-side."
   }
 }

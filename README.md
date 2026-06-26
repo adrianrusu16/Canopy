@@ -16,7 +16,7 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. PostgreSQL mode reads `mv_discovery_pool`, a pre-shuffled materialized view with one representative asset per track. |
 | Playback Resolver         | 🟡 Prototype   | `ResolverService` over `AudioAssetRepository` plus pluggable URL providers: codec-preference asset selection, TTL expiry, RustFS HMAC URLs, or Supabase Storage signed URLs. `ResolvePlayback` also synchronizes the anonymous session when called. |
-| Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable user state starts at `UpsertProfile`; opt-in backend history is recorded through `RecordPlaybackHistory`; anonymous users get no backend history, library, likes, or preferences. |
+| Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable user state starts at `UpsertProfile`; opt-in backend history, saved library items, likes, and preferences are profile-owned; anonymous users get no backend history, library, likes, or preferences. |
 | Provider Adapters         | 🟡 Partial     | Provider-facing ports and fixture adapter exist; PostgreSQL `CatalogIngest` transactionally upserts provider tracks, and `CANOPY_PROVIDER_FIXTURE_PATH` can ingest a local fixture at startup in PostgreSQL mode. Musopen/Pixabay/Internet Archive adapters are still planned. |
 | Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` migrations, Docker Compose, typed repository ports, `PgCatalogRepository`, `PgSessionRepository`, `PgAudioAssetRepository`, and transactional provider ingest are implemented. PostgreSQL mode auto-detects the DB under the `pg` feature and falls back to in-memory stores on connection failure. |
 | Music storage             | 🟡 Partial     | RustFS HMAC URL generation and Supabase Storage signed URL fetching are available. Canopy stays out of the byte-serving path after `ResolvePlayback`. |
@@ -201,6 +201,30 @@ rpc UpsertProfile(UpsertProfileRequest)
 
 rpc RecordPlaybackHistory(RecordPlaybackHistoryRequest)
     returns (RecordPlaybackHistoryResponse);
+
+rpc SaveLibraryItem(SaveLibraryItemRequest)
+    returns (SaveLibraryItemResponse);
+
+rpc RemoveLibraryItem(RemoveLibraryItemRequest)
+    returns (RemoveLibraryItemResponse);
+
+rpc ListLibraryItems(ListLibraryItemsRequest)
+    returns (ListLibraryItemsResponse);
+
+rpc LikeTrack(LikeTrackRequest)
+    returns (LikeTrackResponse);
+
+rpc UnlikeTrack(UnlikeTrackRequest)
+    returns (UnlikeTrackResponse);
+
+rpc ListLikedTracks(ListLikedTracksRequest)
+    returns (ListLikedTracksResponse);
+
+rpc GetPreferences(GetPreferencesRequest)
+    returns (GetPreferencesResponse);
+
+rpc UpdatePreferences(UpdatePreferencesRequest)
+    returns (UpdatePreferencesResponse);
 ```
 
 This proto is the single source of truth for the wire contract between PandaEngine and Canopy. It is defined once, in a shared `canopy_proto` crate, and consumed by both PandaEngine (as a client) and Canopy (as a server). Neither side maintains its own copy of these message shapes.
@@ -214,6 +238,8 @@ Canopy is designed to let anonymous users browse, search, and play music without
 Durable user state starts at `UpsertProfile`. Authenticated profile-scoped RPCs should send the end-user token in gRPC metadata as `authorization: Bearer <token>`. `x-canopy-auth-token` is accepted for clients that cannot set authorization metadata. Existing `auth_token` request fields remain as a temporary compatibility fallback, but new clients should not depend on them. Canopy verifies the token with `AuthService`, and the resulting external user identity creates or updates a `profiles` row. The profile includes `history_enabled`, so even logged-in playback history can remain an explicit opt-in. Future library, likes, preferences, and cross-device sync endpoints should hang from this profile boundary, not from anonymous sessions.
 
 `RecordPlaybackHistory` is the first profile-scoped durable state endpoint. It requires a verified login token, resolves the identity to a profile, and records history only when `history_enabled=true`; disabled history returns a successful response with `recorded=false`.
+
+Saved library items, track likes, and preferences follow the same boundary: they require metadata auth, resolve the verified identity to a profile, and persist only under `profiles.id`. Anonymous clients may cache these locally, but Canopy does not store them until the user logs in and calls `UpsertProfile`.
 
 ---
 
