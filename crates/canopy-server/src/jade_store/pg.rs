@@ -112,12 +112,11 @@ fn epoch_ms_i64(row: &sqlx::postgres::PgRow, column: &str) -> u64 {
 }
 
 fn map_track_write_err(err: sqlx::Error, track_id: &str) -> CanopyError {
-    if let sqlx::Error::Database(db) = &err {
-        if db.constraint() == Some("profile_library_items_track_id_fkey")
-            || db.constraint() == Some("profile_track_likes_track_id_fkey")
-        {
-            return CanopyError::not_found("track", track_id);
-        }
+    if let sqlx::Error::Database(db) = &err
+        && (db.constraint() == Some("profile_library_items_track_id_fkey")
+            || db.constraint() == Some("profile_track_likes_track_id_fkey"))
+    {
+        return CanopyError::not_found("track", track_id);
     }
 
     db_err(err)
