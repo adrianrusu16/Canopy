@@ -321,3 +321,70 @@ async fn postgres_migrations_support_profile_scoped_history() {
         .execute(&pool)
         .await;
 }
+
+#[tokio::test]
+async fn postgres_migrations_support_profile_library_likes_preferences_schema() {
+    let Some(pool) = connect_test_pool().await else {
+        eprintln!(
+            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
+        );
+        return;
+    };
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let table_count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name IN (
+                  'profile_library_items',
+                  'profile_track_likes',
+                  'profile_preferences'
+              )
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("table count should be queryable");
+    assert_eq!(table_count, 3);
+
+    let profile_fk_count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM information_schema.constraint_column_usage
+            WHERE table_name = 'profiles'
+              AND constraint_name IN (
+                  'profile_library_items_profile_id_fkey',
+                  'profile_track_likes_profile_id_fkey',
+                  'profile_preferences_profile_id_fkey'
+              )
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("foreign key count should be queryable");
+    assert_eq!(profile_fk_count, 3);
+
+    let index_count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND indexname IN (
+                  'idx_profile_library_items_profile_added_at',
+                  'idx_profile_library_items_track_id',
+                  'idx_profile_track_likes_profile_liked_at',
+                  'idx_profile_track_likes_track_id'
+              )
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("index count should be queryable");
+    assert_eq!(index_count, 4);
+}
