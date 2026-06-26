@@ -8,8 +8,8 @@ use async_trait::async_trait;
 
 use crate::error::CanopyResult;
 use crate::model::{
-    AudioAsset, MediaItem, MediaPage, Page, PlaybackHistoryEvent, ProviderTrack, Session,
-    UserProfile,
+    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PlaybackHistoryEvent,
+    ProfilePreferences, ProviderTrack, Session, TrackLike, UserProfile,
 };
 
 /// Read access to the catalog (artists, albums, tracks, playlists).
@@ -93,6 +93,52 @@ pub trait ProfileRepository: Send + Sync {
 pub trait PlaybackHistoryRepository: Send + Sync {
     /// Records one playback-history event for a real profile.
     async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()>;
+}
+
+/// Persistence of saved library items for logged-in profiles.
+#[async_trait]
+pub trait LibraryRepository: Send + Sync {
+    /// Saves a track to a profile library. Re-saving is idempotent.
+    async fn save_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<LibraryItem>;
+
+    /// Removes a track from a profile library. Removing an absent item succeeds.
+    async fn remove_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()>;
+
+    /// Lists saved library items newest first.
+    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage>;
+
+    /// Returns whether the profile has saved the track.
+    async fn is_saved(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool>;
+}
+
+/// Persistence of profile-owned positive track likes.
+#[async_trait]
+pub trait LikeRepository: Send + Sync {
+    /// Likes a track for a profile. Re-liking is idempotent.
+    async fn like_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<TrackLike>;
+
+    /// Removes a like for a profile. Removing an absent like succeeds.
+    async fn unlike_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()>;
+
+    /// Lists liked tracks newest first.
+    async fn list_liked_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage>;
+
+    /// Returns whether the profile has liked the track.
+    async fn is_liked(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool>;
+}
+
+/// Persistence of profile-scoped preferences.
+#[async_trait]
+pub trait PreferencesRepository: Send + Sync {
+    /// Fetches preferences for a profile, returning an empty JSON document if absent.
+    async fn get_preferences(&self, profile_id: &str) -> CanopyResult<ProfilePreferences>;
+
+    /// Creates or replaces preferences for a profile.
+    async fn upsert_preferences(
+        &self,
+        profile_id: &str,
+        values_json: &str,
+    ) -> CanopyResult<ProfilePreferences>;
 }
 
 /// Write access to the catalog for provider ingestion.

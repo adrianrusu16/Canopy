@@ -12,12 +12,14 @@ pub mod signing;
 
 pub use error::{CanopyError, CanopyResult};
 pub use model::{
-    AudioAsset, MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackSource,
-    ProviderAudioAsset, ProviderLicense, ProviderTrack, Session, UserIdentity, UserProfile,
+    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackSource,
+    ProfilePreferences, ProviderAudioAsset, ProviderLicense, ProviderTrack, Session, TrackLike,
+    UserIdentity, UserProfile,
 };
 pub use repository::{
     AudioAssetRepository, CatalogIngest, CatalogRepository, DiscoveryRepository, IngestBatchResult,
-    PlaybackHistoryRepository, ProfileRepository, SessionRepository,
+    LibraryRepository, LikeRepository, PlaybackHistoryRepository, PreferencesRepository,
+    ProfileRepository, SessionRepository,
 };
 
 pub use signing::UrlSigner;

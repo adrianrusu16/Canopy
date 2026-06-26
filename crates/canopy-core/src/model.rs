@@ -128,6 +128,37 @@ pub struct PlaybackHistoryEvent {
     pub completion_pct: f32,
 }
 
+/// A saved catalog item in a real logged-in profile's library.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LibraryItem {
+    /// Internal profile identifier that owns the saved item.
+    pub profile_id: String,
+    /// Track identifier that was saved.
+    pub track_id: String,
+    /// Time the item was saved, in epoch milliseconds.
+    pub added_at_epoch_ms: u64,
+}
+
+/// A positive track like from a real logged-in profile.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackLike {
+    /// Internal profile identifier that owns the like.
+    pub profile_id: String,
+    /// Track identifier that was liked.
+    pub track_id: String,
+    /// Time the track was liked, in epoch milliseconds.
+    pub liked_at_epoch_ms: u64,
+}
+
+/// Profile-scoped preferences stored as a JSON document at the repository boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfilePreferences {
+    /// Internal profile identifier that owns the preferences.
+    pub profile_id: String,
+    /// JSON preference document. Services validate this before writing.
+    pub values_json: String,
+}
+
 /// A lightweight playback session.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Session {
