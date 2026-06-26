@@ -8,8 +8,8 @@ use async_trait::async_trait;
 
 use crate::error::CanopyResult;
 use crate::model::{
-    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PlaybackHistoryEvent,
-    ProfilePreferences, ProviderTrack, Session, TrackLike, UserProfile,
+    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PlaybackHistoryEvent, ProfilePreferences,
+    ProviderTrack, Session, TrackLike, UserProfile,
 };
 
 /// Read access to the catalog (artists, albums, tracks, playlists).

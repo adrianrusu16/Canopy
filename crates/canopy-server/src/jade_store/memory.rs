@@ -10,8 +10,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyResult, CatalogRepository, DiscoveryRepository,
-    MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackHistoryRepository, ProfileRepository,
-    Session, SessionRepository, UserProfile,
+    LibraryItem, LibraryRepository, LikeRepository, MediaItem, MediaPage, Page,
+    PlaybackHistoryEvent, PlaybackHistoryRepository, PreferencesRepository, ProfilePreferences,
+    ProfileRepository, Session, SessionRepository, TrackLike, UserProfile,
 };
 
 /// In-memory catalog backing store.
@@ -198,5 +199,182 @@ impl PlaybackHistoryRepository for InMemoryPlaybackHistoryStore {
     async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()> {
         self.events.lock().unwrap().push(event);
         Ok(())
+    }
+}
+
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn profile_track_key(profile_id: &str, track_id: &str) -> String {
+    format!("{profile_id}:{track_id}")
+}
+
+/// In-memory saved-library store for tests and standalone prototype mode.
+#[derive(Default)]
+pub struct InMemoryLibraryStore {
+    items: Mutex<HashMap<String, LibraryItem>>,
+}
+
+#[async_trait]
+impl LibraryRepository for InMemoryLibraryStore {
+    async fn save_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<LibraryItem> {
+        let mut items = self.items.lock().unwrap();
+        let item = items
+            .entry(profile_track_key(profile_id, track_id))
+            .or_insert_with(|| LibraryItem {
+                profile_id: profile_id.to_string(),
+                track_id: track_id.to_string(),
+                added_at_epoch_ms: current_epoch_ms(),
+            });
+        Ok(item.clone())
+    }
+
+    async fn remove_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()> {
+        self.items
+            .lock()
+            .unwrap()
+            .remove(&profile_track_key(profile_id, track_id));
+        Ok(())
+    }
+
+    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+        let mut items: Vec<LibraryItem> = self
+            .items
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|item| item.profile_id == profile_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|item| std::cmp::Reverse(item.added_at_epoch_ms));
+        let total_count = items.len() as i32;
+        let start = (page.offset as usize).min(items.len());
+        let end = (start + page.limit as usize).min(items.len());
+        let media_items = items[start..end]
+            .iter()
+            .map(|item| MediaItem {
+                id: item.track_id.clone(),
+                ..MediaItem::default()
+            })
+            .collect();
+        Ok(MediaPage {
+            items: media_items,
+            total_count,
+            has_more: end < items.len(),
+        })
+    }
+
+    async fn is_saved(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
+        Ok(self
+            .items
+            .lock()
+            .unwrap()
+            .contains_key(&profile_track_key(profile_id, track_id)))
+    }
+}
+
+/// In-memory track-like store for tests and standalone prototype mode.
+#[derive(Default)]
+pub struct InMemoryLikeStore {
+    likes: Mutex<HashMap<String, TrackLike>>,
+}
+
+#[async_trait]
+impl LikeRepository for InMemoryLikeStore {
+    async fn like_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<TrackLike> {
+        let mut likes = self.likes.lock().unwrap();
+        let like = likes
+            .entry(profile_track_key(profile_id, track_id))
+            .or_insert_with(|| TrackLike {
+                profile_id: profile_id.to_string(),
+                track_id: track_id.to_string(),
+                liked_at_epoch_ms: current_epoch_ms(),
+            });
+        Ok(like.clone())
+    }
+
+    async fn unlike_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()> {
+        self.likes
+            .lock()
+            .unwrap()
+            .remove(&profile_track_key(profile_id, track_id));
+        Ok(())
+    }
+
+    async fn list_liked_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+        let mut likes: Vec<TrackLike> = self
+            .likes
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|like| like.profile_id == profile_id)
+            .cloned()
+            .collect();
+        likes.sort_by_key(|like| std::cmp::Reverse(like.liked_at_epoch_ms));
+        let total_count = likes.len() as i32;
+        let start = (page.offset as usize).min(likes.len());
+        let end = (start + page.limit as usize).min(likes.len());
+        let media_items = likes[start..end]
+            .iter()
+            .map(|like| MediaItem {
+                id: like.track_id.clone(),
+                ..MediaItem::default()
+            })
+            .collect();
+        Ok(MediaPage {
+            items: media_items,
+            total_count,
+            has_more: end < likes.len(),
+        })
+    }
+
+    async fn is_liked(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
+        Ok(self
+            .likes
+            .lock()
+            .unwrap()
+            .contains_key(&profile_track_key(profile_id, track_id)))
+    }
+}
+
+/// In-memory profile-preferences store for tests and standalone prototype mode.
+#[derive(Default)]
+pub struct InMemoryPreferencesStore {
+    preferences: Mutex<HashMap<String, ProfilePreferences>>,
+}
+
+#[async_trait]
+impl PreferencesRepository for InMemoryPreferencesStore {
+    async fn get_preferences(&self, profile_id: &str) -> CanopyResult<ProfilePreferences> {
+        Ok(self
+            .preferences
+            .lock()
+            .unwrap()
+            .get(profile_id)
+            .cloned()
+            .unwrap_or_else(|| ProfilePreferences {
+                profile_id: profile_id.to_string(),
+                values_json: "{}".to_string(),
+            }))
+    }
+
+    async fn upsert_preferences(
+        &self,
+        profile_id: &str,
+        values_json: &str,
+    ) -> CanopyResult<ProfilePreferences> {
+        let preferences = ProfilePreferences {
+            profile_id: profile_id.to_string(),
+            values_json: values_json.to_string(),
+        };
+        self.preferences
+            .lock()
+            .unwrap()
+            .insert(profile_id.to_string(), preferences.clone());
+        Ok(preferences)
     }
 }

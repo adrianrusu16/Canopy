@@ -25,9 +25,10 @@ use async_trait::async_trait;
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogIngest, CatalogRepository,
-    DiscoveryRepository, IngestBatchResult, MediaItem, MediaPage, Page, PlaybackHistoryEvent,
-    PlaybackHistoryRepository, ProfileRepository, ProviderTrack, Session, SessionRepository,
-    UserProfile,
+    DiscoveryRepository, IngestBatchResult, LibraryItem, LibraryRepository, LikeRepository,
+    MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackHistoryRepository,
+    PreferencesRepository, ProfilePreferences, ProfileRepository, ProviderTrack, Session,
+    SessionRepository, TrackLike, UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
 
@@ -99,6 +100,27 @@ fn db_err(e: sqlx::Error) -> CanopyError {
 
 fn invalid_arg(message: impl Into<String>) -> CanopyError {
     CanopyError::InvalidArgument(message.into())
+}
+
+fn parse_uuid_arg(value: &str, field: &str) -> CanopyResult<uuid::Uuid> {
+    uuid::Uuid::parse_str(value)
+        .map_err(|e| CanopyError::InvalidArgument(format!("invalid {field}: {e}")))
+}
+
+fn epoch_ms_i64(row: &sqlx::postgres::PgRow, column: &str) -> u64 {
+    row.try_get::<i64, _>(column).unwrap_or(0).max(0) as u64
+}
+
+fn map_track_write_err(err: sqlx::Error, track_id: &str) -> CanopyError {
+    if let sqlx::Error::Database(db) = &err {
+        if db.constraint() == Some("profile_library_items_track_id_fkey")
+            || db.constraint() == Some("profile_track_likes_track_id_fkey")
+        {
+            return CanopyError::not_found("track", track_id);
+        }
+    }
+
+    db_err(err)
 }
 
 fn require_non_empty(value: &str, field: &str) -> CanopyResult<()> {
@@ -858,6 +880,320 @@ impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
         .map_err(db_err)?;
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgLibraryRepository
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL-backed profile library repository.
+#[derive(Clone)]
+pub struct PgLibraryRepository {
+    pool: Arc<sqlx::PgPool>,
+}
+
+impl PgLibraryRepository {
+    /// Creates a new repository backed by the given connection pool.
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool: Arc::new(pool),
+        }
+    }
+}
+
+#[async_trait]
+impl LibraryRepository for PgLibraryRepository {
+    async fn save_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<LibraryItem> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let row = sqlx::query(
+            r#"
+                INSERT INTO profile_library_items (profile_id, track_id)
+                VALUES ($1, $2)
+                ON CONFLICT (profile_id, track_id) DO UPDATE SET updated_at = NOW()
+                RETURNING
+                    profile_id::text,
+                    track_id::text,
+                    (EXTRACT(EPOCH FROM added_at) * 1000)::bigint AS added_at_epoch_ms
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(track_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(|err| map_track_write_err(err, track_id))?;
+
+        Ok(LibraryItem {
+            profile_id: row.try_get("profile_id").unwrap_or_default(),
+            track_id: row.try_get("track_id").unwrap_or_default(),
+            added_at_epoch_ms: epoch_ms_i64(&row, "added_at_epoch_ms"),
+        })
+    }
+
+    async fn remove_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        sqlx::query("DELETE FROM profile_library_items WHERE profile_id = $1 AND track_id = $2")
+            .bind(profile_uuid)
+            .bind(track_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let sql = format!(
+            r#"
+            SELECT
+                t.id             AS track_id,
+                t.title          AS track_title,
+                a.name           AS artist_name,
+                al.title         AS album_title,
+                t.duration_ms    AS track_duration_ms,
+                t.is_explicit    AS track_explicit,
+                COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
+                aa.content_type  AS asset_content_type,
+                aa.size_bytes    AS asset_size_bytes
+            FROM profile_library_items pli
+            JOIN tracks t      ON pli.track_id = t.id
+            JOIN artists a     ON t.artist_id = a.id
+            JOIN albums al     ON t.album_id = al.id
+            {REPRESENTATIVE_ASSET_JOIN}
+            WHERE pli.profile_id = $1
+            ORDER BY pli.added_at DESC, t.title
+            LIMIT $2 OFFSET $3
+        "#
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(profile_uuid)
+            .bind(page.limit as i64)
+            .bind(page.offset as i64)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM profile_library_items WHERE profile_id = $1")
+                .bind(profile_uuid)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(db_err)?;
+        Ok(MediaPage {
+            items: rows.iter().map(media_item_from_row).collect(),
+            total_count: total_count as i32,
+            has_more: (page.offset + page.limit) < total_count as u32,
+        })
+    }
+
+    async fn is_saved(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM profile_library_items WHERE profile_id = $1 AND track_id = $2)",
+        )
+        .bind(profile_uuid)
+        .bind(track_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+        Ok(exists)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgLikeRepository
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL-backed profile track-like repository.
+#[derive(Clone)]
+pub struct PgLikeRepository {
+    pool: Arc<sqlx::PgPool>,
+}
+
+impl PgLikeRepository {
+    /// Creates a new repository backed by the given connection pool.
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool: Arc::new(pool),
+        }
+    }
+}
+
+#[async_trait]
+impl LikeRepository for PgLikeRepository {
+    async fn like_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<TrackLike> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let row = sqlx::query(
+            r#"
+                INSERT INTO profile_track_likes (profile_id, track_id)
+                VALUES ($1, $2)
+                ON CONFLICT (profile_id, track_id) DO UPDATE SET updated_at = NOW()
+                RETURNING
+                    profile_id::text,
+                    track_id::text,
+                    (EXTRACT(EPOCH FROM liked_at) * 1000)::bigint AS liked_at_epoch_ms
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(track_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(|err| map_track_write_err(err, track_id))?;
+
+        Ok(TrackLike {
+            profile_id: row.try_get("profile_id").unwrap_or_default(),
+            track_id: row.try_get("track_id").unwrap_or_default(),
+            liked_at_epoch_ms: epoch_ms_i64(&row, "liked_at_epoch_ms"),
+        })
+    }
+
+    async fn unlike_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        sqlx::query("DELETE FROM profile_track_likes WHERE profile_id = $1 AND track_id = $2")
+            .bind(profile_uuid)
+            .bind(track_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_liked_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let sql = format!(
+            r#"
+            SELECT
+                t.id             AS track_id,
+                t.title          AS track_title,
+                a.name           AS artist_name,
+                al.title         AS album_title,
+                t.duration_ms    AS track_duration_ms,
+                t.is_explicit    AS track_explicit,
+                COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
+                aa.content_type  AS asset_content_type,
+                aa.size_bytes    AS asset_size_bytes
+            FROM profile_track_likes ptl
+            JOIN tracks t      ON ptl.track_id = t.id
+            JOIN artists a     ON t.artist_id = a.id
+            JOIN albums al     ON t.album_id = al.id
+            {REPRESENTATIVE_ASSET_JOIN}
+            WHERE ptl.profile_id = $1
+            ORDER BY ptl.liked_at DESC, t.title
+            LIMIT $2 OFFSET $3
+        "#
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(profile_uuid)
+            .bind(page.limit as i64)
+            .bind(page.offset as i64)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM profile_track_likes WHERE profile_id = $1")
+                .bind(profile_uuid)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(db_err)?;
+        Ok(MediaPage {
+            items: rows.iter().map(media_item_from_row).collect(),
+            total_count: total_count as i32,
+            has_more: (page.offset + page.limit) < total_count as u32,
+        })
+    }
+
+    async fn is_liked(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM profile_track_likes WHERE profile_id = $1 AND track_id = $2)",
+        )
+        .bind(profile_uuid)
+        .bind(track_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+        Ok(exists)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgPreferencesRepository
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL-backed profile preferences repository.
+#[derive(Clone)]
+pub struct PgPreferencesRepository {
+    pool: Arc<sqlx::PgPool>,
+}
+
+impl PgPreferencesRepository {
+    /// Creates a new repository backed by the given connection pool.
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool: Arc::new(pool),
+        }
+    }
+}
+
+#[async_trait]
+impl PreferencesRepository for PgPreferencesRepository {
+    async fn get_preferences(&self, profile_id: &str) -> CanopyResult<ProfilePreferences> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let row = sqlx::query(
+            "SELECT profile_id::text, preferences::text AS preferences FROM profile_preferences WHERE profile_id = $1",
+        )
+        .bind(profile_uuid)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(row
+            .as_ref()
+            .map(|row| ProfilePreferences {
+                profile_id: row.try_get("profile_id").unwrap_or_default(),
+                values_json: row
+                    .try_get("preferences")
+                    .unwrap_or_else(|_| "{}".to_string()),
+            })
+            .unwrap_or_else(|| ProfilePreferences {
+                profile_id: profile_id.to_string(),
+                values_json: "{}".to_string(),
+            }))
+    }
+
+    async fn upsert_preferences(
+        &self,
+        profile_id: &str,
+        values_json: &str,
+    ) -> CanopyResult<ProfilePreferences> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let row = sqlx::query(
+            r#"
+                INSERT INTO profile_preferences (profile_id, preferences)
+                VALUES ($1, $2::jsonb)
+                ON CONFLICT (profile_id) DO UPDATE SET
+                    preferences = EXCLUDED.preferences,
+                    updated_at = NOW()
+                RETURNING profile_id::text, preferences::text AS preferences
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(values_json)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(ProfilePreferences {
+            profile_id: row.try_get("profile_id").unwrap_or_default(),
+            values_json: row
+                .try_get("preferences")
+                .unwrap_or_else(|_| "{}".to_string()),
+        })
     }
 }
 

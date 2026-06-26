@@ -1,12 +1,13 @@
 #![cfg(feature = "pg")]
 
 use canopy_core::{
-    AudioAssetRepository, CatalogIngest, CatalogRepository, Page, PlaybackHistoryEvent,
-    PlaybackHistoryRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense,
-    ProviderTrack,
+    AudioAssetRepository, CatalogIngest, CatalogRepository, LibraryRepository, LikeRepository,
+    Page, PlaybackHistoryEvent, PlaybackHistoryRepository, PreferencesRepository,
+    ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
 };
 use canopy_server::jade_store::{
-    PgAudioAssetRepository, PgCatalogRepository, PgPlaybackHistoryRepository, PgProfileRepository,
+    PgAudioAssetRepository, PgCatalogRepository, PgLibraryRepository, PgLikeRepository,
+    PgPlaybackHistoryRepository, PgPreferencesRepository, PgProfileRepository,
 };
 use sqlx::{Row, postgres::PgPoolOptions};
 
@@ -387,4 +388,194 @@ async fn postgres_migrations_support_profile_library_likes_preferences_schema() 
     .await
     .expect("index count should be queryable");
     assert_eq!(index_count, 4);
+}
+
+#[tokio::test]
+async fn postgres_repositories_support_profile_library_likes_preferences() {
+    let Some(pool) = connect_test_pool().await else {
+        eprintln!(
+            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
+        );
+        return;
+    };
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let profiles = PgProfileRepository::new(pool.clone());
+    let library = PgLibraryRepository::new(pool.clone());
+    let likes = PgLikeRepository::new(pool.clone());
+    let preferences = PgPreferencesRepository::new(pool.clone());
+    let external_user_id = format!("library-user-{}", uuid::Uuid::new_v4());
+    let profile = profiles
+        .upsert_profile(&external_user_id, Some("Ada"), true)
+        .await
+        .expect("profile should be created");
+
+    let artist_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO artists (name, sort_name)
+            VALUES ($1, $2)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("Library Artist {external_user_id}"))
+    .bind(format!("library artist {external_user_id}"))
+    .fetch_one(&pool)
+    .await
+    .expect("artist should be inserted");
+
+    let album_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO albums (title, artist_id)
+            VALUES ($1, $2::uuid)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("Library Album {external_user_id}"))
+    .bind(&artist_id)
+    .fetch_one(&pool)
+    .await
+    .expect("album should be inserted");
+
+    let track_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO tracks (title, artist_id, album_id, duration_ms)
+            VALUES ($1, $2::uuid, $3::uuid, 1000)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("Library Track {external_user_id}"))
+    .bind(&artist_id)
+    .bind(&album_id)
+    .fetch_one(&pool)
+    .await
+    .expect("track should be inserted");
+
+    let saved = library
+        .save_track(&profile.id, &track_id)
+        .await
+        .expect("save should work");
+    assert_eq!(saved.profile_id, profile.id);
+    assert_eq!(saved.track_id, track_id);
+    let saved_again = library
+        .save_track(&profile.id, &track_id)
+        .await
+        .expect("resave should work");
+    assert_eq!(saved_again.track_id, track_id);
+    assert!(
+        library
+            .is_saved(&profile.id, &track_id)
+            .await
+            .expect("saved flag should work")
+    );
+    assert_eq!(
+        library
+            .list_tracks(
+                &profile.id,
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .expect("library list should work")
+            .items
+            .len(),
+        1
+    );
+    library
+        .remove_track(&profile.id, &track_id)
+        .await
+        .expect("remove should work");
+    library
+        .remove_track(&profile.id, &track_id)
+        .await
+        .expect("second remove should be idempotent");
+    assert!(
+        !library
+            .is_saved(&profile.id, &track_id)
+            .await
+            .expect("saved flag should work after remove")
+    );
+
+    let liked = likes
+        .like_track(&profile.id, &track_id)
+        .await
+        .expect("like should work");
+    assert_eq!(liked.profile_id, profile.id);
+    assert_eq!(liked.track_id, track_id);
+    likes
+        .like_track(&profile.id, &track_id)
+        .await
+        .expect("relike should be idempotent");
+    assert!(
+        likes
+            .is_liked(&profile.id, &track_id)
+            .await
+            .expect("liked flag should work")
+    );
+    assert_eq!(
+        likes
+            .list_liked_tracks(
+                &profile.id,
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .expect("liked list should work")
+            .items
+            .len(),
+        1
+    );
+    likes
+        .unlike_track(&profile.id, &track_id)
+        .await
+        .expect("unlike should work");
+    likes
+        .unlike_track(&profile.id, &track_id)
+        .await
+        .expect("second unlike should be idempotent");
+    assert!(
+        !likes
+            .is_liked(&profile.id, &track_id)
+            .await
+            .expect("liked flag should work after unlike")
+    );
+
+    let prefs = preferences
+        .upsert_preferences(
+            &profile.id,
+            r#"{"explicit_content":false,"preferred_codecs":["opus","mp4"]}"#,
+        )
+        .await
+        .expect("preferences should save");
+    assert_eq!(prefs.profile_id, profile.id);
+    assert!(prefs.values_json.contains("preferred_codecs"));
+    let fetched = preferences
+        .get_preferences(&profile.id)
+        .await
+        .expect("preferences should load");
+    assert_eq!(fetched.values_json, prefs.values_json);
+
+    let _ = sqlx::query("DELETE FROM profiles WHERE id = $1::uuid")
+        .bind(&profile.id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM tracks WHERE id = $1::uuid")
+        .bind(&track_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM albums WHERE id = $1::uuid")
+        .bind(&album_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM artists WHERE id = $1::uuid")
+        .bind(&artist_id)
+        .execute(&pool)
+        .await;
 }
