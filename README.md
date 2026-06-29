@@ -22,7 +22,7 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Music storage             | 🟡 Partial     | RustFS HMAC URL generation and Supabase Storage signed URL fetching are available. Canopy stays out of the byte-serving path after `ResolvePlayback`. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
 | Health checks             | 🟡 Partial     | `HealthService` reports liveness, version, aggregate status, dependency details, PostgreSQL connectivity, and optional RustFS TCP reachability via `CANOPY_HEALTH_CHECK_RUSTFS=true`. |
-| CI / Verification         | 🟡 Partial     | GitHub Actions runs fmt, all-feature Clippy, default tests, PostgreSQL feature tests against a Postgres service container, and release build. Proto compatibility gates are still planned. |
+| CI / Verification         | ✅ Implemented | GitHub Actions gates `master` with fmt, all-feature Clippy, default tests, a fail-closed disposable PostgreSQL integration harness, and a release build. Proto compatibility gates are still planned. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
 
@@ -623,20 +623,20 @@ Canopy's health endpoint reports actual dependency health, not process liveness.
 
 ## CI / Verification
 
-The CI pipeline is implemented via **GitHub Actions** (`.github/workflows/ci.yml`). Every change to `main` and every pull request is gated by:
+The CI pipeline is implemented via **GitHub Actions** (`.github/workflows/ci.yml`). Every change to `master` and every pull request is gated by:
 
 ```text
 cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-features --tests -- -D warnings
 cargo fmt --all -- --check
-cargo test --workspace --features canopy-server/pg  # with PostgreSQL service container
+bash scripts/test-pg.sh  # disposable PostgreSQL; migrations and pg tests must run
 cargo build --workspace --release
 ```
 
 The workflow installs `protoc` so that the `canopy-proto` crate's `build.rs` compiles successfully in CI, and uses `Swatinem/rust-cache` for fast incremental builds.
 
-The test job starts a PostgreSQL service container and runs the `canopy-server/pg` integration suite, which applies migrations and verifies transactional provider ingest against a real database. RustFS integration tests and proto wire-compatibility gates are still planned.
+The PostgreSQL step uses the same `scripts/test-pg.sh` harness locally and in CI. It starts an isolated PostgreSQL 18.4 Compose project, waits for database health, applies the complete migration chain, runs the feature tests serially, and destroys the test stack. Startup, connection, migration, or test failures fail the job; database tests cannot report success by skipping their bodies. RustFS integration tests and proto wire-compatibility gates are still planned.
 
 ---
 
@@ -757,15 +757,18 @@ The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-de
 
 ### PostgreSQL Integration Tests
 
-The `canopy-server/pg` feature includes a database-backed integration test for migrations, provider ingest idempotency, multi-codec assets, browse deduplication, and `mv_discovery_pool` uniqueness. The test uses `CANOPY_TEST_DATABASE_URL` when set, otherwise `DATABASE_URL`; if neither is available it skips cleanly.
+The `canopy-server/pg` feature includes database-backed integration coverage for the complete migration chain, provider ingest, catalog reads, profile state, consent-safe history, and profile-owned playlists. The recommended harness creates an isolated PostgreSQL database on `127.0.0.1:55432`, runs the complete suite, and removes the container and network even when tests fail.
 
 ```bash
-# Start PostgreSQL and apply migrations through the test harness
-docker compose up -d postgres
+# Recommended: start, test, and destroy isolated PostgreSQL automatically
+bash scripts/test-pg.sh
 
-CANOPY_TEST_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy \
-  cargo test --features canopy-server/pg
+# Advanced: use an explicitly managed test database
+CANOPY_TEST_DATABASE_URL=postgres://user:password@localhost:5432/canopy_test \
+  bash scripts/test-pg.sh
 ```
+
+Direct `cargo test --workspace --features canopy-server/pg` runs require `CANOPY_TEST_DATABASE_URL`. PostgreSQL tests never fall back to `DATABASE_URL` and intentionally fail when the test database is missing or unreachable. Default `cargo test --workspace` runs remain database-free.
 
 ### Supabase Music Source
 

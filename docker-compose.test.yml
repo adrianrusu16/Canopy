@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: canopy_test
+      POSTGRES_PASSWORD: canopy_test
+      POSTGRES_DB: canopy_test
+    ports:
+      - "127.0.0.1:${CANOPY_TEST_POSTGRES_PORT:-55432}:5432"
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canopy_test -d canopy_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s

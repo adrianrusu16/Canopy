@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -56,23 +56,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18.4-alpine
-        env:
-          POSTGRES_USER: canopy
-          POSTGRES_PASSWORD: canopy
-          POSTGRES_DB: canopy
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U canopy -d canopy"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      CANOPY_TEST_DATABASE_URL: postgres://canopy:canopy@localhost:5432/canopy
-      DATABASE_URL: postgres://canopy:canopy@localhost:5432/canopy
     steps:
       - uses: actions/checkout@v4
       - name: Install protoc
@@ -84,7 +67,7 @@ jobs:
       - name: Test default feature set
         run: cargo test --workspace
       - name: Test PostgreSQL feature set
-        run: cargo test --workspace --features canopy-server/pg
+        run: bash scripts/test-pg.sh
 
   build:
     name: Build

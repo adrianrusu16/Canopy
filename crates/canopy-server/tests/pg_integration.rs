@@ -12,22 +12,17 @@ use canopy_server::jade_store::{
 };
 use sqlx::{Row, postgres::PgPoolOptions};
 
-async fn connect_test_pool() -> Option<sqlx::PgPool> {
-    let database_url = std::env::var("CANOPY_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+async fn connect_test_pool() -> sqlx::PgPool {
+    let database_url = std::env::var("CANOPY_TEST_DATABASE_URL").expect(
+        "CANOPY_TEST_DATABASE_URL is required for PostgreSQL integration tests; \
+         run scripts/test-pg.sh or provide an isolated test database",
+    );
 
-    match PgPoolOptions::new()
+    PgPoolOptions::new()
         .max_connections(3)
         .connect(&database_url)
         .await
-    {
-        Ok(pool) => Some(pool),
-        Err(err) => {
-            eprintln!("skipping postgres integration test: {err}");
-            None
-        }
-    }
+        .unwrap_or_else(|err| panic!("failed to connect to CANOPY_TEST_DATABASE_URL: {err}"))
 }
 
 fn provider_track(provider_id: String) -> ProviderTrack {
@@ -92,12 +87,7 @@ async fn cleanup_provider_track(pool: &sqlx::PgPool, provider: &str, provider_id
 
 #[tokio::test]
 async fn postgres_migrations_support_idempotent_provider_ingest() {
-    let Some(pool) = connect_test_pool().await else {
-        eprintln!(
-            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
-        );
-        return;
-    };
+    let pool = connect_test_pool().await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
@@ -175,12 +165,7 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
 
 #[tokio::test]
 async fn postgres_migrations_support_profile_upsert() {
-    let Some(pool) = connect_test_pool().await else {
-        eprintln!(
-            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
-        );
-        return;
-    };
+    let pool = connect_test_pool().await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
@@ -234,12 +219,7 @@ fn history_lifecycle_migration_enforces_consent_purge() {
 
 #[tokio::test]
 async fn postgres_migrations_support_profile_scoped_history() {
-    let Some(pool) = connect_test_pool().await else {
-        eprintln!(
-            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
-        );
-        return;
-    };
+    let pool = connect_test_pool().await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
@@ -459,12 +439,7 @@ async fn postgres_migrations_support_profile_scoped_history() {
 
 #[tokio::test]
 async fn postgres_migrations_support_profile_library_likes_preferences_schema() {
-    let Some(pool) = connect_test_pool().await else {
-        eprintln!(
-            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
-        );
-        return;
-    };
+    let pool = connect_test_pool().await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
@@ -526,12 +501,7 @@ async fn postgres_migrations_support_profile_library_likes_preferences_schema() 
 
 #[tokio::test]
 async fn postgres_migrations_support_profile_owned_playlists_schema() {
-    let Some(pool) = connect_test_pool().await else {
-        eprintln!(
-            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
-        );
-        return;
-    };
+    let pool = connect_test_pool().await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
@@ -588,12 +558,7 @@ async fn postgres_migrations_support_profile_owned_playlists_schema() {
 }
 #[tokio::test]
 async fn postgres_repositories_support_profile_library_likes_preferences() {
-    let Some(pool) = connect_test_pool().await else {
-        eprintln!(
-            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
-        );
-        return;
-    };
+    let pool = connect_test_pool().await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
@@ -778,12 +743,7 @@ async fn postgres_repositories_support_profile_library_likes_preferences() {
 
 #[tokio::test]
 async fn postgres_repositories_support_profile_owned_playlists() {
-    let Some(pool) = connect_test_pool().await else {
-        eprintln!(
-            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
-        );
-        return;
-    };
+    let pool = connect_test_pool().await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)
