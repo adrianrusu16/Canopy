@@ -206,7 +206,8 @@ impl Default for ResolverConfig {
 #[async_trait::async_trait]
 pub trait PlaybackUrlProvider: Send + Sync {
     /// Returns a stream URL valid until `expires_at_epoch_ms`.
-    async fn signed_url(&self, object_key: &str, expires_at_epoch_ms: u64) -> CanopyResult<String>;
+    async fn signed_url(&self, storage_key: &str, expires_at_epoch_ms: u64)
+    -> CanopyResult<String>;
 }
 
 struct RustfsUrlProvider {
@@ -217,14 +218,18 @@ struct RustfsUrlProvider {
 
 #[async_trait::async_trait]
 impl PlaybackUrlProvider for RustfsUrlProvider {
-    async fn signed_url(&self, object_key: &str, expires_at_epoch_ms: u64) -> CanopyResult<String> {
-        let signature = self.signer.sign(object_key, expires_at_epoch_ms);
+    async fn signed_url(
+        &self,
+        storage_key: &str,
+        expires_at_epoch_ms: u64,
+    ) -> CanopyResult<String> {
+        let signature = self.signer.sign(storage_key, expires_at_epoch_ms);
         let expires_epoch_s = expires_at_epoch_ms / 1_000;
         Ok(format!(
             "{base}/{bucket}/{key}?signature={signature}&expires={expires_epoch_s}",
             base = self.base_url,
             bucket = self.bucket,
-            key = object_key,
+            key = storage_key,
         ))
     }
 }
@@ -283,7 +288,7 @@ impl ResolverService {
         track_id: &str,
         now_epoch_ms: u64,
     ) -> CanopyResult<PlaybackSource> {
-        let assets = self.assets.assets_for_track(track_id).await?;
+        let assets = self.assets.assets_for_public_track(track_id).await?;
         let asset = self
             .select_asset(assets)
             .ok_or_else(|| CanopyError::not_found("audio_asset", track_id))?;
@@ -291,7 +296,7 @@ impl ResolverService {
         let expires_at_epoch_ms = now_epoch_ms + self.config.url_ttl.as_millis() as u64;
         let stream_url = self
             .url_provider
-            .signed_url(&asset.object_key, expires_at_epoch_ms)
+            .signed_url(&asset.storage_key, expires_at_epoch_ms)
             .await?;
 
         Ok(PlaybackSource {
@@ -356,10 +361,10 @@ mod tests {
     impl PlaybackUrlProvider for StaticUrlProvider {
         async fn signed_url(
             &self,
-            object_key: &str,
+            storage_key: &str,
             _expires_at_epoch_ms: u64,
         ) -> CanopyResult<String> {
-            Ok(format!("https://media.test/{object_key}"))
+            Ok(format!("https://media.test/{storage_key}"))
         }
     }
 
@@ -368,7 +373,7 @@ mod tests {
             track_id: track.into(),
             codec: codec.into(),
             content_type: format!("audio/{codec}"),
-            object_key: key.into(),
+            storage_key: key.into(),
             size_bytes: 1_024,
             checksum_sha256: "deadbeef".into(),
             duration_ms: 245_000,

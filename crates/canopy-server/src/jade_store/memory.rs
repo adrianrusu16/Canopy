@@ -1,8 +1,4 @@
 //! In-memory implementations of the repository ports.
-//!
-//! These are placeholders for the future PostgreSQL-backed (catalog) and
-//! persistent (session) stores. They keep the prototype fully functional
-//! without external dependencies.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -10,103 +6,224 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogRepository,
-    DiscoveryRepository, LibraryItem, LibraryRepository, LikeRepository, MediaItem, MediaPage,
-    Page, PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage,
-    PlaybackHistoryRepository, Playlist, PlaylistPage, PlaylistRepository, PreferencesRepository,
-    ProfilePreferences, ProfileRepository, Session, SessionRepository, TrackLike, UserProfile,
+    DiscoveryRepository, IngestStatus, InstanceSettingsRepository, LibraryItem, LibraryRepository,
+    LikeRepository, MediaItem, MediaPage, MediaVisibility, Page, PlaybackHistoryEntry,
+    PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository, Playlist, PlaylistPage,
+    PlaylistRepository, PreferencesRepository, ProfilePreferences, ProfileRepository, Session,
+    SessionRepository, TrackLike, UserProfile,
 };
+
+/// Catalog item together with its mandatory access policy.
+#[derive(Clone)]
+pub struct InMemoryCatalogEntry {
+    pub item: MediaItem,
+    pub visibility: MediaVisibility,
+    pub ingest_status: IngestStatus,
+    pub owner_profile_id: Option<String>,
+}
 
 /// In-memory catalog backing store.
 #[derive(Clone, Default)]
 pub struct InMemoryCatalog {
-    items: Vec<MediaItem>,
+    entries: Vec<InMemoryCatalogEntry>,
 }
 
 impl InMemoryCatalog {
-    /// Creates a catalog seeded with the given items.
+    /// Creates a public-ready catalog for demo compatibility.
     pub fn with_items(items: Vec<MediaItem>) -> Self {
-        Self { items }
+        Self::from_entries(
+            items
+                .into_iter()
+                .map(|item| InMemoryCatalogEntry {
+                    item,
+                    visibility: MediaVisibility::ReleaseSafe,
+                    ingest_status: IngestStatus::Ready,
+                    owner_profile_id: None,
+                })
+                .collect(),
+        )
     }
+
+    /// Creates a catalog with explicit access policy per item.
+    pub fn from_entries(entries: Vec<InMemoryCatalogEntry>) -> Self {
+        Self { entries }
+    }
+
+    fn public_items(&self) -> Vec<MediaItem> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.visibility == MediaVisibility::ReleaseSafe
+                    && entry.ingest_status == IngestStatus::Ready
+            })
+            .map(|entry| entry.item.clone())
+            .collect()
+    }
+
+    fn personal_items(&self, owner_profile_id: &str) -> Vec<MediaItem> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.visibility == MediaVisibility::Personal
+                    && entry.ingest_status == IngestStatus::Ready
+                    && entry.owner_profile_id.as_deref() == Some(owner_profile_id)
+            })
+            .map(|entry| entry.item.clone())
+            .collect()
+    }
+}
+
+fn page_items(items: Vec<MediaItem>, page: Page) -> MediaPage {
+    let total = items.len();
+    let start = (page.offset as usize).min(total);
+    let end = (start + page.limit as usize).min(total);
+    MediaPage {
+        items: items[start..end].to_vec(),
+        total_count: total as i32,
+        has_more: end < total,
+    }
+}
+
+fn search_items(items: Vec<MediaItem>, query: &str, page: Page) -> MediaPage {
+    if query.is_empty() {
+        return MediaPage::default();
+    }
+    let query = query.to_lowercase();
+    let matches = items
+        .into_iter()
+        .filter(|item| {
+            item.title.to_lowercase().contains(&query)
+                || item.artist.to_lowercase().contains(&query)
+        })
+        .collect();
+    page_items(matches, page)
 }
 
 #[async_trait]
 impl CatalogRepository for InMemoryCatalog {
-    async fn browse(
+    async fn browse_public(
         &self,
         _parent_id: Option<&str>,
         _genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage> {
-        let start = (page.offset as usize).min(self.items.len());
-        let end = (start + page.limit as usize).min(self.items.len());
-        Ok(MediaPage {
-            items: self.items[start..end].to_vec(),
-            total_count: self.items.len() as i32,
-            has_more: end < self.items.len(),
-        })
+        Ok(page_items(self.public_items(), page))
     }
 
-    async fn search(&self, query: &str, _page: Page) -> CanopyResult<MediaPage> {
-        // Trivial in-memory match; the production path is PostgreSQL `pg_trgm`.
-        let items: Vec<MediaItem> = if query.is_empty() {
-            Vec::new()
-        } else {
-            self.items
-                .iter()
-                .filter(|i| {
-                    i.title.to_lowercase().contains(&query.to_lowercase())
-                        || i.artist.to_lowercase().contains(&query.to_lowercase())
-                })
-                .cloned()
-                .collect()
-        };
-        let total_count = items.len() as i32;
-        Ok(MediaPage {
-            items,
-            total_count,
-            has_more: false,
-        })
+    async fn search_public(&self, query: &str, page: Page) -> CanopyResult<MediaPage> {
+        Ok(search_items(self.public_items(), query, page))
     }
 
-    async fn get_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>> {
-        Ok(self.items.iter().find(|i| i.id == media_id).cloned())
+    async fn get_public_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>> {
+        Ok(self
+            .public_items()
+            .into_iter()
+            .find(|item| item.id == media_id))
+    }
+
+    async fn list_personal(&self, owner_profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+        Ok(page_items(self.personal_items(owner_profile_id), page))
+    }
+
+    async fn search_personal(
+        &self,
+        owner_profile_id: &str,
+        query: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
+        Ok(search_items(
+            self.personal_items(owner_profile_id),
+            query,
+            page,
+        ))
+    }
+
+    async fn get_personal_media(
+        &self,
+        owner_profile_id: &str,
+        media_id: &str,
+    ) -> CanopyResult<Option<MediaItem>> {
+        Ok(self
+            .personal_items(owner_profile_id)
+            .into_iter()
+            .find(|item| item.id == media_id))
     }
 }
 
 #[async_trait]
 impl DiscoveryRepository for InMemoryCatalog {
     async fn shuffle_pool(&self) -> CanopyResult<Vec<MediaItem>> {
-        // The production view is pre-shuffled offline; the prototype simply
-        // exposes the catalog in insertion order and leaves diversification to
-        // the discovery service.
-        Ok(self.items.clone())
+        Ok(self.public_items())
     }
 }
 
+/// Audio asset together with its track access policy.
+#[derive(Clone)]
+pub struct InMemoryAudioAssetEntry {
+    pub asset: AudioAsset,
+    pub visibility: MediaVisibility,
+    pub ingest_status: IngestStatus,
+    pub owner_profile_id: Option<String>,
+}
+
 /// In-memory audio-asset backing store.
-///
-/// Stands in for the `audio_assets` table; the production backend will read
-/// from PostgreSQL. Assets are grouped by track identifier.
 #[derive(Clone, Default)]
 pub struct InMemoryAudioAssetStore {
-    assets: Vec<AudioAsset>,
+    entries: Vec<InMemoryAudioAssetEntry>,
 }
 
 impl InMemoryAudioAssetStore {
-    /// Creates a store seeded with the given assets.
+    /// Creates a public-ready store for demo compatibility.
     pub fn with_assets(assets: Vec<AudioAsset>) -> Self {
-        Self { assets }
+        Self::from_entries(
+            assets
+                .into_iter()
+                .map(|asset| InMemoryAudioAssetEntry {
+                    asset,
+                    visibility: MediaVisibility::ReleaseSafe,
+                    ingest_status: IngestStatus::Ready,
+                    owner_profile_id: None,
+                })
+                .collect(),
+        )
+    }
+
+    /// Creates a store with explicit access policy per asset.
+    pub fn from_entries(entries: Vec<InMemoryAudioAssetEntry>) -> Self {
+        Self { entries }
     }
 }
 
 #[async_trait]
 impl AudioAssetRepository for InMemoryAudioAssetStore {
-    async fn assets_for_track(&self, track_id: &str) -> CanopyResult<Vec<AudioAsset>> {
+    async fn assets_for_public_track(&self, track_id: &str) -> CanopyResult<Vec<AudioAsset>> {
         Ok(self
-            .assets
+            .entries
             .iter()
-            .filter(|a| a.track_id == track_id)
-            .cloned()
+            .filter(|entry| {
+                entry.asset.track_id == track_id
+                    && entry.visibility == MediaVisibility::ReleaseSafe
+                    && entry.ingest_status == IngestStatus::Ready
+            })
+            .map(|entry| entry.asset.clone())
+            .collect())
+    }
+
+    async fn assets_for_personal_track(
+        &self,
+        owner_profile_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<Vec<AudioAsset>> {
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.asset.track_id == track_id
+                    && entry.visibility == MediaVisibility::Personal
+                    && entry.ingest_status == IngestStatus::Ready
+                    && entry.owner_profile_id.as_deref() == Some(owner_profile_id)
+            })
+            .map(|entry| entry.asset.clone())
             .collect())
     }
 }
@@ -179,6 +296,24 @@ impl ProfileRepository for InMemoryProfileStore {
         external_user_id: &str,
     ) -> CanopyResult<Option<UserProfile>> {
         Ok(self.profiles.lock().unwrap().get(external_user_id).cloned())
+    }
+}
+
+/// In-memory singleton settings for tests and standalone mode.
+#[derive(Default)]
+pub struct InMemoryInstanceSettingsStore {
+    owner_profile_id: Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl InstanceSettingsRepository for InMemoryInstanceSettingsStore {
+    async fn set_owner_profile_id(&self, profile_id: &str) -> CanopyResult<()> {
+        *self.owner_profile_id.lock().unwrap() = Some(profile_id.to_string());
+        Ok(())
+    }
+
+    async fn owner_profile_id(&self) -> CanopyResult<Option<String>> {
+        Ok(self.owner_profile_id.lock().unwrap().clone())
     }
 }
 

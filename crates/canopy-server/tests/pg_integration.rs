@@ -1,13 +1,14 @@
 #![cfg(feature = "pg")]
 
 use canopy_core::{
-    AudioAssetRepository, CatalogIngest, CatalogRepository, LibraryRepository, LikeRepository,
-    Page, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
-    PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
+    AudioAssetRepository, CatalogIngest, CatalogRepository, InstanceSettingsRepository,
+    LibraryRepository, LikeRepository, Page, PlaybackHistoryEvent, PlaybackHistoryRepository,
+    PlaylistRepository, PreferencesRepository, ProfileRepository, ProviderAudioAsset,
+    ProviderLicense, ProviderTrack,
 };
 use canopy_server::jade_store::{
-    PgAudioAssetRepository, PgCatalogRepository, PgLibraryRepository, PgLikeRepository,
-    PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
+    PgAudioAssetRepository, PgCatalogRepository, PgInstanceSettingsRepository, PgLibraryRepository,
+    PgLikeRepository, PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
     PgProfileRepository,
 };
 use sqlx::{Row, postgres::PgPoolOptions};
@@ -44,7 +45,7 @@ fn provider_track(provider_id: String) -> ProviderTrack {
             ProviderAudioAsset {
                 codec: "mp3".to_string(),
                 content_type: "audio/mpeg".to_string(),
-                object_key: "audio/tracks/canopy-test/integration-nocturne.mp3".to_string(),
+                storage_key: "audio/tracks/canopy-test/integration-nocturne.mp3".to_string(),
                 size_bytes: 7_200_000,
                 checksum_sha256: "1111111111111111111111111111111111111111111111111111111111111111"
                     .to_string(),
@@ -53,15 +54,17 @@ fn provider_track(provider_id: String) -> ProviderTrack {
             ProviderAudioAsset {
                 codec: "opus".to_string(),
                 content_type: "audio/ogg".to_string(),
-                object_key: "audio/tracks/canopy-test/integration-nocturne.opus".to_string(),
+                storage_key: "audio/tracks/canopy-test/integration-nocturne.opus".to_string(),
                 size_bytes: 4_100_000,
                 checksum_sha256: "2222222222222222222222222222222222222222222222222222222222222222"
                     .to_string(),
                 duration_ms: 181_000,
             },
         ],
-        artwork_key: Some("artwork/tracks/canopy-test/integration-nocturne.png".to_string()),
-        album_artwork_key: Some("artwork/albums/canopy-test/album.png".to_string()),
+        artwork_storage_key: Some(
+            "artwork/tracks/canopy-test/integration-nocturne.png".to_string(),
+        ),
+        album_artwork_storage_key: Some("artwork/albums/canopy-test/album.png".to_string()),
     }
 }
 
@@ -106,6 +109,32 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
         .await
         .expect("first ingest should succeed");
 
+    sqlx::query(
+        r#"
+            UPDATE licenses
+            SET review_status = 'approved', reviewed_at = NOW()
+            WHERE id = (SELECT license_id FROM tracks WHERE id = $1::uuid)
+        "#,
+    )
+    .bind(&first_id)
+    .execute(&pool)
+    .await
+    .expect("fixture license should be promotable");
+    sqlx::query(
+        r#"
+            UPDATE tracks
+            SET composition_license_id = license_id,
+                recording_license_id = license_id,
+                visibility = 'release_safe',
+                ingest_status = 'ready'
+            WHERE id = $1::uuid
+        "#,
+    )
+    .bind(&first_id)
+    .execute(&pool)
+    .await
+    .expect("fixture track should be promotable before re-ingest");
+
     let mut updated = track;
     updated.title = "Integration Nocturne Revised".to_string();
     updated.assets[0].size_bytes = 7_500_000;
@@ -117,21 +146,41 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
 
     assert_eq!(second_id, first_id);
 
-    let stored_assets = assets
-        .assets_for_track(&first_id)
-        .await
-        .expect("assets should be queryable after ingest");
-    assert_eq!(stored_assets.len(), 2);
+    let stored_asset_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audio_assets WHERE track_id = $1::uuid")
+            .bind(&first_id)
+            .fetch_one(&pool)
+            .await
+            .expect("ingested assets should remain stored while quarantined");
+    assert_eq!(stored_asset_count, 2);
 
-    let item = catalog
-        .get_media(&first_id)
-        .await
-        .expect("media lookup should succeed")
-        .expect("ingested media should exist");
-    assert_eq!(item.title, "Integration Nocturne Revised");
+    let stored_policy: (String, String, String) =
+        sqlx::query_as("SELECT title, visibility, ingest_status FROM tracks WHERE id = $1::uuid")
+            .bind(&first_id)
+            .fetch_one(&pool)
+            .await
+            .expect("ingested track should remain stored while quarantined");
+    assert_eq!(stored_policy.0, "Integration Nocturne Revised");
+    assert_eq!(stored_policy.1, "quarantined");
+    assert_eq!(stored_policy.2, "quarantined");
+
+    assert!(
+        catalog
+            .get_public_media(&first_id)
+            .await
+            .expect("public media lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        assets
+            .assets_for_public_track(&first_id)
+            .await
+            .expect("public asset lookup should succeed")
+            .is_empty()
+    );
 
     let page = catalog
-        .browse(
+        .browse_public(
             None,
             &[],
             Page {
@@ -142,7 +191,7 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
         .await
         .expect("browse should survive multi-asset tracks");
     let occurrences = page.items.iter().filter(|item| item.id == first_id).count();
-    assert_eq!(occurrences, 1);
+    assert_eq!(occurrences, 0);
 
     let duplicate_discovery_rows: i64 = sqlx::query_scalar(
         r#"
@@ -215,6 +264,310 @@ fn history_lifecycle_migration_enforces_consent_purge() {
 
     assert!(migration.contains("AFTER UPDATE OF history_enabled ON profiles"));
     assert!(migration.contains("DELETE FROM playback_history WHERE profile_id = NEW.id"));
+}
+
+#[test]
+fn local_media_foundation_migration_is_fail_closed() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/20250629000001_local_media_foundation.sql"
+    );
+    let sql = std::fs::read_to_string(path).expect("local media foundation migration should exist");
+
+    for required in [
+        "RENAME COLUMN object_key TO storage_key",
+        "CREATE TABLE instance_settings",
+        "owner_profile_id",
+        "visibility",
+        "ingest_status",
+        "composition_license_id",
+        "recording_license_id",
+        "review_status",
+        "canopy_enforce_release_safe_track",
+        "canopy_quarantine_tracks_on_license_revocation",
+        "visibility = 'release_safe'",
+        "ingest_status = 'ready'",
+    ] {
+        assert!(sql.contains(required), "migration is missing {required}");
+    }
+}
+
+struct PolicyTrackFixture<'a> {
+    title: String,
+    visibility: &'a str,
+    ingest_status: &'a str,
+    owner_profile_id: Option<&'a str>,
+    composition_license_id: Option<&'a str>,
+    recording_license_id: Option<&'a str>,
+}
+
+async fn insert_policy_track(
+    pool: &sqlx::PgPool,
+    artist_id: &str,
+    album_id: &str,
+    track: PolicyTrackFixture<'_>,
+) -> String {
+    let track_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO tracks (
+                title, artist_id, album_id, duration_ms,
+                visibility, ingest_status, owner_profile_id,
+                composition_license_id, recording_license_id
+            )
+            VALUES (
+                $1, $2::uuid, $3::uuid, 180000,
+                $4, $5, $6::uuid, $7::uuid, $8::uuid
+            )
+            RETURNING id::text
+        "#,
+    )
+    .bind(&track.title)
+    .bind(artist_id)
+    .bind(album_id)
+    .bind(track.visibility)
+    .bind(track.ingest_status)
+    .bind(track.owner_profile_id)
+    .bind(track.composition_license_id)
+    .bind(track.recording_license_id)
+    .fetch_one(pool)
+    .await
+    .expect("policy track should insert");
+
+    sqlx::query(
+        r#"
+            INSERT INTO audio_assets (
+                track_id, codec, content_type, storage_key,
+                size_bytes, checksum_sha256, duration_ms
+            )
+            VALUES ($1::uuid, 'mp3', 'audio/mpeg', $2, 1024, $3, 180000)
+        "#,
+    )
+    .bind(&track_id)
+    .bind(format!("audio/{track_id}.mp3"))
+    .bind("a".repeat(64))
+    .execute(pool)
+    .await
+    .expect("policy asset should insert");
+
+    track_id
+}
+
+#[tokio::test]
+async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let profiles = PgProfileRepository::new(pool.clone());
+    let settings = PgInstanceSettingsRepository::new(pool.clone());
+    let owner_a = profiles
+        .upsert_profile(&format!("owner-a-{}", uuid::Uuid::new_v4()), None, false)
+        .await
+        .unwrap();
+    let owner_b = profiles
+        .upsert_profile(&format!("owner-b-{}", uuid::Uuid::new_v4()), None, false)
+        .await
+        .unwrap();
+    settings.set_owner_profile_id(&owner_a.id).await.unwrap();
+    assert_eq!(
+        settings.owner_profile_id().await.unwrap(),
+        Some(owner_a.id.clone())
+    );
+
+    let unique = uuid::Uuid::new_v4();
+    let artist_id: String = sqlx::query_scalar(
+        "INSERT INTO artists (name, sort_name) VALUES ($1, $1) RETURNING id::text",
+    )
+    .bind(format!("Policy Artist {unique}"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let album_id: String = sqlx::query_scalar(
+        "INSERT INTO albums (title, artist_id) VALUES ($1, $2::uuid) RETURNING id::text",
+    )
+    .bind(format!("Policy Album {unique}"))
+    .bind(&artist_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let approved_license: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO licenses (license_type, source_url, review_status, reviewed_at)
+            VALUES ('CC0', $1, 'approved', NOW())
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("https://license.test/approved/{unique}"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let pending_license: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO licenses (license_type, source_url)
+            VALUES ('pending', $1)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("https://license.test/pending/{unique}"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let public_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Public Policy Track {unique}"),
+            visibility: "release_safe",
+            ingest_status: "ready",
+            owner_profile_id: None,
+            composition_license_id: Some(&approved_license),
+            recording_license_id: Some(&approved_license),
+        },
+    )
+    .await;
+    let personal_a_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Owner A Policy Track {unique}"),
+            visibility: "personal",
+            ingest_status: "ready",
+            owner_profile_id: Some(&owner_a.id),
+            composition_license_id: None,
+            recording_license_id: None,
+        },
+    )
+    .await;
+    let personal_b_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Owner B Policy Track {unique}"),
+            visibility: "personal",
+            ingest_status: "ready",
+            owner_profile_id: Some(&owner_b.id),
+            composition_license_id: None,
+            recording_license_id: None,
+        },
+    )
+    .await;
+
+    let catalog = PgCatalogRepository::new(pool.clone());
+    let assets = PgAudioAssetRepository::new(pool.clone());
+    let public = catalog
+        .browse_public(
+            None,
+            &[],
+            Page {
+                limit: 100,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(public.items.iter().any(|item| item.id == public_id));
+    assert!(!public.items.iter().any(|item| item.id == personal_a_id));
+    let owner_a_page = catalog
+        .list_personal(
+            &owner_a.id,
+            Page {
+                limit: 100,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        owner_a_page
+            .items
+            .iter()
+            .any(|item| item.id == personal_a_id)
+    );
+    assert!(
+        !owner_a_page
+            .items
+            .iter()
+            .any(|item| item.id == personal_b_id)
+    );
+    assert!(
+        catalog
+            .get_public_media(&personal_a_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        assets
+            .assets_for_public_track(&personal_a_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        assets
+            .assets_for_personal_track(&owner_a.id, &personal_a_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let promotable_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Promotable Policy Track {unique}"),
+            visibility: "quarantined",
+            ingest_status: "quarantined",
+            owner_profile_id: None,
+            composition_license_id: Some(&pending_license),
+            recording_license_id: Some(&approved_license),
+        },
+    )
+    .await;
+    let rejected = sqlx::query(
+        "UPDATE tracks SET visibility = 'release_safe', ingest_status = 'ready' WHERE id = $1::uuid",
+    )
+    .bind(&promotable_id)
+    .execute(&pool)
+    .await;
+    assert!(rejected.is_err());
+
+    sqlx::query(
+        "UPDATE licenses SET review_status = 'approved', reviewed_at = NOW() WHERE id = $1::uuid",
+    )
+    .bind(&pending_license)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE tracks SET visibility = 'release_safe', ingest_status = 'ready' WHERE id = $1::uuid")
+        .bind(&promotable_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE licenses SET review_status = 'rejected' WHERE id = $1::uuid")
+        .bind(&pending_license)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state: (String, String) =
+        sqlx::query_as("SELECT visibility, ingest_status FROM tracks WHERE id = $1::uuid")
+            .bind(&promotable_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        state,
+        ("quarantined".to_string(), "quarantined".to_string())
+    );
 }
 
 #[tokio::test]

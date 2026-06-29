@@ -31,6 +31,7 @@ pub mod jade_store;
 pub mod library;
 pub mod likes;
 pub mod observability;
+pub mod owner;
 pub mod playback;
 pub mod playlists;
 pub mod preferences;
@@ -84,7 +85,7 @@ fn demo_assets() -> InMemoryAudioAssetStore {
         track_id: "demo-1".into(),
         codec: "mp4".into(),
         content_type: "audio/mp4".into(),
-        object_key: "audio/tracks/demo-1.m4a".into(),
+        storage_key: "audio/tracks/demo-1.m4a".into(),
         size_bytes: 9_600_000,
         checksum_sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
         duration_ms: 240_000,

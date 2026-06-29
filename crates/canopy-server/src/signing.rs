@@ -12,7 +12,7 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Signs presigned URLs with HMAC-SHA256 over `object_key` and expiry.
+/// Signs presigned URLs with HMAC-SHA256 over `storage_key` and expiry.
 #[derive(Clone)]
 pub struct HmacUrlSigner {
     secret: Vec<u8>,
@@ -27,14 +27,14 @@ impl HmacUrlSigner {
     }
 
     /// Computes the lowercase-hex HMAC of the canonical signing string.
-    fn compute(&self, object_key: &str, expires_at_epoch_ms: u64) -> String {
+    fn compute(&self, storage_key: &str, expires_at_epoch_ms: u64) -> String {
         // `new_from_slice` only errors on key lengths HMAC cannot accept, and
         // HMAC accepts keys of any length, so this never fails in practice.
         let mut mac =
             HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts keys of any length");
         // A newline separator keeps the two fields unambiguous so that
         // (`ab`, `c`) and (`a`, `bc`) cannot collide.
-        mac.update(object_key.as_bytes());
+        mac.update(storage_key.as_bytes());
         mac.update(b"\n");
         mac.update(expires_at_epoch_ms.to_string().as_bytes());
         hex::encode(mac.finalize().into_bytes())
@@ -42,13 +42,13 @@ impl HmacUrlSigner {
 }
 
 impl UrlSigner for HmacUrlSigner {
-    fn sign(&self, object_key: &str, expires_at_epoch_ms: u64) -> String {
-        self.compute(object_key, expires_at_epoch_ms)
+    fn sign(&self, storage_key: &str, expires_at_epoch_ms: u64) -> String {
+        self.compute(storage_key, expires_at_epoch_ms)
     }
 
     fn verify(
         &self,
-        object_key: &str,
+        storage_key: &str,
         expires_at_epoch_ms: u64,
         signature: &str,
         now_epoch_ms: u64,
@@ -56,7 +56,7 @@ impl UrlSigner for HmacUrlSigner {
         if now_epoch_ms > expires_at_epoch_ms {
             return false;
         }
-        let expected = self.compute(object_key, expires_at_epoch_ms);
+        let expected = self.compute(storage_key, expires_at_epoch_ms);
         constant_time_eq(expected.as_bytes(), signature.as_bytes())
     }
 }

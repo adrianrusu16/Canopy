@@ -39,7 +39,7 @@ impl SearchService {
         if query.is_empty() {
             return Ok(MediaPage::default());
         }
-        self.repo.search(&query, self.clamp_page(page)).await
+        self.repo.search_public(&query, self.clamp_page(page)).await
     }
 
     /// Clamps a requested page to the service's supported limits.

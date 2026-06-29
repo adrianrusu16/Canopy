@@ -27,16 +27,16 @@ impl CatalogService {
         genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage> {
-        self.repo.browse(parent_id, genres, page).await
+        self.repo.browse_public(parent_id, genres, page).await
     }
 
     /// Searches the catalog.
     pub async fn search(&self, query: &str, page: Page) -> CanopyResult<MediaPage> {
-        self.repo.search(query, page).await
+        self.repo.search_public(query, page).await
     }
 
     /// Fetches a single media item by identifier.
     pub async fn get_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>> {
-        self.repo.get_media(media_id).await
+        self.repo.get_public_media(media_id).await
     }
 }

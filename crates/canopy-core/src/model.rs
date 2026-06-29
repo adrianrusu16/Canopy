@@ -38,6 +38,30 @@ pub struct MediaPage {
     pub has_more: bool,
 }
 
+/// Catalog visibility enforced before items reach a client.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaVisibility {
+    /// Media visible only to its owning profile.
+    Personal,
+    /// License-approved media available to every client.
+    ReleaseSafe,
+    /// Media unavailable to catalog and playback operations.
+    #[default]
+    Quarantined,
+}
+
+/// Recoverable lifecycle of a managed media import.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IngestStatus {
+    /// Metadata exists but file placement has not completed.
+    Pending,
+    /// Metadata and managed files are ready for use.
+    Ready,
+    /// The import is unavailable and requires review.
+    #[default]
+    Quarantined,
+}
+
 /// Paging parameters shared by browse and search queries.
 #[derive(Clone, Copy, Debug)]
 pub struct Page {
@@ -47,7 +71,7 @@ pub struct Page {
     pub offset: u32,
 }
 
-/// A single encoded representation of a track as stored in object storage.
+/// A single encoded representation of a track in Canopy-managed storage.
 ///
 /// A track has one audio asset per codec it is available in; the playback
 /// resolver chooses among them. Mirrors the `audio_assets` table in the
@@ -60,8 +84,8 @@ pub struct AudioAsset {
     pub codec: String,
     /// MIME type served for the asset, e.g. `audio/mpeg`.
     pub content_type: String,
-    /// Object-storage key (path within the media bucket).
-    pub object_key: String,
+    /// Validated relative key within Canopy's managed media library.
+    pub storage_key: String,
     /// Size of the encoded asset in bytes.
     pub size_bytes: u64,
     /// SHA-256 checksum of the asset contents (hex-encoded).
@@ -265,8 +289,9 @@ pub struct ProviderAudioAsset {
     pub codec: String,
     /// MIME type served for the asset, e.g. `audio/mpeg`.
     pub content_type: String,
-    /// Object-storage key (path within the media bucket, e.g. `audio/tracks/musopen/trk_001.mp3`).
-    pub object_key: String,
+    /// Validated relative key within Canopy's managed media library.
+    #[serde(alias = "object_key")]
+    pub storage_key: String,
     /// Size of the encoded asset in bytes.
     pub size_bytes: u64,
     /// SHA-256 checksum of the asset contents (hex-encoded).
@@ -303,8 +328,10 @@ pub struct ProviderTrack {
     pub license: ProviderLicense,
     /// Audio assets available for this track (one per codec).
     pub assets: Vec<ProviderAudioAsset>,
-    /// Artwork object key (overrides album artwork if set).
-    pub artwork_key: Option<String>,
-    /// Album artwork object key.
-    pub album_artwork_key: Option<String>,
+    /// Track artwork storage key (overrides album artwork if set).
+    #[serde(alias = "artwork_key")]
+    pub artwork_storage_key: Option<String>,
+    /// Album artwork storage key.
+    #[serde(alias = "album_artwork_key")]
+    pub album_artwork_storage_key: Option<String>,
 }

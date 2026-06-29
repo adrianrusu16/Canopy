@@ -37,14 +37,14 @@ use crate::providers::adapter::ProviderAdapter;
 ///       {
 ///         "codec": "mp4",
 ///         "content_type": "audio/mp4",
-///         "object_key": "audio/tracks/demo-1.m4a",
+///         "storage_key": "audio/tracks/demo-1.m4a",
 ///         "size_bytes": 9600000,
 ///         "checksum_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
 ///         "duration_ms": 240000
 ///       }
 ///     ],
-///     "artwork_key": "artwork/tracks/demo-1.png",
-///     "album_artwork_key": "artwork/albums/demo-album.png"
+///     "artwork_storage_key": "artwork/tracks/demo-1.png",
+///     "album_artwork_storage_key": "artwork/albums/demo-album.png"
 ///   }
 /// ]
 /// ```

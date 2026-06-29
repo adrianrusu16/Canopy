@@ -3,10 +3,16 @@
 
 use std::sync::Arc;
 
-use canopy_core::{MediaItem, Page};
+use canopy_core::{
+    AudioAsset, AudioAssetRepository, CatalogRepository, IngestStatus, MediaItem, MediaVisibility,
+    Page,
+};
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
-use canopy_server::jade_store::{InMemoryCatalog, InMemorySessionStore};
+use canopy_server::jade_store::{
+    InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
+    InMemorySessionStore,
+};
 use canopy_server::playback::PlaybackService;
 use canopy_server::providers::{ProviderAdapter, TestFixtureProvider};
 use canopy_server::search::SearchService;
@@ -30,6 +36,141 @@ fn sample_items() -> Vec<MediaItem> {
 
 fn page(limit: u32, offset: u32) -> Page {
     Page { limit, offset }
+}
+
+fn scoped_item(id: &str, title: &str) -> MediaItem {
+    MediaItem {
+        id: id.to_string(),
+        title: title.to_string(),
+        artist: "Scope Artist".to_string(),
+        ..MediaItem::default()
+    }
+}
+
+#[tokio::test]
+async fn catalog_scope_public_hides_non_public_items() {
+    let catalog = InMemoryCatalog::from_entries(vec![
+        InMemoryCatalogEntry {
+            item: scoped_item("public", "Public Track"),
+            visibility: MediaVisibility::ReleaseSafe,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: None,
+        },
+        InMemoryCatalogEntry {
+            item: scoped_item("personal", "Personal Track"),
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some("owner-a".to_string()),
+        },
+        InMemoryCatalogEntry {
+            item: scoped_item("pending", "Pending Track"),
+            visibility: MediaVisibility::ReleaseSafe,
+            ingest_status: IngestStatus::Pending,
+            owner_profile_id: None,
+        },
+        InMemoryCatalogEntry {
+            item: scoped_item("quarantined", "Quarantined Track"),
+            visibility: MediaVisibility::Quarantined,
+            ingest_status: IngestStatus::Quarantined,
+            owner_profile_id: None,
+        },
+    ]);
+
+    let page = catalog.browse_public(None, &[], page(10, 0)).await.unwrap();
+    assert_eq!(page.items, vec![scoped_item("public", "Public Track")]);
+    assert_eq!(page.total_count, 1);
+    assert!(
+        catalog
+            .get_public_media("personal")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn catalog_scope_personal_is_owner_scoped() {
+    let catalog = InMemoryCatalog::from_entries(vec![
+        InMemoryCatalogEntry {
+            item: scoped_item("owner-a-track", "Owner A Track"),
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some("owner-a".to_string()),
+        },
+        InMemoryCatalogEntry {
+            item: scoped_item("owner-b-track", "Owner B Track"),
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some("owner-b".to_string()),
+        },
+    ]);
+
+    let page = catalog.list_personal("owner-a", page(10, 0)).await.unwrap();
+    assert_eq!(
+        page.items,
+        vec![scoped_item("owner-a-track", "Owner A Track")]
+    );
+    assert!(
+        catalog
+            .get_personal_media("owner-a", "owner-b-track")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn catalog_scope_public_assets_hide_personal_tracks() {
+    let public_asset = AudioAsset {
+        track_id: "public".to_string(),
+        storage_key: "audio/public.mp3".to_string(),
+        ..AudioAsset::default()
+    };
+    let personal_asset = AudioAsset {
+        track_id: "personal".to_string(),
+        storage_key: "audio/personal.mp3".to_string(),
+        ..AudioAsset::default()
+    };
+    let assets = InMemoryAudioAssetStore::from_entries(vec![
+        InMemoryAudioAssetEntry {
+            asset: public_asset.clone(),
+            visibility: MediaVisibility::ReleaseSafe,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: None,
+        },
+        InMemoryAudioAssetEntry {
+            asset: personal_asset.clone(),
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some("owner-a".to_string()),
+        },
+    ]);
+
+    assert_eq!(
+        assets.assets_for_public_track("public").await.unwrap(),
+        vec![public_asset]
+    );
+    assert!(
+        assets
+            .assets_for_public_track("personal")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        assets
+            .assets_for_personal_track("owner-a", "personal")
+            .await
+            .unwrap(),
+        vec![personal_asset]
+    );
+    assert!(
+        assets
+            .assets_for_personal_track("owner-b", "personal")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

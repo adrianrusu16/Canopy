@@ -11,14 +11,15 @@ mod memory;
 mod pg;
 
 pub use memory::{
-    InMemoryAudioAssetStore, InMemoryCatalog, InMemoryLibraryStore, InMemoryLikeStore,
+    InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
+    InMemoryInstanceSettingsStore, InMemoryLibraryStore, InMemoryLikeStore,
     InMemoryPlaybackHistoryStore, InMemoryPlaylistStore, InMemoryPreferencesStore,
     InMemoryProfileStore, InMemorySessionStore,
 };
 
 #[cfg(feature = "pg")]
 pub use pg::{
-    PgAudioAssetRepository, PgCatalogRepository, PgLibraryRepository, PgLikeRepository,
-    PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
+    PgAudioAssetRepository, PgCatalogRepository, PgInstanceSettingsRepository, PgLibraryRepository,
+    PgLikeRepository, PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
     PgProfileRepository, PgSessionRepository,
 };

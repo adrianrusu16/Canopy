@@ -12,23 +12,35 @@ use crate::model::{
     Playlist, PlaylistPage, ProfilePreferences, ProviderTrack, Session, TrackLike, UserProfile,
 };
 
-/// Read access to the catalog (artists, albums, tracks, playlists).
+/// Read access to public and owner-scoped catalog partitions.
 #[async_trait]
 pub trait CatalogRepository: Send + Sync {
-    /// Returns a hierarchical browse page under `parent_id` (root if `None`),
-    /// optionally filtered by `genres`.
-    async fn browse(
+    /// Returns release-safe, ready catalog items.
+    async fn browse_public(
         &self,
         parent_id: Option<&str>,
         genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage>;
-
-    /// Full-text / trigram search over the catalog.
-    async fn search(&self, query: &str, page: Page) -> CanopyResult<MediaPage>;
-
-    /// Fetches a single item by identifier, if present.
-    async fn get_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>>;
+    /// Searches release-safe, ready catalog items.
+    async fn search_public(&self, query: &str, page: Page) -> CanopyResult<MediaPage>;
+    /// Fetches one release-safe, ready item.
+    async fn get_public_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>>;
+    /// Lists ready personal media owned by the profile.
+    async fn list_personal(&self, owner_profile_id: &str, page: Page) -> CanopyResult<MediaPage>;
+    /// Searches ready personal media owned by the profile.
+    async fn search_personal(
+        &self,
+        owner_profile_id: &str,
+        query: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage>;
+    /// Fetches one ready personal item owned by the profile.
+    async fn get_personal_media(
+        &self,
+        owner_profile_id: &str,
+        media_id: &str,
+    ) -> CanopyResult<Option<MediaItem>>;
 }
 
 /// Source of the discovery shuffle channel.
@@ -50,8 +62,14 @@ pub trait DiscoveryRepository: Send + Sync {
 /// touching the storage backend.
 #[async_trait]
 pub trait AudioAssetRepository: Send + Sync {
-    /// Returns every audio asset available for `track_id` (one per codec).
-    async fn assets_for_track(&self, track_id: &str) -> CanopyResult<Vec<AudioAsset>>;
+    /// Returns assets for a release-safe, ready track.
+    async fn assets_for_public_track(&self, track_id: &str) -> CanopyResult<Vec<AudioAsset>>;
+    /// Returns assets for a ready personal track owned by the profile.
+    async fn assets_for_personal_track(
+        &self,
+        owner_profile_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<Vec<AudioAsset>>;
 }
 
 /// Persistence of lightweight playback sessions.
@@ -86,6 +104,16 @@ pub trait ProfileRepository: Send + Sync {
         &self,
         external_user_id: &str,
     ) -> CanopyResult<Option<UserProfile>>;
+}
+
+/// Persistence of singleton settings for this Canopy installation.
+#[async_trait]
+pub trait InstanceSettingsRepository: Send + Sync {
+    /// Assigns the profile that exclusively owns personal media.
+    async fn set_owner_profile_id(&self, profile_id: &str) -> CanopyResult<()>;
+
+    /// Returns the assigned owner profile, if ownership has been configured.
+    async fn owner_profile_id(&self) -> CanopyResult<Option<String>>;
 }
 
 /// Persistence of durable playback history for logged-in profiles.

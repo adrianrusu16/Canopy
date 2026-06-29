@@ -135,8 +135,8 @@ impl SupabaseCatalogRow {
                 attribution_text: self.attribution,
             },
             assets: self.assets,
-            artwork_key: self.artwork_key,
-            album_artwork_key: self.album_artwork_key,
+            artwork_storage_key: self.artwork_key,
+            album_artwork_storage_key: self.album_artwork_key,
         }
     }
 }
@@ -223,7 +223,10 @@ mod tests {
         assert_eq!(track.release_year, Some(2026));
         assert_eq!(track.license.license_type, "Private");
         assert_eq!(track.license.source_url, "https://example.test/license");
-        assert_eq!(track.assets[0].object_key, "audio/song-1.mp3");
-        assert_eq!(track.artwork_key.as_deref(), Some("artwork/song-1.png"));
+        assert_eq!(track.assets[0].storage_key, "audio/song-1.mp3");
+        assert_eq!(
+            track.artwork_storage_key.as_deref(),
+            Some("artwork/song-1.png")
+        );
     }
 }

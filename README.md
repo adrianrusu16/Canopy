@@ -11,40 +11,45 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (wire contract), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (domain services + `api::grpc` adapter + `jade_store`). |
 | gRPC server (`tonic`)     | 🟡 Prototype   | Catalog, session playback controls, playback resolution, discovery, and authenticated profile-state RPCs including private playlists are wired through the shared proto contract. `Search` and `Browse` still use the unary demo response shape (not streaming `SearchResult` yet). |
 | Configuration             | ✅ Implemented | Env-driven `Config` (`CANOPY_GRPC_ADDR`, `CANOPY_DATABASE_URL`) with sensible defaults. |
-| Catalog service           | 🟡 Prototype   | `CatalogService` over the `CatalogRepository` port; in-memory and PostgreSQL `jade_store` implementations are available, with browse/get/search backed by PostgreSQL when the `pg` feature is enabled. |
+| Catalog service           | Partial | Public repository paths are explicit; PostgreSQL and in-memory adapters isolate `release_safe` media from owner-scoped personal media. |
 | Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs now mutate persisted session state. Queue semantics and multi-device conflict handling are still planned. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
-| Discovery service         | 🟡 Prototype   | `DiscoveryService` over the `DiscoveryRepository` port: recently-played exclusion, artist-diversity reordering, limit clamping, and `DiscoveryNext` gRPC RPC. PostgreSQL mode reads `mv_discovery_pool`, a pre-shuffled materialized view with one representative asset per track. |
-| Playback Resolver         | 🟡 Prototype   | `ResolverService` over `AudioAssetRepository` plus pluggable URL providers: codec-preference asset selection, TTL expiry, RustFS HMAC URLs, or Supabase Storage signed URLs. `ResolvePlayback` also synchronizes the anonymous session when called. |
+| Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
+| Playback Resolver         | Transition | Public asset lookup is policy-scoped and uses generic `storage_key` values. RustFS/Supabase URL adapters remain temporary compatibility code. |
 | Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable state is profile-owned; history supports chronological reads and deletion, and disabling consent atomically purges it. Anonymous users receive no backend history, library, likes, preferences, or playlists. |
-| Provider Adapters         | 🟡 Partial     | Provider-facing ports and fixture adapter exist; PostgreSQL `CatalogIngest` transactionally upserts provider tracks, and `CANOPY_PROVIDER_FIXTURE_PATH` can ingest a local fixture at startup in PostgreSQL mode. Musopen/Pixabay/Internet Archive adapters are still planned. |
-| Persistence (PostgreSQL)  | 🟡 Partial     | `sqlx` migrations, Docker Compose, typed repository ports, catalog/session/profile-state adapters, profile-owned ordered playlists, and transactional provider ingest are implemented. PostgreSQL mode auto-detects the DB under the `pg` feature and falls back to in-memory stores on connection failure. |
-| Music storage             | 🟡 Partial     | RustFS HMAC URL generation and Supabase Storage signed URL fetching are available. Canopy stays out of the byte-serving path after `ResolvePlayback`. |
+| Provider Adapters         | Transition | Legacy fixture/Supabase ingestion remains idempotent but every insert and re-ingest is forced into quarantine. |
+| Persistence (PostgreSQL)  | Partial | Typed adapters now cover explicit instance ownership, media policy, dual-license review, and fail-closed public promotion. |
+| Music storage             | Transition | The schema uses backend-neutral `storage_key` paths. Local import and Nginx protected streaming are the next phases. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
-| Health checks             | 🟡 Partial     | `HealthService` reports liveness, version, aggregate status, dependency details, PostgreSQL connectivity, and optional RustFS TCP reachability via `CANOPY_HEALTH_CHECK_RUSTFS=true`. |
+| Health checks             | Partial | PostgreSQL health is implemented. The optional RustFS probe remains only for compatibility during cutover. |
 | CI / Verification         | ✅ Implemented | GitHub Actions gates `master` with fmt, all-feature Clippy, default tests, a fail-closed disposable PostgreSQL integration harness, and a release build. Proto compatibility gates are still planned. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
+
+### Local-media transition
+
+Canopy is moving to a fully owned local-media architecture. PostgreSQL remains the metadata and policy authority; audio, artwork, retained originals, and quarantined files will live under `/srv/canopy/media`; Nginx will serve authorized files with HTTPS and byte-range support. Supabase and RustFS are no longer part of the target architecture.
+
+Phase 1 is implemented: storage fields use `storage_key`, one profile can be assigned as the instance owner, catalog and asset repositories expose separate public and owner-scoped paths, public promotion requires approved composition and recording licenses, license revocation quarantines affected tracks atomically, and all legacy provider ingest is quarantined. Existing rows were deliberately not inferred to be legally safe.
+
+The filesystem importer, `canopy-admin owner set <external-user-id>` CLI, owner-only personal-media gRPC surface, Nginx/X-Accel streaming, playback cutover, and final Supabase/RustFS removal are subsequent phases. Until then, the old playback adapters and related environment variables are compatibility code, not the destination.
 
 ## Ecosystem Overview
 
 ```mermaid
 flowchart TD
-
-    PW[PandaWave<br/>AAOS Media App]
-
-    PE[PandaEngine<br/>Rust Middleware]
-
-    CAN[Canopy<br/>Rust Backend]
-
+    PW[PandaWave AAOS Media App]
+    PE[PandaEngine Rust Middleware]
+    CAN[Canopy Rust Backend]
     DB[(PostgreSQL)]
-    FS[(RustFS)]
+    NGINX[Nginx protected streaming]
+    MEDIA[(Canopy media volume)]
 
     PW -->|AIDL| PE
     PE -->|gRPC / tonic| CAN
-
     CAN --> DB
-    CAN --> FS
+    CAN --> NGINX
+    NGINX --> MEDIA
 ```
 
 ---
@@ -101,7 +106,8 @@ flowchart TB
     end
 
     DB[(PostgreSQL)]
-    FS[(RustFS)]
+    NGINX[Nginx protected streaming]
+    MEDIA[(Canopy media volume)]
 
     UI --> CMD
 
@@ -125,7 +131,7 @@ flowchart TB
     PROV --> STORE
 
     STORE --> DB
-    RES --> FS
+    RES --> NGINX
 ```
 
 ---
@@ -302,7 +308,9 @@ A recommendation engine is a future layer on top of this service; the initial im
 
 ### Playback Resolver
 
-The playback resolver selects the correct audio asset for a track, generates a short-lived stream URL, and returns it in `PlaybackSource`. `CANOPY_MUSIC_SOURCE=rustfs` uses Canopy's HMAC signer for RustFS/S3-compatible object keys. `CANOPY_MUSIC_SOURCE=supabase` asks Supabase Storage for a signed URL and returns that URL to the player. In both modes Canopy is control-plane only: it resolves what to stream, then the player fetches bytes directly from object storage.
+The playback resolver selects an authorized audio asset and returns a short-lived HTTPS route in `PlaybackSource`. The target implementation authorizes the request in Canopy and delegates byte serving to Nginx with protected internal locations and byte-range support. Asset references are relative `storage_key` values within Canopy's managed media root.
+
+The current RustFS HMAC and Supabase signed-URL providers remain temporary compatibility adapters. Public resolution already uses only the `release_safe` + `ready` asset path; personal playback and the Nginx cutover are later phases.
 
 ### Playback Session Controls
 
@@ -314,7 +322,9 @@ The playback resolver selects the correct audio asset for a track, generates a s
 
 Provider adapters ingest catalog content from external sources — Musopen, Pixabay Music, Internet Archive, and future providers — and are responsible for metadata extraction, license verification, and ongoing catalog synchronization. Every track ingested through a provider adapter carries a license record; a track with no resolvable license is not added to the catalog.
 
-The core ingestion boundary is `CatalogIngest`: adapters produce `ProviderTrack` records and the PostgreSQL implementation persists them in one transaction. The transaction upserts artist, license, album, track metadata, per-codec `audio_assets`, and the `provider_tracks(provider, provider_track_id)` dedupe mapping. Re-ingesting the same provider track updates metadata and assets in place, which makes provider sync idempotent.
+The legacy ingestion boundary is `CatalogIngest`. Inserts and re-ingests are idempotent, but both explicitly set `visibility='quarantined'` and `ingest_status='quarantined'`. Imported content cannot reach anonymous browse, search, discovery, or playback without a separate review and promotion step.
+
+The target importer will validate and fingerprint real files from Canopy's incoming directory, write managed library paths, and record provenance. It replaces the provider adapters rather than extending them.
 
 ---
 
@@ -322,73 +332,37 @@ The core ingestion boundary is `CatalogIngest`: adapters produce `ProviderTrack`
 
 ```mermaid
 flowchart LR
-
-    CAN[Canopy]
-
+    IMPORT[Canopy import CLI]
+    CAN[Canopy gRPC control plane]
     DB[(PostgreSQL)]
-    FS[(RustFS)]
-
+    NGINX[Nginx protected HTTPS]
+    MEDIA[(Canopy media volume)]
+    IMPORT --> MEDIA
+    IMPORT --> DB
     CAN --> DB
-    CAN --> FS
-
-    DB --> META[Metadata]
-
-    FS --> AUDIO[Audio Files]
-    FS --> ART[Artwork]
-    FS --> LIC[Licenses]
+    CAN --> NGINX
+    NGINX --> MEDIA
 ```
 
-PostgreSQL stores metadata; RustFS stores bytes. Canopy itself does not proxy audio data — `ResolvePlayback` returns a presigned RustFS URL with the expiry embedded, and ExoPlayer streams directly from RustFS using that URL. This keeps Canopy's own request path free of the bandwidth and CPU cost of serving audio, and isolates the streaming hot path to RustFS, which is the system actually responsible for serving bytes.
+PostgreSQL stores metadata, ownership, visibility, ingest state, provenance, and license review. Binary media is never stored in PostgreSQL. The target filesystem layout is:
 
-RustFS is chosen for its S3-compatible API and Apache 2.0 license — fully permissive, with no copyleft or network-use obligations, which matters for a proprietary product. It is run as a single Rust-native binary alongside the rest of the stack, with no foreign runtime in the deployment.
+```text
+/srv/canopy/media/
+|-- incoming/
+|-- library/
+|   |-- audio/
+|   `-- artwork/
+|-- originals/
+`-- quarantine/
+```
 
----
+`audio_assets.storage_key` and artwork storage keys are validated relative paths under this managed root. Nginx, not the gRPC process, will serve files after Canopy authorizes a public or owner-scoped request.
+
+The schema foundation is implemented. Directory management, the import CLI, Nginx protected locations, and playback cutover are not. RustFS and Supabase remain only as temporary compatibility infrastructure.
 
 ### PostgreSQL
 
-Stores metadata only.
-
-```text
-artists
-albums
-tracks
-audio_assets
-licenses
-playlists
-users
-playback_history
-```
-
-No binary audio data stored in PostgreSQL.
-
----
-
-### RustFS
-
-Bucket:
-
-```text
-pandawave-media
-```
-
-Structure:
-
-```text
-audio/
-└── tracks/
-    └── musopen/
-        ├── trk_001.mp3
-        ├── trk_002.mp3
-        └── trk_003.mp3
-
-artwork/
-├── artists/
-├── albums/
-└── tracks/
-
-licenses/
-└── musopen/
-```
+Core metadata and policy tables include `tracks`, `audio_assets`, `licenses`, `profiles`, and singleton `instance_settings` alongside durable profile-state tables. Tracks default to quarantined. Anonymous paths require `visibility='release_safe'` and `ingest_status='ready'`; personal paths require the matching `owner_profile_id`.
 
 ---
 
@@ -426,7 +400,11 @@ erDiagram
         uuid artist_id
         uuid album_id
         int duration_ms
-        uuid license_id
+        uuid owner_profile_id
+        uuid composition_license_id
+        uuid recording_license_id
+        string visibility
+        string ingest_status
     }
 
     AUDIO_ASSETS {
@@ -434,7 +412,7 @@ erDiagram
         uuid track_id
         string codec
         string content_type
-        string object_key
+        string storage_key
         bigint size_bytes
         string checksum_sha256
     }
@@ -444,6 +422,8 @@ erDiagram
         string license_type
         string source_url
         string attribution_text
+        string review_status
+        timestamp reviewed_at
     }
 ```
 
@@ -453,34 +433,26 @@ erDiagram
 
 ```mermaid
 sequenceDiagram
-
     participant User
     participant PandaWave
     participant PandaEngine
     participant Canopy
     participant PostgreSQL
-    participant RustFS
+    participant Nginx
 
-    User->>PandaWave: Play Track
-
+    User->>PandaWave: Play track
     PandaWave->>PandaEngine: play(trackId)
-
     PandaEngine->>Canopy: ResolvePlayback(trackId)
-
-    Canopy->>PostgreSQL: Lookup metadata
-
-    PostgreSQL-->>Canopy: Track + Asset
-
-    Canopy-->>PandaEngine: PlaybackSource (presigned RustFS URL)
-
+    Canopy->>PostgreSQL: Authorize scope and select asset
+    PostgreSQL-->>Canopy: Track and storage key
+    Canopy-->>PandaEngine: PlaybackSource with short-lived HTTPS route
     PandaEngine-->>PandaWave: PlaybackSource
-
-    PandaWave->>RustFS: HTTP GET (presigned URL)
-
-    RustFS-->>PandaWave: HTTP Stream
-
+    PandaWave->>Nginx: HTTP GET with Range
+    Nginx-->>PandaWave: 206 Partial Content
     PandaWave-->>User: Playback
 ```
+
+Canopy remains the policy authority while Nginx handles the byte-serving path. The local route and X-Accel integration are planned for the playback-cutover phase.
 
 ---
 
@@ -488,21 +460,18 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-
     participant ExoPlayer
-    participant RustFS
+    participant Canopy
+    participant Nginx
+    participant MediaVolume
 
-    ExoPlayer->>RustFS: GET (presigned URL)
-    Note over ExoPlayer,RustFS: Includes Range header
-
-    RustFS->>RustFS: Validate URL signature + expiry
-
-    RustFS-->>ExoPlayer: 206 Partial Content
-
-    Note over ExoPlayer: Buffer, Seek, Decode
+    ExoPlayer->>Canopy: Request playback route
+    Canopy-->>ExoPlayer: Short-lived authorized HTTPS URL
+    ExoPlayer->>Nginx: GET with Range header
+    Nginx->>MediaVolume: Read authorized storage key
+    MediaVolume-->>Nginx: File bytes
+    Nginx-->>ExoPlayer: 206 Partial Content
 ```
-
-Canopy is not in this path. Once `ResolvePlayback` has returned a signed URL, every subsequent byte of audio is served directly by RustFS or Supabase Storage to ExoPlayer.
 
 ---
 
@@ -529,7 +498,7 @@ Example:
 ```json
 {
   "track_id": "trk_123",
-  "stream_url": "https://project.supabase.co/storage/v1/object/sign/pandawave-media/audio/tracks/trk_123.mp3?token=abc123",
+  "stream_url": "https://project.supabase.co/storage/v1/object/sign/pandawave-media/audio/tracks/trk_123.mp3`token=abc123",
   "content_type": "audio/mpeg",
   "codec": "mp3",
   "duration_ms": 245000,
@@ -543,32 +512,22 @@ Example:
 
 ```mermaid
 sequenceDiagram
-
     participant PandaWave
     participant PandaEngine
     participant Canopy
     participant PostgreSQL
-    participant RustFS
+    participant Nginx
 
     PandaWave->>PandaEngine: DiscoveryNext()
-
     PandaEngine->>Canopy: DiscoveryNext()
-
-    Canopy->>PostgreSQL: Read pre-shuffled materialized view
-
+    Canopy->>PostgreSQL: Read release-safe discovery pool
     PostgreSQL-->>Canopy: Selected track
-
     Canopy-->>PandaEngine: DiscoveryTrack
-
     PandaEngine->>Canopy: ResolvePlayback()
-
     Canopy-->>PandaEngine: PlaybackSource
-
     PandaEngine-->>PandaWave: PlaybackSource
-
-    PandaWave->>RustFS: Stream Audio (presigned URL)
-
-    RustFS-->>PandaWave: Audio Stream
+    PandaWave->>Nginx: Stream authorized audio
+    Nginx-->>PandaWave: Audio stream
 ```
 
 ---
@@ -579,13 +538,13 @@ sequenceDiagram
 audio_assets
 ├── track_id
 ├── codec
-├── object_key
+├── storage_key
 ├── content_type
 ├── size_bytes
 └── checksum_sha256
 ```
 
-Each track has one audio asset per codec it's available in. A track is never duplicated across object keys for the same codec.
+Each track has one audio asset per codec it's available in. A track is never duplicated across storage keys for the same codec.
 
 ```text
 Track:
@@ -594,15 +553,15 @@ Track:
 Audio Assets:
 
     MP3
-    object_key=audio/tracks/musopen/trk_123.mp3
+    storage_key=library/audio/trk_123.mp3
 
 Future:
 
     Opus
-    object_key=audio/tracks/musopen/trk_123.opus
+    storage_key=library/audio/trk_123.opus
 
     FLAC
-    object_key=audio/tracks/musopen/trk_123.flac
+    storage_key=library/audio/trk_123.flac
 ```
 
 ---
@@ -770,9 +729,9 @@ CANOPY_TEST_DATABASE_URL=postgres://user:password@localhost:5432/canopy_test \
 
 Direct `cargo test --workspace --features canopy-server/pg` runs require `CANOPY_TEST_DATABASE_URL`. PostgreSQL tests never fall back to `DATABASE_URL` and intentionally fail when the test database is missing or unreachable. Default `cargo test --workspace` runs remain database-free.
 
-### Supabase Music Source
+### Legacy Supabase Music Source (temporary)
 
-Set `CANOPY_MUSIC_SOURCE=supabase` when Supabase Storage should be the music source. Canopy expects `audio_assets.object_key` values to match paths inside `CANOPY_SUPABASE_STORAGE_BUCKET`; `ResolvePlayback` selects the best asset, requests a signed Supabase Storage URL, returns it to the client, and updates the supplied anonymous session. Set `CANOPY_SUPABASE_SYNC_ON_START=true` in PostgreSQL mode to fetch normalized catalog rows from Supabase REST and ingest them before serving gRPC.
+This compatibility adapter accepts legacy Supabase catalog payloads whose external JSON still uses `object_key` and `artwork_key`, maps them to Canopy's `storage_key` domain fields, and quarantines the ingested rows. `CANOPY_MUSIC_SOURCE=supabase` can still resolve signed URLs during the transition, but Supabase sync is not part of the target architecture.
 
 Required runtime values:
 
@@ -817,7 +776,7 @@ Expected Supabase catalog row shape:
 ```
 
 
-### RustFS Setup
+### Legacy RustFS Setup (temporary)
 
 RustFS is an S3-compatible object store that serves audio bytes and artwork directly to ExoPlayer via presigned URLs. Once the container is running, create the `pandawave-media` bucket and upload demo assets:
 

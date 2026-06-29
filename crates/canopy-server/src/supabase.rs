@@ -51,7 +51,7 @@ impl SupabaseStorageUrlProvider {
         }
     }
 
-    fn sign_endpoint(&self, object_key: &str) -> CanopyResult<String> {
+    fn sign_endpoint(&self, storage_key: &str) -> CanopyResult<String> {
         if self.config.project_url.trim().is_empty() {
             return Err(CanopyError::InvalidArgument(
                 "CANOPY_SUPABASE_URL is required when CANOPY_MUSIC_SOURCE=supabase".to_string(),
@@ -70,7 +70,7 @@ impl SupabaseStorageUrlProvider {
         }
 
         let base = self.config.project_url.trim_end_matches('/');
-        let key = object_key.trim_start_matches('/');
+        let key = storage_key.trim_start_matches('/');
         Ok(format!(
             "{base}/storage/v1/object/sign/{bucket}/{key}",
             bucket = self.config.bucket
@@ -82,10 +82,10 @@ impl SupabaseStorageUrlProvider {
 impl PlaybackUrlProvider for SupabaseStorageUrlProvider {
     async fn signed_url(
         &self,
-        object_key: &str,
+        storage_key: &str,
         _expires_at_epoch_ms: u64,
     ) -> CanopyResult<String> {
-        let endpoint = self.sign_endpoint(object_key)?;
+        let endpoint = self.sign_endpoint(storage_key)?;
         let response = self
             .client
             .post(endpoint)
