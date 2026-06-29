@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use canopy_core::{
-    CanopyError, CanopyResult, PlaybackHistoryEvent, PlaybackHistoryRepository, ProfileRepository,
-    UserIdentity,
+    CanopyError, CanopyResult, Page, PlaybackHistoryEvent, PlaybackHistoryPage,
+    PlaybackHistoryRepository, ProfileRepository, UserIdentity, UserProfile,
 };
 
 /// Application service for profile-scoped playback history.
@@ -49,12 +49,7 @@ impl HistoryService {
             ));
         }
 
-        let profile = self
-            .profiles
-            .get_by_external_user_id(&identity.user_id)
-            .await?
-            .ok_or_else(|| CanopyError::unauthenticated("profile not found"))?;
-
+        let profile = self.profile(identity).await?;
         if !profile.history_enabled {
             return Ok(false);
         }
@@ -66,8 +61,66 @@ impl HistoryService {
                 duration_ms,
                 completion_pct,
             })
-            .await?;
-        Ok(true)
+            .await
+    }
+
+    /// Lists playback events for the authenticated profile.
+    pub async fn list_history(
+        &self,
+        identity: &UserIdentity,
+        page: Page,
+    ) -> CanopyResult<PlaybackHistoryPage> {
+        let profile = self.profile(identity).await?;
+        self.history
+            .list(&profile.id, normalize_history_page(page))
+            .await
+    }
+
+    /// Deletes one playback event owned by the authenticated profile.
+    pub async fn delete_entry(
+        &self,
+        identity: &UserIdentity,
+        history_id: &str,
+    ) -> CanopyResult<bool> {
+        let history_id = validate_history_id(history_id)?;
+        let profile = self.profile(identity).await?;
+        self.history.delete_entry(&profile.id, history_id).await
+    }
+
+    /// Deletes every playback event owned by the authenticated profile.
+    pub async fn clear_history(&self, identity: &UserIdentity) -> CanopyResult<u64> {
+        let profile = self.profile(identity).await?;
+        self.history.clear(&profile.id).await
+    }
+
+    async fn profile(&self, identity: &UserIdentity) -> CanopyResult<UserProfile> {
+        self.profiles
+            .get_by_external_user_id(&identity.user_id)
+            .await?
+            .ok_or_else(|| CanopyError::unauthenticated("profile not found"))
+    }
+}
+
+fn validate_history_id(history_id: &str) -> CanopyResult<&str> {
+    let history_id = history_id.trim();
+    if history_id.is_empty() {
+        return Err(CanopyError::InvalidArgument(
+            "history_id is required".into(),
+        ));
+    }
+    uuid::Uuid::parse_str(history_id)
+        .map_err(|_| CanopyError::InvalidArgument("history_id must be a UUID".into()))?;
+    Ok(history_id)
+}
+
+fn normalize_history_page(page: Page) -> Page {
+    Page {
+        limit: if page.limit == 0 {
+            50
+        } else {
+            page.limit.min(100)
+        },
+        offset: page.offset,
     }
 }
 
@@ -142,6 +195,93 @@ mod tests {
                 completion_pct: 0.5,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn list_delete_and_clear_history_are_profile_scoped() {
+        let profiles = Arc::new(InMemoryProfileStore::default());
+        profiles
+            .upsert_profile("user-123", Some("Ada"), true)
+            .await
+            .unwrap();
+        profiles
+            .upsert_profile("other-user", Some("Grace"), true)
+            .await
+            .unwrap();
+        let history = Arc::new(InMemoryPlaybackHistoryStore::default());
+        let service = HistoryService::new(profiles, history);
+
+        service
+            .record_playback(&identity(), "track-1", 1000, 0.5)
+            .await
+            .unwrap();
+        service
+            .record_playback(&identity(), "track-1", 500, 0.25)
+            .await
+            .unwrap();
+
+        let page = service
+            .list_history(
+                &identity(),
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total_count, 2);
+        assert_eq!(page.entries.len(), 2);
+        assert!(page.entries[0].played_at_epoch_ms >= page.entries[1].played_at_epoch_ms);
+
+        let other_identity = UserIdentity {
+            user_id: "other-user".into(),
+        };
+        assert!(
+            !service
+                .delete_entry(&other_identity, &page.entries[0].id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            service
+                .delete_entry(&identity(), &page.entries[0].id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(service.clear_history(&identity()).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_history_rejects_empty_id() {
+        let profiles = Arc::new(InMemoryProfileStore::default());
+        profiles
+            .upsert_profile("user-123", Some("Ada"), true)
+            .await
+            .unwrap();
+        let service =
+            HistoryService::new(profiles, Arc::new(InMemoryPlaybackHistoryStore::default()));
+
+        let err = service.delete_entry(&identity(), " ").await.unwrap_err();
+
+        assert!(matches!(err, CanopyError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn history_page_defaults_and_clamps_limit() {
+        let defaulted = normalize_history_page(Page {
+            limit: 0,
+            offset: 7,
+        });
+        assert_eq!(defaulted.limit, 50);
+        assert_eq!(defaulted.offset, 7);
+
+        let clamped = normalize_history_page(Page {
+            limit: 500,
+            offset: 7,
+        });
+        assert_eq!(clamped.limit, 100);
+        assert_eq!(clamped.offset, 7);
     }
 
     #[tokio::test]

@@ -7,6 +7,14 @@ use canopy_core::{
 };
 use canopy_proto::canopy_server::Canopy;
 use canopy_proto::{
+    AddPlaylistTrackRequest, AddPlaylistTrackResponse, CreatePlaylistRequest,
+    CreatePlaylistResponse, DeletePlaylistRequest, DeletePlaylistResponse,
+    ListPlaylistTracksRequest, ListPlaylistTracksResponse, ListPlaylistsRequest,
+    ListPlaylistsResponse, Playlist as ProtoPlaylist, RemovePlaylistTrackRequest,
+    RemovePlaylistTrackResponse, ReorderPlaylistTracksRequest, ReorderPlaylistTracksResponse,
+    UpdatePlaylistRequest, UpdatePlaylistResponse,
+};
+use canopy_proto::{
     BrowseRequest, BrowseResponse, DiscoveryRequest, DiscoveryTrack, EndSessionRequest,
     EndSessionResponse, GetMediaRequest, GetMediaResponse, GetPreferencesRequest,
     GetPreferencesResponse, GetSessionRequest, GetSessionResponse, HealthDependency, HealthRequest,
@@ -21,6 +29,11 @@ use canopy_proto::{
     UpdateSessionRequest, UpdateSessionResponse, UpsertProfileRequest, UpsertProfileResponse,
     UserProfile as ProtoUserProfile,
 };
+use canopy_proto::{
+    ClearPlaybackHistoryRequest, ClearPlaybackHistoryResponse, DeletePlaybackHistoryEntryRequest,
+    DeletePlaybackHistoryEntryResponse, ListPlaybackHistoryRequest, ListPlaybackHistoryResponse,
+    PlaybackHistoryEntry as ProtoPlaybackHistoryEntry,
+};
 use tonic::{Request, Response, Status};
 
 use crate::api::to_status;
@@ -32,6 +45,7 @@ use crate::history::HistoryService;
 use crate::library::LibraryService;
 use crate::likes::LikeService;
 use crate::playback::{PlaybackService, ResolverService};
+use crate::playlists::PlaylistService;
 use crate::preferences::PreferencesService;
 use crate::profile::ProfileService;
 use crate::search::SearchService;
@@ -46,6 +60,7 @@ pub struct GrpcServices {
     pub library: LibraryService,
     pub likes: LikeService,
     pub preferences: PreferencesService,
+    pub playlists: PlaylistService,
     pub health: HealthService,
     pub resolver: ResolverService,
     pub discovery: DiscoveryService,
@@ -62,6 +77,7 @@ pub struct GrpcApi {
     library: LibraryService,
     likes: LikeService,
     preferences: PreferencesService,
+    playlists: PlaylistService,
     health: HealthService,
     resolver: ResolverService,
     discovery: DiscoveryService,
@@ -80,6 +96,7 @@ impl GrpcApi {
             library: services.library,
             likes: services.likes,
             preferences: services.preferences,
+            playlists: services.playlists,
             health: services.health,
             resolver: services.resolver,
             discovery: services.discovery,
@@ -113,6 +130,42 @@ fn to_proto_profile(profile: canopy_core::UserProfile) -> ProtoUserProfile {
         display_name: profile.display_name.unwrap_or_default(),
         history_enabled: profile.history_enabled,
     }
+}
+
+fn to_proto_playlist(playlist: canopy_core::Playlist) -> ProtoPlaylist {
+    ProtoPlaylist {
+        id: playlist.id,
+        name: playlist.name,
+        description: playlist.description,
+        created_at_epoch_ms: playlist.created_at_epoch_ms,
+        updated_at_epoch_ms: playlist.updated_at_epoch_ms,
+    }
+}
+
+fn to_proto_history_entry(entry: canopy_core::PlaybackHistoryEntry) -> ProtoPlaybackHistoryEntry {
+    ProtoPlaybackHistoryEntry {
+        history_id: entry.id,
+        played_at_epoch_ms: entry.played_at_epoch_ms,
+        duration_ms: entry.duration_ms,
+        completion_pct: entry.completion_pct,
+        item: Some(to_proto_item(entry.item)),
+    }
+}
+
+fn history_page(limit: i32, offset: i32) -> CanopyResult<Page> {
+    let limit = u32::try_from(limit)
+        .map_err(|_| CanopyError::InvalidArgument("limit must be non-negative".into()))?;
+    let offset = u32::try_from(offset)
+        .map_err(|_| CanopyError::InvalidArgument("offset must be non-negative".into()))?;
+    Ok(Page { limit, offset })
+}
+
+fn playlist_page(limit: i32, offset: i32) -> CanopyResult<Page> {
+    let limit = u32::try_from(limit)
+        .map_err(|_| CanopyError::InvalidArgument("limit must be non-negative".into()))?;
+    let offset = u32::try_from(offset)
+        .map_err(|_| CanopyError::InvalidArgument("offset must be non-negative".into()))?;
+    Ok(Page { limit, offset })
 }
 
 fn extract_identity(
@@ -372,6 +425,67 @@ impl Canopy for GrpcApi {
         Ok(Response::new(RecordPlaybackHistoryResponse { recorded }))
     }
 
+    async fn list_playback_history(
+        &self,
+        request: Request<ListPlaybackHistoryRequest>,
+    ) -> Result<Response<ListPlaybackHistoryResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let request_page = history_page(req.limit, req.offset).map_err(to_status)?;
+        let page = self
+            .history
+            .list_history(&identity, request_page)
+            .await
+            .map_err(to_status)?;
+
+        Ok(Response::new(ListPlaybackHistoryResponse {
+            entries: page
+                .entries
+                .into_iter()
+                .map(to_proto_history_entry)
+                .collect(),
+            total_count: page.total_count,
+            has_more: page.has_more,
+        }))
+    }
+
+    async fn delete_playback_history_entry(
+        &self,
+        request: Request<DeletePlaybackHistoryEntryRequest>,
+    ) -> Result<Response<DeletePlaybackHistoryEntryResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let deleted = self
+            .history
+            .delete_entry(&identity, &req.history_id)
+            .await
+            .map_err(to_status)?;
+
+        Ok(Response::new(DeletePlaybackHistoryEntryResponse {
+            deleted,
+        }))
+    }
+
+    async fn clear_playback_history(
+        &self,
+        request: Request<ClearPlaybackHistoryRequest>,
+    ) -> Result<Response<ClearPlaybackHistoryResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let _req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let deleted_count = self
+            .history
+            .clear_history(&identity)
+            .await
+            .map_err(to_status)?;
+
+        Ok(Response::new(ClearPlaybackHistoryResponse {
+            deleted_count,
+        }))
+    }
+
     async fn save_library_item(
         &self,
         request: Request<SaveLibraryItemRequest>,
@@ -509,6 +623,143 @@ impl Canopy for GrpcApi {
             .map_err(to_status)?;
         Ok(Response::new(UpdatePreferencesResponse {
             preferences_json: preferences.values_json,
+        }))
+    }
+
+    async fn create_playlist(
+        &self,
+        request: Request<CreatePlaylistRequest>,
+    ) -> Result<Response<CreatePlaylistResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let playlist = self
+            .playlists
+            .create_playlist(&identity, &req.name, &req.description)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(CreatePlaylistResponse {
+            playlist: Some(to_proto_playlist(playlist)),
+        }))
+    }
+
+    async fn update_playlist(
+        &self,
+        request: Request<UpdatePlaylistRequest>,
+    ) -> Result<Response<UpdatePlaylistResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let playlist = self
+            .playlists
+            .update_playlist(&identity, &req.playlist_id, &req.name, &req.description)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(UpdatePlaylistResponse {
+            playlist: Some(to_proto_playlist(playlist)),
+        }))
+    }
+
+    async fn delete_playlist(
+        &self,
+        request: Request<DeletePlaylistRequest>,
+    ) -> Result<Response<DeletePlaylistResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.playlists
+            .delete_playlist(&identity, &req.playlist_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(DeletePlaylistResponse { success: true }))
+    }
+
+    async fn list_playlists(
+        &self,
+        request: Request<ListPlaylistsRequest>,
+    ) -> Result<Response<ListPlaylistsResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let request_page = playlist_page(req.limit, req.offset).map_err(to_status)?;
+        let page = self
+            .playlists
+            .list_playlists(&identity, request_page)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ListPlaylistsResponse {
+            playlists: page.items.into_iter().map(to_proto_playlist).collect(),
+            total_count: page.total_count,
+            has_more: page.has_more,
+        }))
+    }
+
+    async fn add_playlist_track(
+        &self,
+        request: Request<AddPlaylistTrackRequest>,
+    ) -> Result<Response<AddPlaylistTrackResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.playlists
+            .add_track(
+                &identity,
+                &req.playlist_id,
+                &req.track_id,
+                req.has_position.then_some(req.position),
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(AddPlaylistTrackResponse { success: true }))
+    }
+
+    async fn remove_playlist_track(
+        &self,
+        request: Request<RemovePlaylistTrackRequest>,
+    ) -> Result<Response<RemovePlaylistTrackResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.playlists
+            .remove_track(&identity, &req.playlist_id, &req.track_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(RemovePlaylistTrackResponse { success: true }))
+    }
+
+    async fn reorder_playlist_tracks(
+        &self,
+        request: Request<ReorderPlaylistTracksRequest>,
+    ) -> Result<Response<ReorderPlaylistTracksResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        self.playlists
+            .reorder_tracks(&identity, &req.playlist_id, req.track_ids)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ReorderPlaylistTracksResponse {
+            success: true,
+        }))
+    }
+
+    async fn list_playlist_tracks(
+        &self,
+        request: Request<ListPlaylistTracksRequest>,
+    ) -> Result<Response<ListPlaylistTracksResponse>, Status> {
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        let identity = extract_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let request_page = playlist_page(req.limit, req.offset).map_err(to_status)?;
+        let page = self
+            .playlists
+            .list_tracks(&identity, &req.playlist_id, request_page)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(ListPlaylistTracksResponse {
+            total_count: page.total_count,
+            has_more: page.has_more,
+            items: to_proto_items(page),
         }))
     }
 
@@ -669,5 +920,22 @@ mod tests {
         let err = extract_identity(&tonic::metadata::MetadataMap::new(), "", &auth()).unwrap_err();
 
         assert!(matches!(err, canopy_core::CanopyError::Unauthenticated(_)));
+    }
+    #[test]
+    fn history_page_rejects_negative_values() {
+        let negative_limit = history_page(-1, 0).unwrap_err();
+        let negative_offset = history_page(10, -1).unwrap_err();
+
+        assert!(matches!(negative_limit, CanopyError::InvalidArgument(_)));
+        assert!(matches!(negative_offset, CanopyError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn playlist_page_rejects_negative_values() {
+        let negative_limit = playlist_page(-1, 0).unwrap_err();
+        let negative_offset = playlist_page(10, -1).unwrap_err();
+
+        assert!(matches!(negative_limit, CanopyError::InvalidArgument(_)));
+        assert!(matches!(negative_offset, CanopyError::InvalidArgument(_)));
     }
 }

@@ -128,6 +128,32 @@ pub struct PlaybackHistoryEvent {
     pub completion_pct: f32,
 }
 
+/// A renderable playback-history event owned by a real profile.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaybackHistoryEntry {
+    /// Stable history-event identifier.
+    pub id: String,
+    /// Time the playback was recorded, in epoch milliseconds.
+    pub played_at_epoch_ms: u64,
+    /// Duration listened, in milliseconds.
+    pub duration_ms: i64,
+    /// Completion percentage in the inclusive range `0.0..=1.0`.
+    pub completion_pct: f32,
+    /// Catalog metadata required to render and replay the event.
+    pub item: MediaItem,
+}
+
+/// A page of chronological playback-history events.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaybackHistoryPage {
+    /// Events in the current page, newest first.
+    pub entries: Vec<PlaybackHistoryEntry>,
+    /// Total number of events owned by the profile.
+    pub total_count: i32,
+    /// Whether more events exist beyond this page.
+    pub has_more: bool,
+}
+
 /// A saved catalog item in a real logged-in profile's library.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LibraryItem {
@@ -159,6 +185,46 @@ pub struct ProfilePreferences {
     pub values_json: String,
 }
 
+/// A private playlist owned by a real logged-in profile.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Playlist {
+    /// Playlist identifier.
+    pub id: String,
+    /// Internal profile identifier that owns the playlist.
+    pub profile_id: String,
+    /// Human-readable playlist name.
+    pub name: String,
+    /// Optional playlist description.
+    pub description: String,
+    /// Creation time in epoch milliseconds.
+    pub created_at_epoch_ms: u64,
+    /// Last update time in epoch milliseconds.
+    pub updated_at_epoch_ms: u64,
+}
+
+/// A track membership row in a profile-owned playlist.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaylistTrack {
+    /// Playlist identifier.
+    pub playlist_id: String,
+    /// Track identifier.
+    pub track_id: String,
+    /// Zero-based ordering position.
+    pub position: i32,
+    /// Time the track was added, in epoch milliseconds.
+    pub added_at_epoch_ms: u64,
+}
+
+/// A page of playlists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaylistPage {
+    /// Playlists in the current page.
+    pub items: Vec<Playlist>,
+    /// Total number of playlists for the profile.
+    pub total_count: i32,
+    /// Whether more playlists exist beyond this page.
+    pub has_more: bool,
+}
 /// A lightweight playback session.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Session {

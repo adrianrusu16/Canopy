@@ -695,6 +695,413 @@
           }
         }
       }
+    },
+    "/canopy.Canopy/CreatePlaylist": {
+      "post": {
+        "summary": "Create private playlist",
+        "operationId": "CreatePlaylist",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. Creates a private playlist owned by profiles.id.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePlaylistRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatePlaylistResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/UpdatePlaylist": {
+      "post": {
+        "summary": "Update private playlist",
+        "operationId": "UpdatePlaylist",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. Cross-profile and unknown playlist identifiers return not found.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePlaylistRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatePlaylistResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/DeletePlaylist": {
+      "post": {
+        "summary": "Delete private playlist",
+        "operationId": "DeletePlaylist",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. Deletes the playlist and its ordered track memberships.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletePlaylistRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePlaylistResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/ListPlaylists": {
+      "post": {
+        "summary": "List private playlists",
+        "operationId": "ListPlaylists",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. Returns only playlists owned by the authenticated profile.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/ListPlaylistsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPlaylistsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/AddPlaylistTrack": {
+      "post": {
+        "summary": "Add track to private playlist",
+        "operationId": "AddPlaylistTrack",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. Adding an existing track is idempotent; omit has_position to append.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/AddPlaylistTrackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddPlaylistTrackResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/RemovePlaylistTrack": {
+      "post": {
+        "summary": "Remove track from private playlist",
+        "operationId": "RemovePlaylistTrack",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. Removing a track that is not a member succeeds.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/RemovePlaylistTrackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemovePlaylistTrackResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/ReorderPlaylistTracks": {
+      "post": {
+        "summary": "Reorder private playlist tracks",
+        "operationId": "ReorderPlaylistTracks",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. track_ids must be the complete current membership with no duplicates or foreign IDs.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderPlaylistTracksRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReorderPlaylistTracksResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/ListPlaylistTracks": {
+      "post": {
+        "summary": "List private playlist tracks",
+        "operationId": "ListPlaylistTracks",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions are not accepted and never create playlist state. Returns renderable MediaItem values in explicit playlist order.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/ListPlaylistTracksRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPlaylistTracksResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/ListPlaybackHistory": {
+      "post": {
+        "summary": "List profile playback history",
+        "operationId": "ListPlaybackHistory",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions cannot access backend history. Returns repeated playback events newest first. limit=0 defaults to 50 and values above 100 are clamped.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/ListPlaybackHistoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPlaybackHistoryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/DeletePlaybackHistoryEntry": {
+      "post": {
+        "summary": "Delete one playback history event",
+        "operationId": "DeletePlaybackHistoryEntry",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions cannot access backend history. Deletion is idempotent and ownership-safe; unknown and cross-profile IDs return deleted=false.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletePlaybackHistoryEntryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePlaybackHistoryEntryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/canopy.Canopy/ClearPlaybackHistory": {
+      "post": {
+        "summary": "Clear all profile playback history",
+        "operationId": "ClearPlaybackHistory",
+        "description": "Requires an existing logged-in profile and gRPC metadata auth using authorization: Bearer <token> or x-canopy-auth-token. Anonymous sessions cannot access backend history. Permanently deletes every event owned by the authenticated profile and returns the deleted count.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CanopyToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/protobuf": {
+              "schema": {
+                "$ref": "#/components/schemas/ClearPlaybackHistoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/protobuf": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearPlaybackHistoryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -810,7 +1217,7 @@
           },
           "artwork_uri": {
             "type": "string",
-            "description": "content://\u2026 URI that the Android resolver knows"
+            "description": "content://… URI that the Android resolver knows"
           },
           "duration_ms": {
             "type": "integer",
@@ -906,7 +1313,7 @@
           "speed": {
             "type": "number",
             "format": "double",
-            "description": "Playback speed (0.5 \u2026 2.0 typical)"
+            "description": "Playback speed (0.5 … 2.0 typical)"
           },
           "session_id": {
             "type": "string",
@@ -1368,6 +1775,352 @@
             "description": "Canonical stored profile-owned preferences JSON object string"
           }
         }
+      },
+      "Playlist": {
+        "type": "object",
+        "description": "Private playlist owned by the authenticated profile.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable playlist identifier"
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable playlist name"
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional playlist description"
+          },
+          "created_at_epoch_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "updated_at_epoch_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "CreatePlaylistRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Required non-empty playlist name"
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional playlist description"
+          }
+        }
+      },
+      "CreatePlaylistResponse": {
+        "type": "object",
+        "properties": {
+          "playlist": {
+            "$ref": "#/components/schemas/Playlist"
+          }
+        }
+      },
+      "UpdatePlaylistRequest": {
+        "type": "object",
+        "properties": {
+          "playlist_id": {
+            "type": "string",
+            "description": "Owned playlist to update"
+          },
+          "name": {
+            "type": "string",
+            "description": "Required non-empty replacement name"
+          },
+          "description": {
+            "type": "string",
+            "description": "Replacement description"
+          }
+        }
+      },
+      "UpdatePlaylistResponse": {
+        "type": "object",
+        "properties": {
+          "playlist": {
+            "$ref": "#/components/schemas/Playlist"
+          }
+        }
+      },
+      "DeletePlaylistRequest": {
+        "type": "object",
+        "properties": {
+          "playlist_id": {
+            "type": "string",
+            "description": "Owned playlist to delete"
+          }
+        }
+      },
+      "DeletePlaylistResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ListPlaylistsRequest": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum playlists to return"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Offset for pagination"
+          }
+        }
+      },
+      "ListPlaylistsResponse": {
+        "type": "object",
+        "properties": {
+          "playlists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Playlist"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AddPlaylistTrackRequest": {
+        "type": "object",
+        "properties": {
+          "playlist_id": {
+            "type": "string",
+            "description": "Owned playlist to modify"
+          },
+          "track_id": {
+            "type": "string",
+            "description": "Catalog track to add"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Requested zero-based position"
+          },
+          "has_position": {
+            "type": "boolean",
+            "description": "When false, append the track"
+          }
+        }
+      },
+      "AddPlaylistTrackResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RemovePlaylistTrackRequest": {
+        "type": "object",
+        "properties": {
+          "playlist_id": {
+            "type": "string",
+            "description": "Owned playlist to modify"
+          },
+          "track_id": {
+            "type": "string",
+            "description": "Catalog track to remove"
+          }
+        }
+      },
+      "RemovePlaylistTrackResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ReorderPlaylistTracksRequest": {
+        "type": "object",
+        "description": "The ordered track_ids list must contain every current playlist track exactly once.",
+        "properties": {
+          "playlist_id": {
+            "type": "string",
+            "description": "Owned playlist to reorder"
+          },
+          "track_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ReorderPlaylistTracksResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ListPlaylistTracksRequest": {
+        "type": "object",
+        "properties": {
+          "playlist_id": {
+            "type": "string",
+            "description": "Owned playlist to read"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum tracks to return"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Offset for pagination"
+          }
+        }
+      },
+      "ListPlaylistTracksResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaItem"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PlaybackHistoryEntry": {
+        "type": "object",
+        "description": "One chronological playback event owned by the authenticated profile.",
+        "properties": {
+          "history_id": {
+            "type": "string",
+            "description": "Stable event identifier used for individual deletion"
+          },
+          "played_at_epoch_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "completion_pct": {
+            "type": "number",
+            "format": "float",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "item": {
+            "$ref": "#/components/schemas/MediaItem"
+          }
+        }
+      },
+      "ListPlaybackHistoryRequest": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Zero defaults to 50 events"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ListPlaybackHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlaybackHistoryEntry"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DeletePlaybackHistoryEntryRequest": {
+        "type": "object",
+        "properties": {
+          "history_id": {
+            "type": "string",
+            "description": "Owned event identifier to delete"
+          }
+        }
+      },
+      "DeletePlaybackHistoryEntryResponse": {
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "description": "False for unknown or cross-profile event identifiers"
+          }
+        }
+      },
+      "ClearPlaybackHistoryRequest": {
+        "type": "object",
+        "properties": {}
+      },
+      "ClearPlaybackHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "deleted_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Verified end-user token sent as authorization: Bearer <token> gRPC metadata."
+      },
+      "CanopyToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-canopy-auth-token",
+        "description": "Direct gRPC metadata token for clients that cannot set authorization metadata."
       }
     }
   },
@@ -1376,14 +2129,15 @@
     "sessionControlStatus": "Playback control RPCs mutate SessionRepository state; empty session_id maps to the default session.",
     "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC.",
     "healthStatus": "Health responses include aggregate status plus dependency details; RustFS probing is opt-in via CANOPY_HEALTH_CHECK_RUSTFS.",
-    "authModel": "Anonymous users may browse, search, and play, but anonymous sessions are not durable users and receive no backend history, library, likes, or preferences. Durable state starts with UpsertProfile and a verified login token sent through gRPC metadata authorization: Bearer <token> or x-canopy-auth-token; request-body auth_token remains a compatibility fallback.",
+    "authModel": "Anonymous users may browse, search, and play, but anonymous sessions are not durable users and receive no backend history, library, likes, preferences, or playlists. Durable state starts with UpsertProfile and a verified login token sent through gRPC metadata authorization: Bearer <token> or x-canopy-auth-token; request-body auth_token remains a compatibility fallback only for older profile/history RPCs.",
     "playbackResolution": "ResolvePlayback accepts track_id plus optional session_id. It selects an audio asset, returns a RustFS or Supabase signed URL, and loads the track into the resolved session.",
     "supabaseMusicSource": "Set CANOPY_MUSIC_SOURCE=supabase with CANOPY_SUPABASE_URL, CANOPY_SUPABASE_KEY, CANOPY_SUPABASE_STORAGE_BUCKET, and CANOPY_SUPABASE_SIGNED_URL_TTL_SECS to fetch Supabase Storage signed URLs.",
     "supabaseCatalogSource": "SupabaseCatalogProvider reads normalized rows from CANOPY_SUPABASE_URL/rest/v1/CANOPY_SUPABASE_CATALOG_TABLE?select=* when CANOPY_SUPABASE_SYNC_ON_START=true in PostgreSQL mode, maps them into ProviderTrack, and ingests through CatalogIngest.",
     "profileStatus": "UpsertProfile verifies metadata auth, upserts profiles(external_user_id), and stores history_enabled as the logged-in user history preference.",
-    "historyStatus": "RecordPlaybackHistory requires metadata auth and an existing profile. It records profile-scoped history only when history_enabled=true; anonymous sessions never create backend history.",
+    "historyStatus": "Playback history is an append-only profile-owned event ledger. Lifecycle RPCs require metadata auth. Disabling history atomically and irreversibly purges existing events, and consent-safe recording prevents concurrent repopulation. Anonymous sessions never create or read backend history.",
     "libraryStatus": "Library RPCs require metadata auth and persist profile-owned saved tracks only for logged-in users; anonymous sessions never create backend library rows.",
     "likesStatus": "Like RPCs require metadata auth and persist profile-owned positive track likes only for logged-in users.",
-    "preferencesStatus": "Preference RPCs require metadata auth and store a profile-owned JSON object; anonymous client preferences remain client-side."
+    "preferencesStatus": "Preference RPCs require metadata auth and store a profile-owned JSON object; anonymous client preferences remain client-side.",
+    "playlistStatus": "Playlist RPCs require metadata auth and an existing profile. Private playlists and ordered track memberships persist under profiles.id; anonymous sessions never create playlist rows. ReorderPlaylistTracks requires the complete current membership exactly once."
   }
 }

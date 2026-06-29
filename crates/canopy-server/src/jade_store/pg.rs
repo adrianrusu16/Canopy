@@ -26,9 +26,10 @@ use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogIngest, CatalogRepository,
     DiscoveryRepository, IngestBatchResult, LibraryItem, LibraryRepository, LikeRepository,
-    MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackHistoryRepository,
-    PreferencesRepository, ProfilePreferences, ProfileRepository, ProviderTrack, Session,
-    SessionRepository, TrackLike, UserProfile,
+    MediaItem, MediaPage, Page, PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage,
+    PlaybackHistoryRepository, Playlist, PlaylistPage, PlaylistRepository, PreferencesRepository,
+    ProfilePreferences, ProfileRepository, ProviderTrack, Session, SessionRepository, TrackLike,
+    UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
 
@@ -114,7 +115,9 @@ fn epoch_ms_i64(row: &sqlx::postgres::PgRow, column: &str) -> u64 {
 fn map_track_write_err(err: sqlx::Error, track_id: &str) -> CanopyError {
     if let sqlx::Error::Database(db) = &err
         && (db.constraint() == Some("profile_library_items_track_id_fkey")
-            || db.constraint() == Some("profile_track_likes_track_id_fkey"))
+            || db.constraint() == Some("profile_track_likes_track_id_fkey")
+            || db.constraint() == Some("profile_playlist_tracks_track_id_fkey")
+            || db.constraint() == Some("playback_history_track_id_fkey"))
     {
         return CanopyError::not_found("track", track_id);
     }
@@ -859,26 +862,127 @@ impl PgPlaybackHistoryRepository {
 
 #[async_trait]
 impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
-    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()> {
+    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<bool> {
+        let profile_uuid = parse_uuid_arg(&event.profile_id, "profile_id")?;
+        let track_uuid = parse_uuid_arg(&event.track_id, "track_id")?;
         let duration_ms = i32::try_from(event.duration_ms).map_err(|_| {
             CanopyError::InvalidArgument("duration_ms exceeds database range".into())
         })?;
 
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let enabled: Option<bool> =
+            sqlx::query_scalar("SELECT history_enabled FROM profiles WHERE id = $1 FOR UPDATE")
+                .bind(profile_uuid)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        let Some(enabled) = enabled else {
+            return Err(CanopyError::not_found("profile", &event.profile_id));
+        };
+        if !enabled {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(false);
+        }
+
         sqlx::query(
             r#"
                 INSERT INTO playback_history (profile_id, track_id, duration_ms, completion_pct)
-                VALUES ($1::uuid, $2::uuid, $3, $4)
+                VALUES ($1, $2, $3, $4)
             "#,
         )
-        .bind(&event.profile_id)
-        .bind(&event.track_id)
+        .bind(profile_uuid)
+        .bind(track_uuid)
         .bind(duration_ms)
         .bind(event.completion_pct)
-        .execute(self.pool.as_ref())
+        .execute(&mut *tx)
         .await
-        .map_err(db_err)?;
+        .map_err(|err| map_track_write_err(err, &event.track_id))?;
 
-        Ok(())
+        tx.commit().await.map_err(db_err)?;
+        Ok(true)
+    }
+
+    async fn list(&self, profile_id: &str, page: Page) -> CanopyResult<PlaybackHistoryPage> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let sql = format!(
+            r#"
+                SELECT
+                    ph.id AS history_id,
+                    (EXTRACT(EPOCH FROM ph.played_at) * 1000)::bigint AS played_at_epoch_ms,
+                    ph.duration_ms,
+                    ph.completion_pct,
+                    t.id AS track_id,
+                    t.title AS track_title,
+                    a.name AS artist_name,
+                    al.title AS album_title,
+                    t.duration_ms AS track_duration_ms,
+                    t.is_explicit AS track_explicit,
+                    COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
+                    aa.content_type AS asset_content_type,
+                    aa.size_bytes AS asset_size_bytes
+                FROM playback_history ph
+                JOIN tracks t ON ph.track_id = t.id
+                JOIN artists a ON t.artist_id = a.id
+                JOIN albums al ON t.album_id = al.id
+                {REPRESENTATIVE_ASSET_JOIN}
+                WHERE ph.profile_id = $1
+                ORDER BY ph.played_at DESC, ph.id DESC
+                LIMIT $2 OFFSET $3
+            "#
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(profile_uuid)
+            .bind(page.limit as i64)
+            .bind(page.offset as i64)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM playback_history WHERE profile_id = $1")
+                .bind(profile_uuid)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(db_err)?;
+
+        let entries = rows
+            .iter()
+            .map(|row| PlaybackHistoryEntry {
+                id: uuid_string(row, "history_id"),
+                played_at_epoch_ms: epoch_ms_i64(row, "played_at_epoch_ms"),
+                duration_ms: row.try_get::<i32, _>("duration_ms").unwrap_or(0) as i64,
+                completion_pct: row.try_get("completion_pct").unwrap_or(0.0),
+                item: media_item_from_row(row),
+            })
+            .collect();
+        let page_end = u64::from(page.offset) + u64::from(page.limit);
+
+        Ok(PlaybackHistoryPage {
+            entries,
+            total_count: total_count.min(i64::from(i32::MAX)) as i32,
+            has_more: page_end < total_count.max(0) as u64,
+        })
+    }
+
+    async fn delete_entry(&self, profile_id: &str, history_id: &str) -> CanopyResult<bool> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let history_uuid = parse_uuid_arg(history_id, "history_id")?;
+        let result = sqlx::query("DELETE FROM playback_history WHERE id = $1 AND profile_id = $2")
+            .bind(history_uuid)
+            .bind(profile_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn clear(&self, profile_id: &str) -> CanopyResult<u64> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let result = sqlx::query("DELETE FROM playback_history WHERE profile_id = $1")
+            .bind(profile_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -1120,6 +1224,399 @@ impl LikeRepository for PgLikeRepository {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PgPlaylistRepository
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL-backed profile playlist repository.
+#[derive(Clone)]
+pub struct PgPlaylistRepository {
+    pool: Arc<sqlx::PgPool>,
+}
+
+impl PgPlaylistRepository {
+    /// Creates a new repository backed by the given connection pool.
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool: Arc::new(pool),
+        }
+    }
+
+    async fn ensure_owned_playlist(
+        &self,
+        profile_uuid: uuid::Uuid,
+        playlist_uuid: uuid::Uuid,
+        playlist_id: &str,
+    ) -> CanopyResult<()> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM profile_playlists WHERE id = $1 AND profile_id = $2)",
+        )
+        .bind(playlist_uuid)
+        .bind(profile_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        if exists {
+            Ok(())
+        } else {
+            Err(CanopyError::not_found("playlist", playlist_id))
+        }
+    }
+}
+
+fn playlist_from_row(row: &sqlx::postgres::PgRow) -> Playlist {
+    Playlist {
+        id: row.try_get("id").unwrap_or_default(),
+        profile_id: row.try_get("profile_id").unwrap_or_default(),
+        name: row.try_get("name").unwrap_or_default(),
+        description: row.try_get("description").unwrap_or_default(),
+        created_at_epoch_ms: epoch_ms_i64(row, "created_at_epoch_ms"),
+        updated_at_epoch_ms: epoch_ms_i64(row, "updated_at_epoch_ms"),
+    }
+}
+
+#[async_trait]
+impl PlaylistRepository for PgPlaylistRepository {
+    async fn create_playlist(
+        &self,
+        profile_id: &str,
+        name: &str,
+        description: &str,
+    ) -> CanopyResult<Playlist> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let row = sqlx::query(
+            r#"
+                INSERT INTO profile_playlists (profile_id, name, description)
+                VALUES ($1, $2, $3)
+                RETURNING
+                    id::text,
+                    profile_id::text,
+                    name,
+                    description,
+                    (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms,
+                    (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_at_epoch_ms
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(name)
+        .bind(description)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(playlist_from_row(&row))
+    }
+
+    async fn update_playlist(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        name: &str,
+        description: &str,
+    ) -> CanopyResult<Playlist> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let row = sqlx::query(
+            r#"
+                UPDATE profile_playlists
+                SET name = $3,
+                    description = $4,
+                    updated_at = NOW()
+                WHERE id = $1 AND profile_id = $2
+                RETURNING
+                    id::text,
+                    profile_id::text,
+                    name,
+                    description,
+                    (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms,
+                    (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_at_epoch_ms
+            "#,
+        )
+        .bind(playlist_uuid)
+        .bind(profile_uuid)
+        .bind(name)
+        .bind(description)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        row.as_ref()
+            .map(playlist_from_row)
+            .ok_or_else(|| CanopyError::not_found("playlist", playlist_id))
+    }
+
+    async fn delete_playlist(&self, profile_id: &str, playlist_id: &str) -> CanopyResult<()> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let result = sqlx::query("DELETE FROM profile_playlists WHERE id = $1 AND profile_id = $2")
+            .bind(playlist_uuid)
+            .bind(profile_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        if result.rows_affected() == 0 {
+            Err(CanopyError::not_found("playlist", playlist_id))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn list_playlists(&self, profile_id: &str, page: Page) -> CanopyResult<PlaylistPage> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let rows = sqlx::query(
+            r#"
+                SELECT
+                    id::text,
+                    profile_id::text,
+                    name,
+                    description,
+                    (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms,
+                    (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_at_epoch_ms
+                FROM profile_playlists
+                WHERE profile_id = $1
+                ORDER BY updated_at DESC, name
+                LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(page.limit as i64)
+        .bind(page.offset as i64)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM profile_playlists WHERE profile_id = $1")
+                .bind(profile_uuid)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(db_err)?;
+
+        Ok(PlaylistPage {
+            items: rows.iter().map(playlist_from_row).collect(),
+            total_count: total_count as i32,
+            has_more: (page.offset + page.limit) < total_count as u32,
+        })
+    }
+
+    async fn add_track(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_id: &str,
+        position: Option<i32>,
+    ) -> CanopyResult<()> {
+        if let Some(position) = position
+            && position < 0
+        {
+            return Err(CanopyError::InvalidArgument(
+                "position must be non-negative".into(),
+            ));
+        }
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        self.ensure_owned_playlist(profile_uuid, playlist_uuid, playlist_id)
+            .await?;
+
+        let position = if let Some(position) = position {
+            position
+        } else {
+            sqlx::query_scalar::<_, Option<i32>>(
+                "SELECT MAX(position) + 1 FROM profile_playlist_tracks WHERE playlist_id = $1",
+            )
+            .bind(playlist_uuid)
+            .fetch_one(self.pool.as_ref())
+            .await
+            .map_err(db_err)?
+            .unwrap_or(0)
+        };
+
+        sqlx::query(
+            r#"
+                INSERT INTO profile_playlist_tracks (playlist_id, track_id, position)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (playlist_id, track_id) DO UPDATE SET
+                    position = EXCLUDED.position,
+                    updated_at = NOW()
+            "#,
+        )
+        .bind(playlist_uuid)
+        .bind(track_uuid)
+        .bind(position)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|err| map_track_write_err(err, track_id))?;
+
+        sqlx::query("UPDATE profile_playlists SET updated_at = NOW() WHERE id = $1")
+            .bind(playlist_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        Ok(())
+    }
+
+    async fn remove_track(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<()> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        self.ensure_owned_playlist(profile_uuid, playlist_uuid, playlist_id)
+            .await?;
+
+        sqlx::query("DELETE FROM profile_playlist_tracks WHERE playlist_id = $1 AND track_id = $2")
+            .bind(playlist_uuid)
+            .bind(track_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        sqlx::query("UPDATE profile_playlists SET updated_at = NOW() WHERE id = $1")
+            .bind(playlist_uuid)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        Ok(())
+    }
+
+    async fn reorder_tracks(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> CanopyResult<()> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let mut requested = Vec::with_capacity(track_ids.len());
+        let mut seen = std::collections::HashSet::new();
+        for track_id in track_ids {
+            if !seen.insert(track_id.clone()) {
+                return Err(CanopyError::InvalidArgument(
+                    "reorder track_ids must be unique".into(),
+                ));
+            }
+            requested.push(parse_uuid_arg(track_id, "track_id")?);
+        }
+
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let owned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM profile_playlists WHERE id = $1 AND profile_id = $2)",
+        )
+        .bind(playlist_uuid)
+        .bind(profile_uuid)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if !owned {
+            return Err(CanopyError::not_found("playlist", playlist_id));
+        }
+
+        let current: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT track_id FROM profile_playlist_tracks WHERE playlist_id = $1 ORDER BY position",
+        )
+        .bind(playlist_uuid)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let mut current_sorted = current.clone();
+        current_sorted.sort();
+        let mut requested_sorted = requested.clone();
+        requested_sorted.sort();
+        if current_sorted != requested_sorted {
+            return Err(CanopyError::InvalidArgument(
+                "reorder must include exactly the playlist track_ids".into(),
+            ));
+        }
+
+        for (position, track_uuid) in requested.iter().enumerate() {
+            let position = i32::try_from(position)
+                .map_err(|_| CanopyError::InvalidArgument("playlist is too large".into()))?;
+            sqlx::query(
+                "UPDATE profile_playlist_tracks SET position = $3, updated_at = NOW() WHERE playlist_id = $1 AND track_id = $2",
+            )
+            .bind(playlist_uuid)
+            .bind(track_uuid)
+            .bind(position)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+
+        sqlx::query("UPDATE profile_playlists SET updated_at = NOW() WHERE id = $1")
+            .bind(playlist_uuid)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_tracks(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        self.ensure_owned_playlist(profile_uuid, playlist_uuid, playlist_id)
+            .await?;
+
+        let sql = format!(
+            r#"
+            SELECT
+                t.id             AS track_id,
+                t.title          AS track_title,
+                a.name           AS artist_name,
+                al.title         AS album_title,
+                t.duration_ms    AS track_duration_ms,
+                t.is_explicit    AS track_explicit,
+                COALESCE(t.artwork_key, al.artwork_key) AS artwork_key,
+                aa.content_type  AS asset_content_type,
+                aa.size_bytes    AS asset_size_bytes
+            FROM profile_playlist_tracks ppt
+            JOIN tracks t      ON ppt.track_id = t.id
+            JOIN artists a     ON t.artist_id = a.id
+            JOIN albums al     ON t.album_id = al.id
+            {REPRESENTATIVE_ASSET_JOIN}
+            WHERE ppt.playlist_id = $1
+            ORDER BY ppt.position, ppt.added_at, t.title
+            LIMIT $2 OFFSET $3
+        "#
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(playlist_uuid)
+            .bind(page.limit as i64)
+            .bind(page.offset as i64)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        let total_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM profile_playlist_tracks WHERE playlist_id = $1",
+        )
+        .bind(playlist_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(MediaPage {
+            items: rows.iter().map(media_item_from_row).collect(),
+            total_count: total_count as i32,
+            has_more: (page.offset + page.limit) < total_count as u32,
+        })
+    }
+}
 // ---------------------------------------------------------------------------
 // PgPreferencesRepository
 // ---------------------------------------------------------------------------

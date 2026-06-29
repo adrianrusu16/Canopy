@@ -30,6 +30,9 @@ service Canopy {
   // ---------- Logged-in profile ----------
   rpc UpsertProfile(UpsertProfileRequest) returns (UpsertProfileResponse);
   rpc RecordPlaybackHistory(RecordPlaybackHistoryRequest) returns (RecordPlaybackHistoryResponse);
+  rpc ListPlaybackHistory(ListPlaybackHistoryRequest) returns (ListPlaybackHistoryResponse);
+  rpc DeletePlaybackHistoryEntry(DeletePlaybackHistoryEntryRequest) returns (DeletePlaybackHistoryEntryResponse);
+  rpc ClearPlaybackHistory(ClearPlaybackHistoryRequest) returns (ClearPlaybackHistoryResponse);
   rpc SaveLibraryItem(SaveLibraryItemRequest) returns (SaveLibraryItemResponse);
   rpc RemoveLibraryItem(RemoveLibraryItemRequest) returns (RemoveLibraryItemResponse);
   rpc ListLibraryItems(ListLibraryItemsRequest) returns (ListLibraryItemsResponse);
@@ -38,6 +41,14 @@ service Canopy {
   rpc ListLikedTracks(ListLikedTracksRequest) returns (ListLikedTracksResponse);
   rpc GetPreferences(GetPreferencesRequest) returns (GetPreferencesResponse);
   rpc UpdatePreferences(UpdatePreferencesRequest) returns (UpdatePreferencesResponse);
+  rpc CreatePlaylist(CreatePlaylistRequest) returns (CreatePlaylistResponse);
+  rpc UpdatePlaylist(UpdatePlaylistRequest) returns (UpdatePlaylistResponse);
+  rpc DeletePlaylist(DeletePlaylistRequest) returns (DeletePlaylistResponse);
+  rpc ListPlaylists(ListPlaylistsRequest) returns (ListPlaylistsResponse);
+  rpc AddPlaylistTrack(AddPlaylistTrackRequest) returns (AddPlaylistTrackResponse);
+  rpc RemovePlaylistTrack(RemovePlaylistTrackRequest) returns (RemovePlaylistTrackResponse);
+  rpc ReorderPlaylistTracks(ReorderPlaylistTracksRequest) returns (ReorderPlaylistTracksResponse);
+  rpc ListPlaylistTracks(ListPlaylistTracksRequest) returns (ListPlaylistTracksResponse);
 
   // ---------- Miscellaneous ----------
   rpc Health(HealthRequest) returns (HealthResponse);
@@ -208,6 +219,27 @@ message RecordPlaybackHistoryResponse {
   bool recorded = 1;           // false when profile history is disabled
 }
 
+message PlaybackHistoryEntry {
+  string history_id = 1;
+  uint64 played_at_epoch_ms = 2;
+  int64 duration_ms = 3;
+  float completion_pct = 4;
+  MediaItem item = 5;
+}
+message ListPlaybackHistoryRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
+message ListPlaybackHistoryResponse {
+  repeated PlaybackHistoryEntry entries = 1;
+  int32 total_count = 2;
+  bool has_more = 3;
+}
+message DeletePlaybackHistoryEntryRequest { string history_id = 1; }
+message DeletePlaybackHistoryEntryResponse { bool deleted = 1; }
+message ClearPlaybackHistoryRequest { }
+message ClearPlaybackHistoryResponse { uint64 deleted_count = 1; }
+
 message SaveLibraryItemRequest {
   string track_id = 1;         // requires metadata auth; no anonymous persistence
 }
@@ -251,6 +283,63 @@ message UpdatePreferencesRequest {
 }
 message UpdatePreferencesResponse {
   string preferences_json = 1;
+}
+
+message Playlist {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  uint64 created_at_epoch_ms = 4;
+  uint64 updated_at_epoch_ms = 5;
+}
+message CreatePlaylistRequest {
+  string name = 1;
+  string description = 2;
+}
+message CreatePlaylistResponse { Playlist playlist = 1; }
+message UpdatePlaylistRequest {
+  string playlist_id = 1;
+  string name = 2;
+  string description = 3;
+}
+message UpdatePlaylistResponse { Playlist playlist = 1; }
+message DeletePlaylistRequest { string playlist_id = 1; }
+message DeletePlaylistResponse { bool success = 1; }
+message ListPlaylistsRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
+message ListPlaylistsResponse {
+  repeated Playlist playlists = 1;
+  int32 total_count = 2;
+  bool has_more = 3;
+}
+message AddPlaylistTrackRequest {
+  string playlist_id = 1;
+  string track_id = 2;
+  int32 position = 3;
+  bool has_position = 4;
+}
+message AddPlaylistTrackResponse { bool success = 1; }
+message RemovePlaylistTrackRequest {
+  string playlist_id = 1;
+  string track_id = 2;
+}
+message RemovePlaylistTrackResponse { bool success = 1; }
+message ReorderPlaylistTracksRequest {
+  string playlist_id = 1;
+  repeated string track_ids = 2;
+}
+message ReorderPlaylistTracksResponse { bool success = 1; }
+message ListPlaylistTracksRequest {
+  string playlist_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+message ListPlaylistTracksResponse {
+  repeated MediaItem items = 1;
+  int32 total_count = 2;
+  bool has_more = 3;
 }
 
 message HealthRequest { }

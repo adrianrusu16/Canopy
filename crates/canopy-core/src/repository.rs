@@ -8,8 +8,8 @@ use async_trait::async_trait;
 
 use crate::error::CanopyResult;
 use crate::model::{
-    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PlaybackHistoryEvent, ProfilePreferences,
-    ProviderTrack, Session, TrackLike, UserProfile,
+    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackHistoryPage,
+    Playlist, PlaylistPage, ProfilePreferences, ProviderTrack, Session, TrackLike, UserProfile,
 };
 
 /// Read access to the catalog (artists, albums, tracks, playlists).
@@ -91,8 +91,17 @@ pub trait ProfileRepository: Send + Sync {
 /// Persistence of durable playback history for logged-in profiles.
 #[async_trait]
 pub trait PlaybackHistoryRepository: Send + Sync {
-    /// Records one playback-history event for a real profile.
-    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()>;
+    /// Records one playback-history event while profile consent remains enabled.
+    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<bool>;
+
+    /// Lists profile-owned events newest first.
+    async fn list(&self, profile_id: &str, page: Page) -> CanopyResult<PlaybackHistoryPage>;
+
+    /// Deletes one owned event; unknown and foreign identifiers return false.
+    async fn delete_entry(&self, profile_id: &str, history_id: &str) -> CanopyResult<bool>;
+
+    /// Deletes every event owned by a profile and returns the deleted count.
+    async fn clear(&self, profile_id: &str) -> CanopyResult<u64>;
 }
 
 /// Persistence of saved library items for logged-in profiles.
@@ -141,6 +150,65 @@ pub trait PreferencesRepository: Send + Sync {
     ) -> CanopyResult<ProfilePreferences>;
 }
 
+/// Persistence of profile-owned playlists.
+#[async_trait]
+pub trait PlaylistRepository: Send + Sync {
+    /// Creates a playlist for a real profile.
+    async fn create_playlist(
+        &self,
+        profile_id: &str,
+        name: &str,
+        description: &str,
+    ) -> CanopyResult<Playlist>;
+
+    /// Updates playlist metadata for a real profile.
+    async fn update_playlist(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        name: &str,
+        description: &str,
+    ) -> CanopyResult<Playlist>;
+
+    /// Deletes a playlist owned by a real profile.
+    async fn delete_playlist(&self, profile_id: &str, playlist_id: &str) -> CanopyResult<()>;
+
+    /// Lists playlists for a real profile.
+    async fn list_playlists(&self, profile_id: &str, page: Page) -> CanopyResult<PlaylistPage>;
+
+    /// Adds a track to a playlist. Adding the same track is idempotent.
+    async fn add_track(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_id: &str,
+        position: Option<i32>,
+    ) -> CanopyResult<()>;
+
+    /// Removes a track from a playlist. Removing an absent track succeeds.
+    async fn remove_track(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<()>;
+
+    /// Rewrites playlist order using a complete ordered list of current track IDs.
+    async fn reorder_tracks(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> CanopyResult<()>;
+
+    /// Lists playlist tracks as renderable media items in playlist order.
+    async fn list_tracks(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage>;
+}
 /// Write access to the catalog for provider ingestion.
 ///
 /// A provider adapter produces a [`ProviderTrack`] and calls `ingest` on this

@@ -9,10 +9,11 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, CanopyResult, CatalogRepository, DiscoveryRepository,
-    LibraryItem, LibraryRepository, LikeRepository, MediaItem, MediaPage, Page,
-    PlaybackHistoryEvent, PlaybackHistoryRepository, PreferencesRepository, ProfilePreferences,
-    ProfileRepository, Session, SessionRepository, TrackLike, UserProfile,
+    AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogRepository,
+    DiscoveryRepository, LibraryItem, LibraryRepository, LikeRepository, MediaItem, MediaPage,
+    Page, PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage,
+    PlaybackHistoryRepository, Playlist, PlaylistPage, PlaylistRepository, PreferencesRepository,
+    ProfilePreferences, ProfileRepository, Session, SessionRepository, TrackLike, UserProfile,
 };
 
 /// In-memory catalog backing store.
@@ -181,24 +182,95 @@ impl ProfileRepository for InMemoryProfileStore {
     }
 }
 
+#[derive(Clone)]
+struct InMemoryHistoryRow {
+    id: String,
+    event: PlaybackHistoryEvent,
+    played_at_epoch_ms: u64,
+}
+
 /// In-memory playback-history store for tests and standalone prototype mode.
 #[derive(Default)]
 pub struct InMemoryPlaybackHistoryStore {
-    events: Mutex<Vec<PlaybackHistoryEvent>>,
+    events: Mutex<Vec<InMemoryHistoryRow>>,
 }
 
 impl InMemoryPlaybackHistoryStore {
     /// Returns a snapshot of stored events for tests.
     pub fn events(&self) -> CanopyResult<Vec<PlaybackHistoryEvent>> {
-        Ok(self.events.lock().unwrap().clone())
+        Ok(self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|row| row.event.clone())
+            .collect())
     }
 }
 
 #[async_trait]
 impl PlaybackHistoryRepository for InMemoryPlaybackHistoryStore {
-    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<()> {
-        self.events.lock().unwrap().push(event);
-        Ok(())
+    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<bool> {
+        self.events.lock().unwrap().push(InMemoryHistoryRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            event,
+            played_at_epoch_ms: current_epoch_ms(),
+        });
+        Ok(true)
+    }
+
+    async fn list(&self, profile_id: &str, page: Page) -> CanopyResult<PlaybackHistoryPage> {
+        let mut rows: Vec<InMemoryHistoryRow> = self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.event.profile_id == profile_id)
+            .cloned()
+            .collect();
+        rows.sort_by(|left, right| {
+            right
+                .played_at_epoch_ms
+                .cmp(&left.played_at_epoch_ms)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+
+        let total_count = rows.len() as i32;
+        let start = (page.offset as usize).min(rows.len());
+        let end = start.saturating_add(page.limit as usize).min(rows.len());
+        let entries = rows[start..end]
+            .iter()
+            .map(|row| PlaybackHistoryEntry {
+                id: row.id.clone(),
+                played_at_epoch_ms: row.played_at_epoch_ms,
+                duration_ms: row.event.duration_ms,
+                completion_pct: row.event.completion_pct,
+                item: MediaItem {
+                    id: row.event.track_id.clone(),
+                    ..MediaItem::default()
+                },
+            })
+            .collect();
+
+        Ok(PlaybackHistoryPage {
+            entries,
+            total_count,
+            has_more: end < rows.len(),
+        })
+    }
+
+    async fn delete_entry(&self, profile_id: &str, history_id: &str) -> CanopyResult<bool> {
+        let mut rows = self.events.lock().unwrap();
+        let before = rows.len();
+        rows.retain(|row| row.event.profile_id != profile_id || row.id != history_id);
+        Ok(rows.len() != before)
+    }
+
+    async fn clear(&self, profile_id: &str) -> CanopyResult<u64> {
+        let mut rows = self.events.lock().unwrap();
+        let before = rows.len();
+        rows.retain(|row| row.event.profile_id != profile_id);
+        Ok((before - rows.len()) as u64)
     }
 }
 
@@ -376,5 +448,215 @@ impl PreferencesRepository for InMemoryPreferencesStore {
             .unwrap()
             .insert(profile_id.to_string(), preferences.clone());
         Ok(preferences)
+    }
+}
+
+fn playlist_not_found(playlist_id: &str) -> CanopyError {
+    CanopyError::not_found("playlist", playlist_id)
+}
+
+fn playlist_tracks_match(existing: &[String], requested: &[String]) -> bool {
+    let mut existing_sorted = existing.to_vec();
+    existing_sorted.sort();
+    let mut requested_sorted = requested.to_vec();
+    requested_sorted.sort();
+    existing_sorted == requested_sorted
+}
+
+/// In-memory playlist store for tests and standalone prototype mode.
+#[derive(Default)]
+pub struct InMemoryPlaylistStore {
+    playlists: Mutex<HashMap<String, Playlist>>,
+    tracks: Mutex<HashMap<String, Vec<String>>>,
+}
+
+impl InMemoryPlaylistStore {
+    fn get_owned_playlist(&self, profile_id: &str, playlist_id: &str) -> CanopyResult<Playlist> {
+        let playlist = self
+            .playlists
+            .lock()
+            .unwrap()
+            .get(playlist_id)
+            .cloned()
+            .ok_or_else(|| playlist_not_found(playlist_id))?;
+        if playlist.profile_id != profile_id {
+            return Err(playlist_not_found(playlist_id));
+        }
+        Ok(playlist)
+    }
+}
+
+#[async_trait]
+impl PlaylistRepository for InMemoryPlaylistStore {
+    async fn create_playlist(
+        &self,
+        profile_id: &str,
+        name: &str,
+        description: &str,
+    ) -> CanopyResult<Playlist> {
+        let now = current_epoch_ms();
+        let playlist = Playlist {
+            id: uuid::Uuid::new_v4().to_string(),
+            profile_id: profile_id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            created_at_epoch_ms: now,
+            updated_at_epoch_ms: now,
+        };
+        self.playlists
+            .lock()
+            .unwrap()
+            .insert(playlist.id.clone(), playlist.clone());
+        self.tracks
+            .lock()
+            .unwrap()
+            .insert(playlist.id.clone(), Vec::new());
+        Ok(playlist)
+    }
+
+    async fn update_playlist(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        name: &str,
+        description: &str,
+    ) -> CanopyResult<Playlist> {
+        let mut playlists = self.playlists.lock().unwrap();
+        let playlist = playlists
+            .get_mut(playlist_id)
+            .ok_or_else(|| playlist_not_found(playlist_id))?;
+        if playlist.profile_id != profile_id {
+            return Err(playlist_not_found(playlist_id));
+        }
+        playlist.name = name.to_string();
+        playlist.description = description.to_string();
+        playlist.updated_at_epoch_ms = current_epoch_ms();
+        Ok(playlist.clone())
+    }
+
+    async fn delete_playlist(&self, profile_id: &str, playlist_id: &str) -> CanopyResult<()> {
+        self.get_owned_playlist(profile_id, playlist_id)?;
+        self.playlists.lock().unwrap().remove(playlist_id);
+        self.tracks.lock().unwrap().remove(playlist_id);
+        Ok(())
+    }
+
+    async fn list_playlists(&self, profile_id: &str, page: Page) -> CanopyResult<PlaylistPage> {
+        let mut playlists: Vec<Playlist> = self
+            .playlists
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|playlist| playlist.profile_id == profile_id)
+            .cloned()
+            .collect();
+        playlists.sort_by_key(|playlist| std::cmp::Reverse(playlist.updated_at_epoch_ms));
+        let total_count = playlists.len() as i32;
+        let start = (page.offset as usize).min(playlists.len());
+        let end = (start + page.limit as usize).min(playlists.len());
+        Ok(PlaylistPage {
+            items: playlists[start..end].to_vec(),
+            total_count,
+            has_more: end < playlists.len(),
+        })
+    }
+
+    async fn add_track(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_id: &str,
+        position: Option<i32>,
+    ) -> CanopyResult<()> {
+        self.get_owned_playlist(profile_id, playlist_id)?;
+        if let Some(position) = position
+            && position < 0
+        {
+            return Err(CanopyError::InvalidArgument(
+                "position must be non-negative".into(),
+            ));
+        }
+        let mut tracks = self.tracks.lock().unwrap();
+        let entry = tracks.entry(playlist_id.to_string()).or_default();
+        if let Some(existing) = entry.iter().position(|id| id == track_id) {
+            entry.remove(existing);
+        }
+        let index = position
+            .map(|value| value as usize)
+            .unwrap_or(entry.len())
+            .min(entry.len());
+        entry.insert(index, track_id.to_string());
+        Ok(())
+    }
+
+    async fn remove_track(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<()> {
+        self.get_owned_playlist(profile_id, playlist_id)?;
+        if let Some(tracks) = self.tracks.lock().unwrap().get_mut(playlist_id) {
+            tracks.retain(|id| id != track_id);
+        }
+        Ok(())
+    }
+
+    async fn reorder_tracks(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> CanopyResult<()> {
+        self.get_owned_playlist(profile_id, playlist_id)?;
+        let mut seen = std::collections::HashSet::new();
+        if !track_ids
+            .iter()
+            .all(|track_id| seen.insert(track_id.clone()))
+        {
+            return Err(CanopyError::InvalidArgument(
+                "reorder track_ids must be unique".into(),
+            ));
+        }
+        let mut tracks = self.tracks.lock().unwrap();
+        let entry = tracks.entry(playlist_id.to_string()).or_default();
+        if !playlist_tracks_match(entry, track_ids) {
+            return Err(CanopyError::InvalidArgument(
+                "reorder must include exactly the playlist track_ids".into(),
+            ));
+        }
+        *entry = track_ids.to_vec();
+        Ok(())
+    }
+
+    async fn list_tracks(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
+        self.get_owned_playlist(profile_id, playlist_id)?;
+        let tracks = self
+            .tracks
+            .lock()
+            .unwrap()
+            .get(playlist_id)
+            .cloned()
+            .unwrap_or_default();
+        let total_count = tracks.len() as i32;
+        let start = (page.offset as usize).min(tracks.len());
+        let end = (start + page.limit as usize).min(tracks.len());
+        let items = tracks[start..end]
+            .iter()
+            .map(|track_id| MediaItem {
+                id: track_id.clone(),
+                ..MediaItem::default()
+            })
+            .collect();
+        Ok(MediaPage {
+            items,
+            total_count,
+            has_more: end < tracks.len(),
+        })
     }
 }

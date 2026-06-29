@@ -12,12 +12,13 @@ mod pg;
 
 pub use memory::{
     InMemoryAudioAssetStore, InMemoryCatalog, InMemoryLibraryStore, InMemoryLikeStore,
-    InMemoryPlaybackHistoryStore, InMemoryPreferencesStore, InMemoryProfileStore,
-    InMemorySessionStore,
+    InMemoryPlaybackHistoryStore, InMemoryPlaylistStore, InMemoryPreferencesStore,
+    InMemoryProfileStore, InMemorySessionStore,
 };
 
 #[cfg(feature = "pg")]
 pub use pg::{
     PgAudioAssetRepository, PgCatalogRepository, PgLibraryRepository, PgLikeRepository,
-    PgPlaybackHistoryRepository, PgPreferencesRepository, PgProfileRepository, PgSessionRepository,
+    PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
+    PgProfileRepository, PgSessionRepository,
 };

@@ -2,12 +2,13 @@
 
 use canopy_core::{
     AudioAssetRepository, CatalogIngest, CatalogRepository, LibraryRepository, LikeRepository,
-    Page, PlaybackHistoryEvent, PlaybackHistoryRepository, PreferencesRepository,
-    ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
+    Page, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
+    PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
 };
 use canopy_server::jade_store::{
     PgAudioAssetRepository, PgCatalogRepository, PgLibraryRepository, PgLikeRepository,
-    PgPlaybackHistoryRepository, PgPreferencesRepository, PgProfileRepository,
+    PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
+    PgProfileRepository,
 };
 use sqlx::{Row, postgres::PgPoolOptions};
 
@@ -218,6 +219,19 @@ async fn postgres_migrations_support_profile_upsert() {
         .await;
 }
 
+#[test]
+fn history_lifecycle_migration_enforces_consent_purge() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/20250628000001_profile_history_lifecycle.sql"
+    );
+    let migration =
+        std::fs::read_to_string(path).expect("history lifecycle migration should exist");
+
+    assert!(migration.contains("AFTER UPDATE OF history_enabled ON profiles"));
+    assert!(migration.contains("DELETE FROM playback_history WHERE profile_id = NEW.id"));
+}
+
 #[tokio::test]
 async fn postgres_migrations_support_profile_scoped_history() {
     let Some(pool) = connect_test_pool().await else {
@@ -280,15 +294,17 @@ async fn postgres_migrations_support_profile_scoped_history() {
     .await
     .expect("track should be inserted");
 
-    history
-        .record(PlaybackHistoryEvent {
-            profile_id: profile.id.clone(),
-            track_id: track_id.clone(),
-            duration_ms: 1000,
-            completion_pct: 0.75,
-        })
-        .await
-        .expect("history should be recorded");
+    assert!(
+        history
+            .record(PlaybackHistoryEvent {
+                profile_id: profile.id.clone(),
+                track_id: track_id.clone(),
+                duration_ms: 1000,
+                completion_pct: 0.75,
+            })
+            .await
+            .expect("history should be recorded")
+    );
 
     let count: i64 = sqlx::query_scalar(
         r#"
@@ -304,6 +320,124 @@ async fn postgres_migrations_support_profile_scoped_history() {
     .expect("history count should be queryable");
 
     assert_eq!(count, 1);
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE profiles SET history_enabled = FALSE WHERE id = $1::uuid")
+        .bind(&profile.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let purged_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM playback_history WHERE profile_id = $1::uuid")
+            .bind(&profile.id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(purged_count, 0);
+
+    tx.rollback().await.unwrap();
+    let restored_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM playback_history WHERE profile_id = $1::uuid")
+            .bind(&profile.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(restored_count, 1);
+
+    assert!(
+        history
+            .record(PlaybackHistoryEvent {
+                profile_id: profile.id.clone(),
+                track_id: track_id.clone(),
+                duration_ms: 500,
+                completion_pct: 0.5,
+            })
+            .await
+            .unwrap()
+    );
+    let other_profile = profiles
+        .upsert_profile(
+            &format!("other-history-user-{}", uuid::Uuid::new_v4()),
+            Some("Grace"),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(
+        history
+            .record(PlaybackHistoryEvent {
+                profile_id: other_profile.id.clone(),
+                track_id: track_id.clone(),
+                duration_ms: 250,
+                completion_pct: 0.25,
+            })
+            .await
+            .unwrap()
+    );
+
+    let page = history
+        .list(
+            &profile.id,
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.total_count, 2);
+    assert_eq!(page.entries.len(), 2);
+    assert!(page.entries[0].played_at_epoch_ms >= page.entries[1].played_at_epoch_ms);
+    assert_eq!(page.entries[0].item.id, track_id);
+
+    assert!(
+        !history
+            .delete_entry(&other_profile.id, &page.entries[0].id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        history
+            .delete_entry(&profile.id, &page.entries[0].id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !history
+            .delete_entry(&profile.id, &page.entries[0].id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(history.clear(&profile.id).await.unwrap(), 1);
+
+    profiles
+        .upsert_profile(&profile.external_user_id, Some("Ada"), false)
+        .await
+        .unwrap();
+    assert!(
+        !history
+            .record(PlaybackHistoryEvent {
+                profile_id: profile.id.clone(),
+                track_id: track_id.clone(),
+                duration_ms: 1000,
+                completion_pct: 1.0,
+            })
+            .await
+            .unwrap()
+    );
+    let disabled_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM playback_history WHERE profile_id = $1::uuid")
+            .bind(&profile.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(disabled_count, 0);
+
+    let _ = sqlx::query("DELETE FROM profiles WHERE id = $1::uuid")
+        .bind(&other_profile.id)
+        .execute(&pool)
+        .await;
 
     let _ = sqlx::query("DELETE FROM profiles WHERE id = $1::uuid")
         .bind(&profile.id)
@@ -390,6 +524,68 @@ async fn postgres_migrations_support_profile_library_likes_preferences_schema() 
     assert_eq!(index_count, 4);
 }
 
+#[tokio::test]
+async fn postgres_migrations_support_profile_owned_playlists_schema() {
+    let Some(pool) = connect_test_pool().await else {
+        eprintln!(
+            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
+        );
+        return;
+    };
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let table_count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name IN ('profile_playlists', 'profile_playlist_tracks')
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("table count should be queryable");
+    assert_eq!(table_count, 2);
+
+    let fk_count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM information_schema.table_constraints
+            WHERE constraint_schema = 'public'
+              AND constraint_type = 'FOREIGN KEY'
+              AND constraint_name IN (
+                  'profile_playlists_profile_id_fkey',
+                  'profile_playlist_tracks_playlist_id_fkey',
+                  'profile_playlist_tracks_track_id_fkey'
+              )
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("foreign key count should be queryable");
+    assert_eq!(fk_count, 3);
+
+    let index_count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND indexname IN (
+                  'idx_profile_playlists_profile_updated_at',
+                  'idx_profile_playlist_tracks_playlist_position',
+                  'idx_profile_playlist_tracks_track_id'
+              )
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("index count should be queryable");
+    assert_eq!(index_count, 3);
+}
 #[tokio::test]
 async fn postgres_repositories_support_profile_library_likes_preferences() {
     let Some(pool) = connect_test_pool().await else {
@@ -568,6 +764,202 @@ async fn postgres_repositories_support_profile_library_likes_preferences() {
         .await;
     let _ = sqlx::query("DELETE FROM tracks WHERE id = $1::uuid")
         .bind(&track_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM albums WHERE id = $1::uuid")
+        .bind(&album_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM artists WHERE id = $1::uuid")
+        .bind(&artist_id)
+        .execute(&pool)
+        .await;
+}
+
+#[tokio::test]
+async fn postgres_repositories_support_profile_owned_playlists() {
+    let Some(pool) = connect_test_pool().await else {
+        eprintln!(
+            "skipping postgres integration test: no CANOPY_TEST_DATABASE_URL or DATABASE_URL"
+        );
+        return;
+    };
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let profiles = PgProfileRepository::new(pool.clone());
+    let playlists = PgPlaylistRepository::new(pool.clone());
+    let unique = uuid::Uuid::new_v4();
+    let profile = profiles
+        .upsert_profile(&format!("playlist-user-{unique}"), Some("Ada"), true)
+        .await
+        .expect("profile should be created");
+    let other_profile = profiles
+        .upsert_profile(&format!("playlist-other-{unique}"), Some("Grace"), true)
+        .await
+        .expect("other profile should be created");
+
+    let artist_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO artists (name, sort_name)
+            VALUES ($1, $2)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("Playlist Artist {unique}"))
+    .bind(format!("playlist artist {unique}"))
+    .fetch_one(&pool)
+    .await
+    .expect("artist should be inserted");
+
+    let album_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO albums (title, artist_id)
+            VALUES ($1, $2::uuid)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("Playlist Album {unique}"))
+    .bind(&artist_id)
+    .fetch_one(&pool)
+    .await
+    .expect("album should be inserted");
+
+    let track_id: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO tracks (title, artist_id, album_id, duration_ms)
+            VALUES ($1, $2::uuid, $3::uuid, 1000)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("Playlist Track A {unique}"))
+    .bind(&artist_id)
+    .bind(&album_id)
+    .fetch_one(&pool)
+    .await
+    .expect("first track should be inserted");
+
+    let track_id_2: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO tracks (title, artist_id, album_id, duration_ms)
+            VALUES ($1, $2::uuid, $3::uuid, 2000)
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("Playlist Track B {unique}"))
+    .bind(&artist_id)
+    .bind(&album_id)
+    .fetch_one(&pool)
+    .await
+    .expect("second track should be inserted");
+
+    let created = playlists
+        .create_playlist(&profile.id, "Road Mix", "For drives")
+        .await
+        .expect("playlist should be created");
+    assert_eq!(created.name, "Road Mix");
+
+    let updated = playlists
+        .update_playlist(&profile.id, &created.id, "Night Drive", "Late routes")
+        .await
+        .expect("playlist should update");
+    assert_eq!(updated.description, "Late routes");
+
+    let playlist_page = playlists
+        .list_playlists(
+            &profile.id,
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("playlists should list");
+    assert_eq!(playlist_page.total_count, 1);
+
+    playlists
+        .add_track(&profile.id, &created.id, &track_id, None)
+        .await
+        .expect("track should add");
+    playlists
+        .add_track(&profile.id, &created.id, &track_id, None)
+        .await
+        .expect("duplicate track add should be idempotent");
+    playlists
+        .add_track(&profile.id, &created.id, &track_id_2, Some(0))
+        .await
+        .expect("second track should add");
+
+    let page = playlists
+        .list_tracks(
+            &profile.id,
+            &created.id,
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("playlist tracks should list");
+    assert_eq!(page.total_count, 2);
+
+    playlists
+        .reorder_tracks(
+            &profile.id,
+            &created.id,
+            &[track_id.clone(), track_id_2.clone()],
+        )
+        .await
+        .expect("playlist tracks should reorder");
+
+    playlists
+        .remove_track(&profile.id, &created.id, &track_id_2)
+        .await
+        .expect("track should remove");
+    playlists
+        .remove_track(&profile.id, &created.id, &track_id_2)
+        .await
+        .expect("second remove should be idempotent");
+
+    let other_profile_result = playlists
+        .list_tracks(
+            &other_profile.id,
+            &created.id,
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await;
+    assert!(matches!(
+        other_profile_result,
+        Err(canopy_core::CanopyError::NotFound { .. })
+    ));
+
+    playlists
+        .delete_playlist(&profile.id, &created.id)
+        .await
+        .expect("playlist should delete");
+    let deleted = playlists
+        .delete_playlist(&profile.id, &created.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(deleted, canopy_core::CanopyError::NotFound { .. }));
+
+    let _ = sqlx::query("DELETE FROM profiles WHERE id = $1::uuid")
+        .bind(&profile.id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM profiles WHERE id = $1::uuid")
+        .bind(&other_profile.id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM tracks WHERE id IN ($1::uuid, $2::uuid)")
+        .bind(&track_id)
+        .bind(&track_id_2)
         .execute(&pool)
         .await;
     let _ = sqlx::query("DELETE FROM albums WHERE id = $1::uuid")

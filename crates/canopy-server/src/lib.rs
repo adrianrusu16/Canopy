@@ -32,6 +32,7 @@ pub mod library;
 pub mod likes;
 pub mod observability;
 pub mod playback;
+pub mod playlists;
 pub mod preferences;
 pub mod profile;
 pub mod providers;
@@ -49,11 +50,13 @@ use health::HealthService;
 use history::HistoryService;
 use jade_store::{
     InMemoryAudioAssetStore, InMemoryCatalog, InMemoryLibraryStore, InMemoryLikeStore,
-    InMemoryPlaybackHistoryStore, InMemoryPreferencesStore, InMemorySessionStore,
+    InMemoryPlaybackHistoryStore, InMemoryPlaylistStore, InMemoryPreferencesStore,
+    InMemorySessionStore,
 };
 use library::LibraryService;
 use likes::LikeService;
 use playback::{PlaybackService, ResolverConfig, ResolverService};
+use playlists::PlaylistService;
 use preferences::PreferencesService;
 use profile::ProfileService;
 use search::SearchService;
@@ -103,6 +106,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let library_repo: Arc<dyn canopy_core::LibraryRepository>;
     let like_repo: Arc<dyn canopy_core::LikeRepository>;
     let preferences_repo: Arc<dyn canopy_core::PreferencesRepository>;
+    let playlist_repo: Arc<dyn canopy_core::PlaylistRepository>;
     let health: HealthService;
 
     #[cfg(feature = "pg")]
@@ -169,6 +173,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 like_repo = Arc::new(jade_store::PgLikeRepository::new((*pool).clone()));
                 preferences_repo =
                     Arc::new(jade_store::PgPreferencesRepository::new((*pool).clone()));
+                playlist_repo = Arc::new(jade_store::PgPlaylistRepository::new((*pool).clone()));
                 health = HealthService::with_db(pool).with_rustfs(
                     config
                         .health_check_rustfs
@@ -196,6 +201,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 library_repo = Arc::new(InMemoryLibraryStore::default());
                 like_repo = Arc::new(InMemoryLikeStore::default());
                 preferences_repo = Arc::new(InMemoryPreferencesStore::default());
+                playlist_repo = Arc::new(InMemoryPlaylistStore::default());
                 health = HealthService::new().with_rustfs(
                     config
                         .health_check_rustfs
@@ -217,6 +223,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         library_repo = Arc::new(InMemoryLibraryStore::default());
         like_repo = Arc::new(InMemoryLikeStore::default());
         preferences_repo = Arc::new(InMemoryPreferencesStore::default());
+        playlist_repo = Arc::new(InMemoryPlaylistStore::default());
         health = HealthService::new().with_rustfs(
             config
                 .health_check_rustfs
@@ -229,11 +236,12 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let search = SearchService::new(catalog_repo);
     let playback = PlaybackService::new(session_repo);
     let auth = AuthService::new(config.auth_token_secret.clone());
-    let profile = ProfileService::new(profile_repo.clone());
+    let profile = ProfileService::new(profile_repo.clone(), history_repo.clone());
     let history = HistoryService::new(profile_repo.clone(), history_repo);
     let library = LibraryService::new(profile_repo.clone(), library_repo);
     let likes = LikeService::new(profile_repo.clone(), like_repo);
-    let preferences = PreferencesService::new(profile_repo, preferences_repo);
+    let preferences = PreferencesService::new(profile_repo.clone(), preferences_repo);
+    let playlists = PlaylistService::new(profile_repo, playlist_repo);
     let discovery = DiscoveryService::new(discovery_repo);
 
     // Playback resolver: selects an asset and mints a short-lived stream URL.
@@ -275,6 +283,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         library,
         likes,
         preferences,
+        playlists,
         health,
         resolver,
         discovery,
