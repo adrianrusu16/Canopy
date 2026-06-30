@@ -9,6 +9,8 @@ mod memory;
 
 #[cfg(feature = "pg")]
 mod pg;
+#[cfg(feature = "pg")]
+mod pg_media_import;
 
 pub use memory::{
     InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
@@ -23,3 +25,6 @@ pub use pg::{
     PgLikeRepository, PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
     PgProfileRepository, PgSessionRepository,
 };
+
+#[cfg(feature = "pg")]
+pub use pg_media_import::PgMediaImportRepository;

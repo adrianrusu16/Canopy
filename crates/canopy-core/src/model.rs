@@ -265,6 +265,43 @@ pub struct Session {
 }
 
 // ---------------------------------------------------------------------------
+// Local media import model
+// ---------------------------------------------------------------------------
+
+/// Metadata persisted while a managed local-media import is pending.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingMediaImport {
+    /// Application-generated track identifier used by staging and PostgreSQL.
+    pub track_id: String,
+    /// Explicit instance-owner profile that owns this personal track.
+    pub owner_profile_id: String,
+    /// Display title extracted from tags or the source filename.
+    pub title: String,
+    /// Performing artist extracted from tags or the conservative fallback.
+    pub artist: String,
+    /// Album extracted from tags or the conservative fallback.
+    pub album: String,
+    /// Parsed audio duration in milliseconds.
+    pub duration_ms: u64,
+    /// Optional validated relative artwork key in managed storage.
+    pub artwork_storage_key: Option<String>,
+    /// Managed MP3 asset metadata.
+    pub audio: AudioAsset,
+}
+
+/// Result of attempting to persist a pending local-media import.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingImportOutcome {
+    /// A new pending track and asset were inserted.
+    Inserted,
+    /// Another import already owns the same audio checksum.
+    Duplicate {
+        /// Existing track identifier selected by checksum.
+        track_id: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Provider ingestion model
 // ---------------------------------------------------------------------------
 

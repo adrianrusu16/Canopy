@@ -18,8 +18,8 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Playback Resolver         | Transition | Public asset lookup is policy-scoped and uses generic `storage_key` values. RustFS/Supabase URL adapters remain temporary compatibility code. |
 | Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable state is profile-owned; history supports chronological reads and deletion, and disabling consent atomically purges it. Anonymous users receive no backend history, library, likes, preferences, or playlists. |
 | Provider Adapters         | Transition | Legacy fixture/Supabase ingestion remains idempotent but every insert and re-ingest is forced into quarantine. |
-| Persistence (PostgreSQL)  | Partial | Typed adapters now cover explicit instance ownership, media policy, dual-license review, and fail-closed public promotion. |
-| Music storage             | Transition | The schema uses backend-neutral `storage_key` paths. Local import and Nginx protected streaming are the next phases. |
+| Persistence (PostgreSQL)  | Partial | Typed adapters cover ownership, media policy, local-import transactions, checksum deduplication, and fail-closed promotion. |
+| Music storage             | Transition | MP3 and artwork import into content-addressed local storage is implemented. Nginx protected streaming remains next. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
 | Health checks             | Partial | PostgreSQL health is implemented. The optional RustFS probe remains only for compatibility during cutover. |
 | CI / Verification         | ✅ Implemented | GitHub Actions gates `master` with fmt, all-feature Clippy, default tests, a fail-closed disposable PostgreSQL integration harness, and a release build. Proto compatibility gates are still planned. |
@@ -30,9 +30,29 @@ Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
 
 Canopy is moving to a fully owned local-media architecture. PostgreSQL remains the metadata and policy authority; audio, artwork, retained originals, and quarantined files will live under `/srv/canopy/media`; Nginx will serve authorized files with HTTPS and byte-range support. Supabase and RustFS are no longer part of the target architecture.
 
-Phase 1 is implemented: storage fields use `storage_key`, one profile can be assigned as the instance owner, catalog and asset repositories expose separate public and owner-scoped paths, public promotion requires approved composition and recording licenses, license revocation quarantines affected tracks atomically, and all legacy provider ingest is quarantined. Existing rows were deliberately not inferred to be legally safe.
+Phases 1 and 2 are implemented. Storage fields use `storage_key`; one existing profile can be assigned as the instance owner; catalog and asset repositories separate public and owner-scoped paths; and `canopy-admin` imports MP3 files and optional artwork into content-addressed managed storage. PostgreSQL records each import as personal and pending before file finalization, then exposes it to the matching owner only after the row becomes ready. Checksum uniqueness makes retries idempotent.
 
-The filesystem importer, `canopy-admin owner set <external-user-id>` CLI, owner-only personal-media gRPC surface, Nginx/X-Accel streaming, playback cutover, and final Supabase/RustFS removal are subsequent phases. Until then, the old playback adapters and related environment variables are compatibility code, not the destination.
+The owner-only personal-media gRPC surface, Nginx/X-Accel streaming, playback cutover, reconciliation tooling, universal artwork fallback, and final Supabase/RustFS removal remain subsequent phases. Until then, the old playback adapters and related environment variables are compatibility code, not the destination.
+#### Owner and local media administration
+
+Apply the migration chain and create the profile before assigning it as the instance owner. The admin process is intentionally stricter than the server: both the database URL and managed media root are required, and it never falls back to in-memory storage.
+
+```bash
+export CANOPY_DATABASE_URL='postgres://canopy:canopy@localhost:5432/canopy'
+export CANOPY_MEDIA_ROOT='/srv/canopy/media'
+
+cargo run -p canopy-server --features pg --bin canopy-admin -- \
+  owner set <external-user-id>
+
+cargo run -p canopy-server --features pg --bin canopy-admin -- \
+  media import /path/to/track-or-directory
+```
+
+`CANOPY_MAX_AUDIO_BYTES` and `CANOPY_MAX_ARTWORK_BYTES` optionally override the 2 GiB audio and 20 MiB artwork limits. Values must be positive integers.
+
+The importer accepts one MP3 file or the top-level MP3 files in one directory; directory traversal is deliberately non-recursive and deterministic. Metadata comes from the MP3 tags with conservative fallbacks. Artwork selection is embedded cover first, then `cover.jpg`, then `cover.png`; missing artwork is valid. Source files are never modified or deleted, and absolute source paths are neither persisted nor returned in JSON output.
+
+Each new import is staged under `staging/<track-id>`, inserted into PostgreSQL as `personal` + `pending` + `local_admin`, finalized into `library/audio/<sha-prefix>/<sha>.mp3` and optional `library/artwork/<sha-prefix>/<sha>.<ext>`, then marked `ready`. Pending imports remain invisible. A repeated audio checksum returns the existing track ID instead of creating a second track. Failures before persistence discard staging; failures after persistence retain recoverable pending state.
 
 ## Ecosystem Overview
 
@@ -324,7 +344,7 @@ Provider adapters ingest catalog content from external sources — Musopen, Pixa
 
 The legacy ingestion boundary is `CatalogIngest`. Inserts and re-ingests are idempotent, but both explicitly set `visibility='quarantined'` and `ingest_status='quarantined'`. Imported content cannot reach anonymous browse, search, discovery, or playback without a separate review and promotion step.
 
-The target importer will validate and fingerprint real files from Canopy's incoming directory, write managed library paths, and record provenance. It replaces the provider adapters rather than extending them.
+The local importer validates and fingerprints real MP3 files, writes managed content-addressed library paths, and records `local_admin` provenance. It is a separate owner-only administrative path rather than an extension of provider ingest.
 
 ---
 
@@ -344,11 +364,11 @@ flowchart LR
     NGINX --> MEDIA
 ```
 
-PostgreSQL stores metadata, ownership, visibility, ingest state, provenance, and license review. Binary media is never stored in PostgreSQL. The target filesystem layout is:
+PostgreSQL stores metadata, ownership, visibility, ingest state, provenance, and license review. Binary media is never stored in PostgreSQL. The managed filesystem layout is:
 
 ```text
 /srv/canopy/media/
-|-- incoming/
+|-- staging/
 |-- library/
 |   |-- audio/
 |   `-- artwork/
@@ -358,7 +378,7 @@ PostgreSQL stores metadata, ownership, visibility, ingest state, provenance, and
 
 `audio_assets.storage_key` and artwork storage keys are validated relative paths under this managed root. Nginx, not the gRPC process, will serve files after Canopy authorizes a public or owner-scoped request.
 
-The schema foundation is implemented. Directory management, the import CLI, Nginx protected locations, and playback cutover are not. RustFS and Supabase remain only as temporary compatibility infrastructure.
+The schema foundation, managed directory creation, and import CLI are implemented. Nginx protected locations, owner-scoped playback delivery, reconciliation, and playback cutover remain. RustFS and Supabase are temporary compatibility infrastructure only.
 
 ### PostgreSQL
 
@@ -665,7 +685,10 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_SUPABASE_SYNC_ON_START` | `false` | In PostgreSQL mode, fetch and ingest Supabase catalog rows during startup |
 | `CANOPY_ADMINER_PORT` | `8080` | Adminer host port |
 | `CANOPY_GRPC_ADDR` | `[::1]:50051` | gRPC server bind address |
-| `CANOPY_DATABASE_URL` | `postgres://canopy:canopy@localhost:5432/canopy` | PostgreSQL connection string |
+| `CANOPY_DATABASE_URL` | `postgres://canopy:canopy@localhost:5432/canopy` | PostgreSQL connection string; required explicitly by `canopy-admin` |
+| `CANOPY_MEDIA_ROOT` | unset | Managed media root; required by `canopy-admin` |
+| `CANOPY_MAX_AUDIO_BYTES` | `2147483648` | Maximum MP3 import size for `canopy-admin` |
+| `CANOPY_MAX_ARTWORK_BYTES` | `20971520` | Maximum embedded or sidecar artwork size for `canopy-admin` |
 | `CANOPY_PROVIDER_FIXTURE_PATH` | unset | Optional provider fixture JSON to ingest at startup when running with `canopy-server/pg` |
 
 ### sqlx Compile-Time Checks

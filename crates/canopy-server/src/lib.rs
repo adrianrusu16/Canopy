@@ -20,6 +20,7 @@ use canopy_proto::canopy_server::CanopyServer;
 use tonic::transport::Server;
 use tracing::info;
 
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod catalog;
@@ -30,6 +31,7 @@ pub mod history;
 pub mod jade_store;
 pub mod library;
 pub mod likes;
+pub mod media;
 pub mod observability;
 pub mod owner;
 pub mod playback;

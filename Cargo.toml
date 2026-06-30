@@ -38,6 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 # Domain utilities
 async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
 thiserror = "2.0.18"
 uuid = { version = "1.6", features = ["v4"] }
 ulid = "1.1"
@@ -46,6 +47,7 @@ ulid = "1.1"
 hmac = "0.13.0"
 sha2 = "0.11.0"
 hex = "0.4"
+lofty = "0.24.0"
 
 # Test utilities
 mockall = "0.14.0"

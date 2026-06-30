@@ -8,8 +8,9 @@ use async_trait::async_trait;
 
 use crate::error::CanopyResult;
 use crate::model::{
-    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PlaybackHistoryEvent, PlaybackHistoryPage,
-    Playlist, PlaylistPage, ProfilePreferences, ProviderTrack, Session, TrackLike, UserProfile,
+    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PendingImportOutcome, PendingMediaImport,
+    PlaybackHistoryEvent, PlaybackHistoryPage, Playlist, PlaylistPage, ProfilePreferences,
+    ProviderTrack, Session, TrackLike, UserProfile,
 };
 
 /// Read access to public and owner-scoped catalog partitions.
@@ -114,6 +115,25 @@ pub trait InstanceSettingsRepository: Send + Sync {
 
     /// Returns the assigned owner profile, if ownership has been configured.
     async fn owner_profile_id(&self) -> CanopyResult<Option<String>>;
+}
+
+/// Persistence boundary for recoverable local-media imports.
+#[async_trait]
+pub trait MediaImportRepository: Send + Sync {
+    /// Finds a track that already owns the case-insensitive audio checksum.
+    async fn find_track_by_audio_checksum(
+        &self,
+        checksum_sha256: &str,
+    ) -> CanopyResult<Option<String>>;
+
+    /// Atomically persists one personal pending track and its MP3 asset.
+    async fn insert_pending(
+        &self,
+        pending: &PendingMediaImport,
+    ) -> CanopyResult<PendingImportOutcome>;
+
+    /// Publishes a fully placed personal import to owner-scoped catalog reads.
+    async fn mark_ready(&self, track_id: &str) -> CanopyResult<()>;
 }
 
 /// Persistence of durable playback history for logged-in profiles.

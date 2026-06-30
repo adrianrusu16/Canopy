@@ -1,15 +1,15 @@
 #![cfg(feature = "pg")]
 
 use canopy_core::{
-    AudioAssetRepository, CatalogIngest, CatalogRepository, InstanceSettingsRepository,
-    LibraryRepository, LikeRepository, Page, PlaybackHistoryEvent, PlaybackHistoryRepository,
-    PlaylistRepository, PreferencesRepository, ProfileRepository, ProviderAudioAsset,
-    ProviderLicense, ProviderTrack,
+    AudioAsset, AudioAssetRepository, CatalogIngest, CatalogRepository, InstanceSettingsRepository,
+    LibraryRepository, LikeRepository, MediaImportRepository, Page, PendingImportOutcome,
+    PendingMediaImport, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
+    PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
 };
 use canopy_server::jade_store::{
     PgAudioAssetRepository, PgCatalogRepository, PgInstanceSettingsRepository, PgLibraryRepository,
-    PgLikeRepository, PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
-    PgProfileRepository,
+    PgLikeRepository, PgMediaImportRepository, PgPlaybackHistoryRepository, PgPlaylistRepository,
+    PgPreferencesRepository, PgProfileRepository,
 };
 use sqlx::{Row, postgres::PgPoolOptions};
 
@@ -292,6 +292,27 @@ fn local_media_foundation_migration_is_fail_closed() {
     }
 }
 
+#[test]
+fn local_media_import_migration_is_deduplicated_and_attributed() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/20250629000002_local_media_imports.sql"
+    );
+    let sql = std::fs::read_to_string(path).expect("local media import migration should exist");
+
+    for required in [
+        "ingest_source",
+        "legacy_provider",
+        "local_admin",
+        "uq_audio_assets_checksum_sha256",
+        "LOWER(checksum_sha256)",
+        "^[0-9a-fA-F]{64}$",
+        "duplicate audio checksums prevent local import uniqueness",
+    ] {
+        assert!(sql.contains(required), "migration is missing {required}");
+    }
+}
+
 struct PolicyTrackFixture<'a> {
     title: String,
     visibility: &'a str,
@@ -344,7 +365,7 @@ async fn insert_policy_track(
     )
     .bind(&track_id)
     .bind(format!("audio/{track_id}.mp3"))
-    .bind("a".repeat(64))
+    .bind(track_id.replace('-', "").repeat(2))
     .execute(pool)
     .await
     .expect("policy asset should insert");
@@ -1283,4 +1304,183 @@ async fn postgres_repositories_support_profile_owned_playlists() {
         .bind(&artist_id)
         .execute(&pool)
         .await;
+}
+fn pending_local_import(owner_profile_id: &str, checksum: &str) -> PendingMediaImport {
+    let track_id = uuid::Uuid::new_v4().to_string();
+    let checksum = checksum.to_ascii_lowercase();
+    PendingMediaImport {
+        track_id: track_id.clone(),
+        owner_profile_id: owner_profile_id.to_string(),
+        title: "Imported Test Tone".into(),
+        artist: "Local Import Artist".into(),
+        album: "Local Import Album".into(),
+        duration_ms: 1_000,
+        artwork_storage_key: Some(format!("artwork/aa/bb/{checksum}.jpg")),
+        audio: AudioAsset {
+            track_id,
+            codec: "mp3".into(),
+            content_type: "audio/mpeg".into(),
+            storage_key: format!(
+                "audio/{}/{}/{}.mp3",
+                &checksum[0..2],
+                &checksum[2..4],
+                checksum
+            ),
+            size_bytes: 1_024,
+            checksum_sha256: checksum,
+            duration_ms: 1_000,
+        },
+    }
+}
+
+#[tokio::test]
+async fn postgres_local_import_is_deduplicated_and_hidden_until_ready() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let profiles = PgProfileRepository::new(pool.clone());
+    let owner = profiles
+        .upsert_profile(
+            &format!("local-import-owner-{}", uuid::Uuid::new_v4()),
+            None,
+            false,
+        )
+        .await
+        .expect("owner profile should be created");
+    let repository = PgMediaImportRepository::new(pool.clone());
+    let catalog = PgCatalogRepository::new(pool.clone());
+    let checksum = uuid::Uuid::new_v4().simple().to_string().repeat(2);
+    let pending = pending_local_import(&owner.id, &checksum);
+
+    assert_eq!(
+        repository
+            .find_track_by_audio_checksum(&checksum.to_ascii_uppercase())
+            .await
+            .expect("checksum lookup should succeed"),
+        None
+    );
+    assert_eq!(
+        repository
+            .insert_pending(&pending)
+            .await
+            .expect("pending import should insert"),
+        PendingImportOutcome::Inserted
+    );
+
+    let stored: (String, String, String, String, Option<String>, String) = sqlx::query_as(
+        r#"
+            SELECT t.owner_profile_id::text, t.visibility, t.ingest_status,
+                   t.ingest_source, t.artwork_storage_key, aa.storage_key
+            FROM tracks t
+            JOIN audio_assets aa ON aa.track_id = t.id
+            WHERE t.id = $1::uuid
+        "#,
+    )
+    .bind(&pending.track_id)
+    .fetch_one(&pool)
+    .await
+    .expect("pending import should be stored");
+    assert_eq!(stored.0, owner.id);
+    assert_eq!(
+        (&stored.1, &stored.2, &stored.3),
+        (&"personal".into(), &"pending".into(), &"local_admin".into())
+    );
+    assert_eq!(stored.4, pending.artwork_storage_key);
+    assert_eq!(stored.5, pending.audio.storage_key);
+
+    assert!(
+        catalog
+            .get_public_media(&pending.track_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get_personal_media(&owner.id, &pending.track_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        repository
+            .find_track_by_audio_checksum(&checksum.to_ascii_uppercase())
+            .await
+            .unwrap(),
+        Some(pending.track_id.clone())
+    );
+
+    repository
+        .mark_ready(&pending.track_id)
+        .await
+        .expect("pending import should become ready");
+    assert!(
+        catalog
+            .get_public_media(&pending.track_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get_personal_media(&owner.id, &pending.track_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let duplicate = pending_local_import(&owner.id, &checksum.to_ascii_uppercase());
+    assert_eq!(
+        repository
+            .insert_pending(&duplicate)
+            .await
+            .expect("duplicate checksum should resolve cleanly"),
+        PendingImportOutcome::Duplicate {
+            track_id: pending.track_id.clone()
+        }
+    );
+    let checksum_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audio_assets WHERE LOWER(checksum_sha256) = LOWER($1)",
+    )
+    .bind(&checksum)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(checksum_count, 1);
+
+    sqlx::query("DELETE FROM tracks WHERE id = $1::uuid")
+        .bind(&pending.track_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM profiles WHERE id = $1::uuid")
+        .bind(&owner.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_local_import_rejects_unknown_owner() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+    let repository = PgMediaImportRepository::new(pool.clone());
+    let checksum = uuid::Uuid::new_v4().simple().to_string().repeat(2);
+    let pending = pending_local_import(&uuid::Uuid::new_v4().to_string(), &checksum);
+
+    let error = repository.insert_pending(&pending).await.unwrap_err();
+
+    assert!(matches!(error, canopy_core::CanopyError::Storage(_)));
+    let track_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE id = $1::uuid")
+        .bind(&pending.track_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(track_count, 0);
 }

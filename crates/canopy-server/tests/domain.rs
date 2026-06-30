@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CatalogRepository, IngestStatus, MediaItem, MediaVisibility,
-    Page,
+    Page, PendingImportOutcome, PendingMediaImport,
 };
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
@@ -36,6 +36,38 @@ fn sample_items() -> Vec<MediaItem> {
 
 fn page(limit: u32, offset: u32) -> Page {
     Page { limit, offset }
+}
+
+#[test]
+fn pending_media_import_carries_only_managed_metadata() {
+    let pending = PendingMediaImport {
+        track_id: "018f0000-0000-7000-8000-000000000001".into(),
+        owner_profile_id: "018f0000-0000-7000-8000-000000000002".into(),
+        title: "Test Tone".into(),
+        artist: "Canopy Tests".into(),
+        album: "Importer Fixtures".into(),
+        duration_ms: 1_000,
+        artwork_storage_key: Some("artwork/aa/bb/hash.jpg".into()),
+        audio: AudioAsset {
+            track_id: "018f0000-0000-7000-8000-000000000001".into(),
+            codec: "mp3".into(),
+            content_type: "audio/mpeg".into(),
+            storage_key: "audio/aa/bb/hash.mp3".into(),
+            size_bytes: 1_024,
+            checksum_sha256: "a".repeat(64),
+            duration_ms: 1_000,
+        },
+    };
+
+    assert_eq!(pending.audio.track_id, pending.track_id);
+    assert_eq!(
+        PendingImportOutcome::Duplicate {
+            track_id: "existing".into(),
+        },
+        PendingImportOutcome::Duplicate {
+            track_id: "existing".into(),
+        }
+    );
 }
 
 fn scoped_item(id: &str, title: &str) -> MediaItem {
