@@ -16,7 +16,7 @@ service Canopy {
   rpc SetPlaybackSpeed(SetPlaybackSpeedRequest) returns (SetPlaybackSpeedResponse);
   rpc Stop(StopRequest) returns (StopResponse);
 
-  // ---------- Playback resolution (presigned URL) ----------
+  // ---------- Playback resolution (short-lived stream capability) ----------
   rpc ResolvePlayback(PlaybackRequest) returns (PlaybackSource);
 
   // ---------- Discovery (shuffle channel) ----------
@@ -134,7 +134,7 @@ message StopRequest {
 message StopResponse { bool success = 1; }
 
 /* -------------------------------------------------
-   Playback resolution — presigned URL for a track
+   Playback resolution - short-lived Canopy stream capability
    ------------------------------------------------- */
 message PlaybackRequest {
   string track_id = 1;
