@@ -2,7 +2,10 @@
 //!
 //! Reports process liveness, build version, and dependency readiness.
 
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[cfg(feature = "pg")]
 use std::sync::Arc;
@@ -59,6 +62,7 @@ pub struct HealthService {
     #[cfg(feature = "pg")]
     db_pool: Option<Arc<sqlx::PgPool>>,
     rustfs_endpoint: Option<String>,
+    media_root: Option<PathBuf>,
 }
 
 impl HealthService {
@@ -68,12 +72,18 @@ impl HealthService {
             #[cfg(feature = "pg")]
             db_pool: None,
             rustfs_endpoint: None,
+            media_root: None,
         }
     }
 
     /// Adds an optional RustFS endpoint probe.
     pub fn with_rustfs(mut self, endpoint: Option<String>) -> Self {
         self.rustfs_endpoint = endpoint;
+        self
+    }
+    /// Adds the managed media root whose `library/` directory must be readable.
+    pub fn with_media_root(mut self, media_root: PathBuf) -> Self {
+        self.media_root = Some(media_root);
         self
     }
 
@@ -83,6 +93,7 @@ impl HealthService {
         Self {
             db_pool: Some(pool),
             rustfs_endpoint: None,
+            media_root: None,
         }
     }
 
@@ -99,6 +110,10 @@ impl HealthService {
             dependencies.push(check_tcp_endpoint("rustfs", endpoint).await);
         }
 
+        if let Some(media_root) = &self.media_root {
+            dependencies.push(check_media_library(media_root).await);
+        }
+
         let status = aggregate(&dependencies);
 
         HealthStatus {
@@ -107,6 +122,35 @@ impl HealthService {
             version: env!("CARGO_PKG_VERSION").to_string(),
             dependencies,
         }
+    }
+}
+
+async fn check_media_library(media_root: &Path) -> DependencyStatus {
+    let library = media_root.join("library");
+    let result = async {
+        let metadata = tokio::fs::metadata(&library).await?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "managed library path is not a directory",
+            ));
+        }
+        let _ = tokio::fs::read_dir(&library).await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => DependencyStatus {
+            name: "media_library".into(),
+            status: HealthState::Healthy,
+            message: "managed library directory is readable".into(),
+        },
+        Err(error) => DependencyStatus {
+            name: "media_library".into(),
+            status: HealthState::Unhealthy,
+            message: error.to_string(),
+        },
     }
 }
 
@@ -197,6 +241,22 @@ fn aggregate(dependencies: &[DependencyStatus]) -> HealthState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn media_library_readiness_requires_a_readable_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let health = HealthService::new().with_media_root(root.path().to_path_buf());
+
+        let missing = health.check().await;
+        assert_eq!(missing.status, HealthState::Unhealthy);
+        assert_eq!(missing.dependencies[0].name, "media_library");
+
+        tokio::fs::create_dir(root.path().join("library"))
+            .await
+            .unwrap();
+        let ready = health.check().await;
+        assert_eq!(ready.status, HealthState::Healthy);
+    }
 
     #[test]
     fn endpoint_socket_addr_defaults_ports() {

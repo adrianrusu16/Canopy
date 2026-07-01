@@ -8,9 +8,10 @@ use async_trait::async_trait;
 
 use crate::error::CanopyResult;
 use crate::model::{
-    AudioAsset, LibraryItem, MediaItem, MediaPage, Page, PendingImportOutcome, PendingMediaImport,
-    PlaybackHistoryEvent, PlaybackHistoryPage, Playlist, PlaylistPage, ProfilePreferences,
-    ProviderTrack, Session, TrackLike, UserProfile,
+    AudioAsset, AuthorizedStreamAsset, LibraryItem, MediaItem, MediaPage, Page,
+    PendingImportOutcome, PendingMediaImport, PlayableAsset, PlaybackHistoryEvent,
+    PlaybackHistoryPage, Playlist, PlaylistPage, ProfilePreferences, ProviderTrack, Session,
+    StreamAudience, TrackLike, UserProfile,
 };
 
 /// Read access to public and owner-scoped catalog partitions.
@@ -71,6 +72,20 @@ pub trait AudioAssetRepository: Send + Sync {
         owner_profile_id: &str,
         track_id: &str,
     ) -> CanopyResult<Vec<AudioAsset>>;
+}
+
+/// Playback asset access scoped to capability issuance and authorization.
+#[async_trait]
+pub trait PlayableAssetRepository: Send + Sync {
+    /// Returns selectable assets for a release-safe, ready track.
+    async fn assets_for_public_playback(&self, track_id: &str) -> CanopyResult<Vec<PlayableAsset>>;
+
+    /// Re-evaluates current policy before exposing an asset's storage metadata.
+    async fn authorize_stream_asset(
+        &self,
+        asset_id: &str,
+        audience: StreamAudience,
+    ) -> CanopyResult<Option<AuthorizedStreamAsset>>;
 }
 
 /// Persistence of lightweight playback sessions.

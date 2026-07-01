@@ -3,13 +3,15 @@
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CatalogIngest, CatalogRepository, InstanceSettingsRepository,
     LibraryRepository, LikeRepository, MediaImportRepository, Page, PendingImportOutcome,
-    PendingMediaImport, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
-    PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
+    PendingMediaImport, PlayableAssetRepository, PlaybackHistoryEvent, PlaybackHistoryRepository,
+    PlaylistRepository, PreferencesRepository, ProfileRepository, ProviderAudioAsset,
+    ProviderLicense, ProviderTrack, StreamAudience,
 };
 use canopy_server::jade_store::{
     PgAudioAssetRepository, PgCatalogRepository, PgInstanceSettingsRepository, PgLibraryRepository,
-    PgLikeRepository, PgMediaImportRepository, PgPlaybackHistoryRepository, PgPlaylistRepository,
-    PgPreferencesRepository, PgProfileRepository,
+    PgLikeRepository, PgMediaImportRepository, PgPlayableAssetRepository,
+    PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
+    PgProfileRepository,
 };
 use sqlx::{Row, postgres::PgPoolOptions};
 
@@ -538,6 +540,81 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
             .unwrap()
             .len(),
         1
+    );
+    let stream_assets = PgPlayableAssetRepository::new(pool.clone());
+    let public_playable = stream_assets
+        .assets_for_public_playback(&public_id)
+        .await
+        .unwrap();
+    assert_eq!(public_playable.len(), 1);
+    assert!(
+        stream_assets
+            .assets_for_public_playback(&personal_a_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let public_asset_id = public_playable[0].asset_id.clone();
+    let personal_asset_id: String =
+        sqlx::query_scalar("SELECT id::text FROM audio_assets WHERE track_id = $1::uuid")
+            .bind(&personal_a_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert!(
+        stream_assets
+            .authorize_stream_asset(&public_asset_id, StreamAudience::Public)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        stream_assets
+            .authorize_stream_asset(&public_asset_id, StreamAudience::Personal)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        stream_assets
+            .authorize_stream_asset(&personal_asset_id, StreamAudience::Personal)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        stream_assets
+            .authorize_stream_asset(&personal_asset_id, StreamAudience::Public)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        stream_assets
+            .authorize_stream_asset(
+                "018f0000-0000-7000-8000-000000000099",
+                StreamAudience::Public,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    sqlx::query(
+        "UPDATE tracks SET visibility = 'quarantined', ingest_status = 'quarantined' WHERE id = $1::uuid",
+    )
+    .bind(&public_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stream_assets
+            .authorize_stream_asset(&public_asset_id, StreamAudience::Public)
+            .await
+            .unwrap()
+            .is_none()
     );
 
     let promotable_id = insert_policy_track(

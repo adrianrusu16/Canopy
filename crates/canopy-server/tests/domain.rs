@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, CatalogRepository, IngestStatus, MediaItem, MediaVisibility,
-    Page, PendingImportOutcome, PendingMediaImport,
+    AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CatalogRepository, IngestStatus,
+    MediaItem, MediaVisibility, Page, PendingImportOutcome, PendingMediaImport, PlayableAsset,
+    PlayableAssetRepository, StreamAudience,
 };
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
@@ -68,6 +69,27 @@ fn pending_media_import_carries_only_managed_metadata() {
             track_id: "existing".into(),
         }
     );
+}
+
+#[test]
+fn stream_assets_carry_identity_and_relative_keys_without_urls() {
+    let playable = PlayableAsset {
+        asset_id: "018f0000-0000-7000-8000-000000000001".into(),
+        track_id: "018f0000-0000-7000-8000-000000000002".into(),
+        codec: "mp3".into(),
+        content_type: "audio/mpeg".into(),
+        duration_ms: 1_000,
+    };
+    let authorized = AuthorizedStreamAsset {
+        asset_id: playable.asset_id.clone(),
+        storage_key: "audio/aa/bb/hash.mp3".into(),
+        content_type: playable.content_type.clone(),
+    };
+
+    assert_eq!(StreamAudience::Public.as_str(), "public");
+    assert_eq!(StreamAudience::Personal.as_str(), "personal");
+    assert_eq!(authorized.asset_id, playable.asset_id);
+    assert!(!authorized.storage_key.starts_with('/'));
 }
 
 fn scoped_item(id: &str, title: &str) -> MediaItem {
@@ -202,6 +224,17 @@ async fn catalog_scope_public_assets_hide_personal_tracks() {
             .await
             .unwrap()
             .is_empty()
+    );
+
+    let playable = assets.assets_for_public_playback("public").await.unwrap();
+    assert_eq!(playable.len(), 1);
+    assert!(uuid::Uuid::parse_str(&playable[0].asset_id).is_ok());
+    assert!(
+        assets
+            .authorize_stream_asset(&playable[0].asset_id, StreamAudience::Public)
+            .await
+            .unwrap()
+            .is_some()
     );
 }
 

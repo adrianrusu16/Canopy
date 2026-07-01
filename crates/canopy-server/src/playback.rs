@@ -1,18 +1,19 @@
 //! Playback / session service.
 //!
 //! Manages lightweight playback sessions and resolves playable sources. The
-//! [`ResolverService`] implements the architecture's playback resolver: it
-//! selects an audio asset for a track and returns a presigned, time-limited
-//! URL the player streams directly from object storage, keeping Canopy out of
-//! the byte-serving path.
+//! [`ResolverService`] selects a public-ready asset and returns a short-lived
+//! Canopy capability. Nginx delegates authorization back to Canopy and remains
+//! responsible for the byte-serving path.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, PlaybackSource, Session,
-    SessionRepository, UrlSigner,
+    CanopyError, CanopyResult, PlayableAsset, PlayableAssetRepository, PlaybackSource, Session,
+    SessionRepository, StreamAudience,
 };
+
+use crate::stream::StreamTokenCodec;
 
 /// Application service for session state.
 #[derive(Clone)]
@@ -178,13 +179,10 @@ impl PlaybackService {
 /// Configuration for the playback resolver.
 #[derive(Clone, Debug)]
 pub struct ResolverConfig {
-    /// Base URL of the object store, without a trailing slash
-    /// (e.g. `https://rustfs.pandawave.internal`).
-    pub base_url: String,
-    /// Media bucket name (e.g. `pandawave-media`).
-    pub bucket: String,
-    /// How long a minted URL remains valid.
-    pub url_ttl: Duration,
+    /// Public Nginx base URL, without a trailing slash.
+    pub public_base_url: String,
+    /// How long a minted capability remains valid.
+    pub token_ttl: Duration,
     /// Codec short names in preference order; the first available wins.
     pub codec_preference: Vec<String>,
 }
@@ -192,85 +190,46 @@ pub struct ResolverConfig {
 impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
-            base_url: "https://rustfs.pandawave.internal".to_string(),
-            bucket: "pandawave-media".to_string(),
-            url_ttl: Duration::from_secs(15 * 60),
-            // Lossy-but-small first today; only `mp3` is ingested so far, the
-            // rest anticipate future codecs without changing this logic.
+            public_base_url: "https://media.pandawave.internal".to_string(),
+            token_ttl: Duration::from_secs(10 * 60),
             codec_preference: vec!["opus".into(), "mp3".into(), "flac".into()],
         }
     }
 }
 
-/// Mints a playable URL for an object-storage asset.
+/// Legacy URL-provider contract retained for storage adapter compatibility.
+///
+/// Public playback no longer depends on this port; capabilities are minted by
+/// [`ResolverService`] instead.
 #[async_trait::async_trait]
 pub trait PlaybackUrlProvider: Send + Sync {
     /// Returns a stream URL valid until `expires_at_epoch_ms`.
     async fn signed_url(&self, storage_key: &str, expires_at_epoch_ms: u64)
     -> CanopyResult<String>;
 }
-
-struct RustfsUrlProvider {
-    signer: Arc<dyn UrlSigner>,
-    base_url: String,
-    bucket: String,
-}
-
-#[async_trait::async_trait]
-impl PlaybackUrlProvider for RustfsUrlProvider {
-    async fn signed_url(
-        &self,
-        storage_key: &str,
-        expires_at_epoch_ms: u64,
-    ) -> CanopyResult<String> {
-        let signature = self.signer.sign(storage_key, expires_at_epoch_ms);
-        let expires_epoch_s = expires_at_epoch_ms / 1_000;
-        Ok(format!(
-            "{base}/{bucket}/{key}?signature={signature}&expires={expires_epoch_s}",
-            base = self.base_url,
-            bucket = self.bucket,
-            key = storage_key,
-        ))
-    }
-}
-
-/// Playback resolver: turns a track identifier into a presigned, time-limited
-/// [`PlaybackSource`].
+/// Playback resolver: turns a track identifier into a short-lived
+/// [`PlaybackSource`] capability.
 ///
-/// The resolver chooses the preferred codec among a track's assets, embeds an
-/// expiry into the stream URL, and signs it via the [`UrlSigner`] port. It does
-/// not serve bytes itself — the player streams directly from object storage.
+/// The resolver chooses the preferred codec among public-ready assets and signs
+/// only the asset identity, audience, expiry, version, and nonce. Storage keys
+/// remain behind the private authorization boundary.
 #[derive(Clone)]
 pub struct ResolverService {
-    assets: Arc<dyn AudioAssetRepository>,
-    url_provider: Arc<dyn PlaybackUrlProvider>,
+    assets: Arc<dyn PlayableAssetRepository>,
+    tokens: Arc<StreamTokenCodec>,
     config: ResolverConfig,
 }
 
 impl ResolverService {
-    /// Creates a resolver over the given asset repository and URL signer.
+    /// Creates a resolver over current playback policy and capability signing.
     pub fn new(
-        assets: Arc<dyn AudioAssetRepository>,
-        signer: Arc<dyn UrlSigner>,
-        config: ResolverConfig,
-    ) -> Self {
-        let url_provider = Arc::new(RustfsUrlProvider {
-            signer,
-            base_url: config.base_url.clone(),
-            bucket: config.bucket.clone(),
-        });
-        Self::with_url_provider(assets, url_provider, config)
-    }
-
-    /// Creates a resolver with a custom URL provider such as Supabase Storage.
-    pub fn with_url_provider(
-        assets: Arc<dyn AudioAssetRepository>,
-        url_provider: Arc<dyn PlaybackUrlProvider>,
+        assets: Arc<dyn PlayableAssetRepository>,
+        tokens: Arc<StreamTokenCodec>,
         config: ResolverConfig,
     ) -> Self {
         Self {
             assets,
-            url_provider,
+            tokens,
             config,
         }
     }
@@ -288,19 +247,26 @@ impl ResolverService {
         track_id: &str,
         now_epoch_ms: u64,
     ) -> CanopyResult<PlaybackSource> {
-        let assets = self.assets.assets_for_public_track(track_id).await?;
+        let assets = self.assets.assets_for_public_playback(track_id).await?;
         let asset = self
             .select_asset(assets)
             .ok_or_else(|| CanopyError::not_found("audio_asset", track_id))?;
 
-        let expires_at_epoch_ms = now_epoch_ms + self.config.url_ttl.as_millis() as u64;
-        let stream_url = self
-            .url_provider
-            .signed_url(&asset.storage_key, expires_at_epoch_ms)
-            .await?;
+        let ttl_ms = u64::try_from(self.config.token_ttl.as_millis())
+            .map_err(|_| CanopyError::Internal("stream token TTL is too large".into()))?;
+        let expires_at_epoch_ms = now_epoch_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| CanopyError::Internal("stream token expiry overflow".into()))?;
+        let token =
+            self.tokens
+                .mint(&asset.asset_id, StreamAudience::Public, expires_at_epoch_ms)?;
+        let stream_url = format!(
+            "{}/stream/{token}",
+            self.config.public_base_url.trim_end_matches('/')
+        );
 
         Ok(PlaybackSource {
-            track_id: track_id.to_string(),
+            track_id: asset.track_id,
             stream_url,
             content_type: asset.content_type,
             codec: asset.codec,
@@ -327,7 +293,7 @@ impl ResolverService {
     /// Picks the most preferred available asset, falling back to the first one
     /// when none match the preference list (so an ingested-but-unranked codec
     /// is still playable).
-    fn select_asset(&self, assets: Vec<AudioAsset>) -> Option<AudioAsset> {
+    fn select_asset(&self, assets: Vec<PlayableAsset>) -> Option<PlayableAsset> {
         if assets.is_empty() {
             return None;
         }
@@ -352,41 +318,62 @@ fn now_epoch_ms() -> u64 {
 mod tests {
     use super::*;
 
-    use crate::jade_store::{InMemoryAudioAssetStore, InMemorySessionStore};
-    use crate::signing::HmacUrlSigner;
+    use async_trait::async_trait;
+    use canopy_core::{
+        AuthorizedStreamAsset, PlayableAsset, PlayableAssetRepository, StreamAudience,
+    };
 
-    struct StaticUrlProvider;
+    use crate::jade_store::InMemorySessionStore;
+    use crate::stream::StreamTokenCodec;
 
-    #[async_trait::async_trait]
-    impl PlaybackUrlProvider for StaticUrlProvider {
-        async fn signed_url(
+    const SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
+    const ASSET_ID: &str = "018f0000-0000-7000-8000-000000000001";
+
+    struct FakePlayableAssets {
+        assets: Vec<PlayableAsset>,
+    }
+
+    #[async_trait]
+    impl PlayableAssetRepository for FakePlayableAssets {
+        async fn assets_for_public_playback(
             &self,
-            storage_key: &str,
-            _expires_at_epoch_ms: u64,
-        ) -> CanopyResult<String> {
-            Ok(format!("https://media.test/{storage_key}"))
+            track_id: &str,
+        ) -> CanopyResult<Vec<PlayableAsset>> {
+            Ok(self
+                .assets
+                .iter()
+                .filter(|asset| asset.track_id == track_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn authorize_stream_asset(
+            &self,
+            _asset_id: &str,
+            _audience: StreamAudience,
+        ) -> CanopyResult<Option<AuthorizedStreamAsset>> {
+            Ok(None)
         }
     }
 
-    fn asset(track: &str, codec: &str, key: &str) -> AudioAsset {
-        AudioAsset {
+    fn asset(track: &str, codec: &str, _legacy_key: &str) -> PlayableAsset {
+        PlayableAsset {
+            asset_id: ASSET_ID.into(),
             track_id: track.into(),
             codec: codec.into(),
             content_type: format!("audio/{codec}"),
-            storage_key: key.into(),
-            size_bytes: 1_024,
-            checksum_sha256: "deadbeef".into(),
             duration_ms: 245_000,
         }
     }
 
-    fn resolver(assets: Vec<AudioAsset>) -> ResolverService {
+    fn resolver(assets: Vec<PlayableAsset>) -> ResolverService {
         ResolverService::new(
-            Arc::new(InMemoryAudioAssetStore::with_assets(assets)),
-            Arc::new(HmacUrlSigner::new("test-secret")),
+            Arc::new(FakePlayableAssets { assets }),
+            Arc::new(StreamTokenCodec::new(SECRET).unwrap()),
             ResolverConfig {
-                url_ttl: Duration::from_secs(600),
-                ..ResolverConfig::default()
+                public_base_url: "https://media.test".into(),
+                token_ttl: Duration::from_secs(600),
+                codec_preference: vec!["opus".into(), "mp3".into(), "flac".into()],
             },
         )
     }
@@ -406,26 +393,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_embeds_signed_url_and_expiry() {
+    async fn resolve_returns_opaque_public_capability_and_expiry() {
         let resolver = resolver(vec![asset("trk_1", "mp3", "audio/tracks/trk_1.mp3")]);
 
         let now = 1_000_000;
         let source = resolver.resolve_at("trk_1", now).await.unwrap();
 
-        // TTL is 600s => +600_000 ms.
         assert_eq!(source.expires_at_epoch_ms, now + 600_000);
-        assert!(
-            source
-                .stream_url
-                .contains("pandawave-media/audio/tracks/trk_1.mp3")
-        );
-        assert!(source.stream_url.contains("signature="));
-        // URL carries the expiry in epoch seconds.
-        assert!(
-            source
-                .stream_url
-                .contains(&format!("expires={}", (now + 600_000) / 1_000))
-        );
+        let token = source
+            .stream_url
+            .strip_prefix("https://media.test/stream/")
+            .unwrap();
+        let claims = StreamTokenCodec::new(SECRET)
+            .unwrap()
+            .verify(token, now)
+            .unwrap();
+        assert_eq!(claims.asset_id, ASSET_ID);
+        assert_eq!(claims.audience, StreamAudience::Public);
+        assert!(!source.stream_url.contains("audio/tracks"));
+        assert!(!source.stream_url.contains("rustfs"));
+        assert!(!source.stream_url.contains("supabase"));
     }
 
     #[tokio::test]
@@ -445,28 +432,14 @@ mod tests {
     #[tokio::test]
     async fn resolve_for_session_updates_anonymous_session() {
         let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
-        let resolver = ResolverService::with_url_provider(
-            Arc::new(InMemoryAudioAssetStore::with_assets(vec![asset(
-                "trk_1",
-                "mp3",
-                "audio/tracks/trk_1.mp3",
-            )])),
-            Arc::new(StaticUrlProvider),
-            ResolverConfig {
-                url_ttl: Duration::from_secs(600),
-                ..ResolverConfig::default()
-            },
-        );
+        let resolver = resolver(vec![asset("trk_1", "mp3", "audio/tracks/trk_1.mp3")]);
 
         let source = resolver
             .resolve_for_session(&playback, "", "trk_1", 1_000_000)
             .await
             .unwrap();
 
-        assert_eq!(
-            source.stream_url,
-            "https://media.test/audio/tracks/trk_1.mp3"
-        );
+        assert!(source.stream_url.starts_with("https://media.test/stream/"));
         let session = playback
             .get_session(PlaybackService::DEFAULT_SESSION_ID)
             .await

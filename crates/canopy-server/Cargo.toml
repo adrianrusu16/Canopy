@@ -38,6 +38,8 @@ sqlx = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest.workspace = true
+axum.workspace = true
+base64.workspace = true
 
 [features]
 default = []
@@ -47,3 +49,4 @@ fixture = ["canopy-core/serde"]
 [dev-dependencies]
 mockall.workspace = true
 tempfile.workspace = true
+tower.workspace = true

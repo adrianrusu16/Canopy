@@ -11,6 +11,52 @@
       "description": "gRPC server"
     }
   ],
+    "/internal/stream/authorize": {
+      "get": {
+        "summary": "Authorize an Nginx media subrequest",
+        "description": "Infrastructure-only endpoint on the private listener. Clients must use ResolvePlayback and never call this endpoint directly.",
+        "operationId": "AuthorizeStream",
+        "tags": [
+          "Infrastructure"
+        ],
+        "parameters": [
+          {
+            "name": "X-Canopy-Stream-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Authorized; Nginx receives internal redirect metadata.",
+            "headers": {
+              "X-Accel-Redirect": {
+                "description": "Validated internal media URI.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Canopy-Content-Type": {
+                "description": "Validated asset MIME type.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Generic denial for missing, malformed, expired, revoked, or unknown capabilities."
+          },
+          "503": {
+            "description": "Authorization dependency unavailable."
+          }
+        }
+      }
+    },
   "paths": {
     "/canopy.Canopy/Browse": {
       "post": {

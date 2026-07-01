@@ -94,6 +94,51 @@ pub struct AudioAsset {
     pub duration_ms: u64,
 }
 
+/// Audience encoded into a stream capability and enforced at authorization time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamAudience {
+    /// Release-safe media available without an authenticated profile.
+    Public,
+    /// Owner-scoped media available through a future authenticated flow.
+    Personal,
+}
+
+impl StreamAudience {
+    /// Stable wire representation used by signed stream claims.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Personal => "personal",
+        }
+    }
+}
+
+/// Public metadata required to select and mint a capability for an audio asset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayableAsset {
+    /// Stable audio asset identifier.
+    pub asset_id: String,
+    /// Track encoded by this asset.
+    pub track_id: String,
+    /// Codec short name, such as `mp3`.
+    pub codec: String,
+    /// MIME type served for the asset.
+    pub content_type: String,
+    /// Duration of the asset in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// Storage metadata returned only after current playback policy is authorized.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedStreamAsset {
+    /// Stable audio asset identifier.
+    pub asset_id: String,
+    /// Validated relative key within the managed media library.
+    pub storage_key: String,
+    /// MIME type served for the asset.
+    pub content_type: String,
+}
+
 /// A resolved, ready-to-stream source for a track.
 ///
 /// This is the domain counterpart of the proto `PlaybackSource` contract: it

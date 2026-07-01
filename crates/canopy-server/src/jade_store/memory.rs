@@ -5,12 +5,13 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogRepository,
-    DiscoveryRepository, IngestStatus, InstanceSettingsRepository, LibraryItem, LibraryRepository,
-    LikeRepository, MediaItem, MediaPage, MediaVisibility, Page, PlaybackHistoryEntry,
-    PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository, Playlist, PlaylistPage,
-    PlaylistRepository, PreferencesRepository, ProfilePreferences, ProfileRepository, Session,
-    SessionRepository, TrackLike, UserProfile,
+    AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CanopyError, CanopyResult,
+    CatalogRepository, DiscoveryRepository, IngestStatus, InstanceSettingsRepository, LibraryItem,
+    LibraryRepository, LikeRepository, MediaItem, MediaPage, MediaVisibility, Page, PlayableAsset,
+    PlayableAssetRepository, PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage,
+    PlaybackHistoryRepository, Playlist, PlaylistPage, PlaylistRepository, PreferencesRepository,
+    ProfilePreferences, ProfileRepository, Session, SessionRepository, StreamAudience, TrackLike,
+    UserProfile,
 };
 
 /// Catalog item together with its mandatory access policy.
@@ -170,6 +171,7 @@ pub struct InMemoryAudioAssetEntry {
 #[derive(Clone, Default)]
 pub struct InMemoryAudioAssetStore {
     entries: Vec<InMemoryAudioAssetEntry>,
+    asset_ids: Vec<String>,
 }
 
 impl InMemoryAudioAssetStore {
@@ -190,7 +192,11 @@ impl InMemoryAudioAssetStore {
 
     /// Creates a store with explicit access policy per asset.
     pub fn from_entries(entries: Vec<InMemoryAudioAssetEntry>) -> Self {
-        Self { entries }
+        let asset_ids = entries
+            .iter()
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
+        Self { entries, asset_ids }
     }
 }
 
@@ -225,6 +231,56 @@ impl AudioAssetRepository for InMemoryAudioAssetStore {
             })
             .map(|entry| entry.asset.clone())
             .collect())
+    }
+}
+
+#[async_trait]
+impl PlayableAssetRepository for InMemoryAudioAssetStore {
+    async fn assets_for_public_playback(&self, track_id: &str) -> CanopyResult<Vec<PlayableAsset>> {
+        Ok(self
+            .entries
+            .iter()
+            .zip(&self.asset_ids)
+            .filter(|(entry, _)| {
+                entry.asset.track_id == track_id
+                    && entry.visibility == MediaVisibility::ReleaseSafe
+                    && entry.ingest_status == IngestStatus::Ready
+            })
+            .map(|(entry, asset_id)| PlayableAsset {
+                asset_id: asset_id.clone(),
+                track_id: entry.asset.track_id.clone(),
+                codec: entry.asset.codec.clone(),
+                content_type: entry.asset.content_type.clone(),
+                duration_ms: entry.asset.duration_ms,
+            })
+            .collect())
+    }
+
+    async fn authorize_stream_asset(
+        &self,
+        asset_id: &str,
+        audience: StreamAudience,
+    ) -> CanopyResult<Option<AuthorizedStreamAsset>> {
+        Ok(self
+            .entries
+            .iter()
+            .zip(&self.asset_ids)
+            .find(|(entry, id)| {
+                id.as_str() == asset_id
+                    && entry.ingest_status == IngestStatus::Ready
+                    && match audience {
+                        StreamAudience::Public => entry.visibility == MediaVisibility::ReleaseSafe,
+                        StreamAudience::Personal => {
+                            entry.visibility == MediaVisibility::Personal
+                                && entry.owner_profile_id.is_some()
+                        }
+                    }
+            })
+            .map(|(entry, id)| AuthorizedStreamAsset {
+                asset_id: id.clone(),
+                storage_key: entry.asset.storage_key.clone(),
+                content_type: entry.asset.content_type.clone(),
+            }))
     }
 }
 

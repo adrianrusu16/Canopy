@@ -10,18 +10,18 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | ------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
 | Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (wire contract), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (domain services + `api::grpc` adapter + `jade_store`). |
 | gRPC server (`tonic`)     | 🟡 Prototype   | Catalog, session playback controls, playback resolution, discovery, and authenticated profile-state RPCs including private playlists are wired through the shared proto contract. `Search` and `Browse` still use the unary demo response shape (not streaming `SearchResult` yet). |
-| Configuration             | ✅ Implemented | Env-driven `Config` (`CANOPY_GRPC_ADDR`, `CANOPY_DATABASE_URL`) with sensible defaults. |
+| Configuration             | ✅ Implemented | Env-driven configuration validates the public stream URL, 32-byte capability secret, private authorization bind, PostgreSQL URL, and managed media root before listeners start. |
 | Catalog service           | Partial | Public repository paths are explicit; PostgreSQL and in-memory adapters isolate `release_safe` media from owner-scoped personal media. |
 | Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs now mutate persisted session state. Queue semantics and multi-device conflict handling are still planned. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
-| Playback Resolver         | Transition | Public asset lookup is policy-scoped and uses generic `storage_key` values. RustFS/Supabase URL adapters remain temporary compatibility code. |
+| Playback Resolver         | ✅ Implemented | Public `ResolvePlayback` selects `release_safe` + `ready` assets and returns short-lived opaque Canopy capabilities; storage keys never enter client responses. |
 | Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable state is profile-owned; history supports chronological reads and deletion, and disabling consent atomically purges it. Anonymous users receive no backend history, library, likes, preferences, or playlists. |
 | Provider Adapters         | Transition | Legacy fixture/Supabase ingestion remains idempotent but every insert and re-ingest is forced into quarantine. |
 | Persistence (PostgreSQL)  | Partial | Typed adapters cover ownership, media policy, local-import transactions, checksum deduplication, and fail-closed promotion. |
-| Music storage             | Transition | MP3 and artwork import into content-addressed local storage is implemented. Nginx protected streaming remains next. |
+| Music storage             | ✅ Implemented | MP3 and artwork import into content-addressed local storage; bundled Nginx authorizes through Canopy and serves byte ranges from an internal read-only location. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
-| Health checks             | Partial | PostgreSQL health is implemented. The optional RustFS probe remains only for compatibility during cutover. |
+| Health checks             | ✅ Implemented | Readiness checks PostgreSQL and the managed `library/` directory. Nginx has a separate token-free container health endpoint. |
 | CI / Verification         | ✅ Implemented | GitHub Actions gates `master` with fmt, all-feature Clippy, default tests, a fail-closed disposable PostgreSQL integration harness, and a release build. Proto compatibility gates are still planned. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
@@ -32,7 +32,7 @@ Canopy is moving to a fully owned local-media architecture. PostgreSQL remains t
 
 Phases 1 and 2 are implemented. Storage fields use `storage_key`; one existing profile can be assigned as the instance owner; catalog and asset repositories separate public and owner-scoped paths; and `canopy-admin` imports MP3 files and optional artwork into content-addressed managed storage. PostgreSQL records each import as personal and pending before file finalization, then exposes it to the matching owner only after the row becomes ready. Checksum uniqueness makes retries idempotent.
 
-The owner-only personal-media gRPC surface, Nginx/X-Accel streaming, playback cutover, reconciliation tooling, universal artwork fallback, and final Supabase/RustFS removal remain subsequent phases. Until then, the old playback adapters and related environment variables are compatibility code, not the destination.
+Public Nginx/X-Accel streaming and the public playback cutover are implemented. Owner-only personal playback issuance, reconciliation tooling, universal artwork fallback, and final deletion of dormant Supabase/RustFS compatibility modules remain subsequent phases.
 #### Owner and local media administration
 
 Apply the migration chain and create the profile before assigning it as the instance owner. The admin process is intentionally stricter than the server: both the database URL and managed media root are required, and it never falls back to in-memory storage.
@@ -328,9 +328,9 @@ A recommendation engine is a future layer on top of this service; the initial im
 
 ### Playback Resolver
 
-The playback resolver selects an authorized audio asset and returns a short-lived HTTPS route in `PlaybackSource`. The target implementation authorizes the request in Canopy and delegates byte serving to Nginx with protected internal locations and byte-range support. Asset references are relative `storage_key` values within Canopy's managed media root.
+The playback resolver selects a `release_safe` + `ready` audio asset and returns `{CANOPY_STREAM_PUBLIC_BASE_URL}/stream/{opaque-capability}` in `PlaybackSource`. The signed capability contains an asset UUID, audience, expiry, version, and nonce, but no storage key. Nginx delegates every request to Canopy's private authorizer, which rechecks current PostgreSQL policy before returning an internal media redirect; Nginx then serves the bytes with native range support.
 
-The current RustFS HMAC and Supabase signed-URL providers remain temporary compatibility adapters. Public resolution already uses only the `release_safe` + `ready` asset path; personal playback and the Nginx cutover are later phases.
+Public issuance is anonymous-compatible. The token format reserves a personal audience, but authenticated owner-only personal issuance is a later phase. Dormant RustFS and Supabase adapters are not part of active playback.
 
 ### Playback Session Controls
 
@@ -378,7 +378,7 @@ PostgreSQL stores metadata, ownership, visibility, ingest state, provenance, and
 
 `audio_assets.storage_key` and artwork storage keys are validated relative paths under this managed root. Nginx, not the gRPC process, will serve files after Canopy authorizes a public or owner-scoped request.
 
-The schema foundation, managed directory creation, and import CLI are implemented. Nginx protected locations, owner-scoped playback delivery, reconciliation, and playback cutover remain. RustFS and Supabase are temporary compatibility infrastructure only.
+The schema foundation, managed directory creation, import CLI, public playback cutover, and Nginx protected locations are implemented. Owner-scoped playback delivery and reconciliation remain. RustFS and Supabase are dormant compatibility code and are not used by active playback.
 
 ### PostgreSQL
 
@@ -518,7 +518,7 @@ Example:
 ```json
 {
   "track_id": "trk_123",
-  "stream_url": "https://project.supabase.co/storage/v1/object/sign/pandawave-media/audio/tracks/trk_123.mp3`token=abc123",
+  "stream_url": "https://media.example.com/stream/eyJ2IjoxLCJhaWQiOiIuLi4ifQ.signature",
   "content_type": "audio/mpeg",
   "codec": "mp3",
   "duration_ms": 245000,
@@ -596,7 +596,7 @@ PandaEngine and Canopy share a single trace per request. A correlation ID is gen
 
 ## Health Checks
 
-Canopy's health endpoint reports actual dependency health, not process liveness. Before responding, it checks PostgreSQL connectivity and RustFS reachability, and distinguishes a fully healthy state from a degraded-but-functional one (for example, RustFS reachable but slow) rather than collapsing every condition into a binary up/down signal. PandaEngine's client maps these states directly to the `HEALTHY` / `REACHABLE` / `DEGRADED` values it already expects.
+Canopy's health endpoint reports dependency readiness, not only process liveness. It checks PostgreSQL connectivity and verifies that the managed `library/` path exists, is a directory, and can be opened. Nginx exposes a separate token-free `/nginx-health` endpoint for container orchestration.
 
 ---
 
@@ -609,13 +609,14 @@ cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-features --tests -- -D warnings
 cargo fmt --all -- --check
-bash scripts/test-pg.sh  # disposable PostgreSQL; migrations and pg tests must run
+bash scripts/test-pg.sh         # disposable PostgreSQL policy and migration suite
+bash scripts/test-streaming.sh  # real Nginx ranges, denial, and revocation
 cargo build --workspace --release
 ```
 
 The workflow installs `protoc` so that the `canopy-proto` crate's `build.rs` compiles successfully in CI, and uses `Swatinem/rust-cache` for fast incremental builds.
 
-The PostgreSQL step uses the same `scripts/test-pg.sh` harness locally and in CI. It starts an isolated PostgreSQL 18.4 Compose project, waits for database health, applies the complete migration chain, runs the feature tests serially, and destroys the test stack. Startup, connection, migration, or test failures fail the job; database tests cannot report success by skipping their bodies. RustFS integration tests and proto wire-compatibility gates are still planned.
+The PostgreSQL harness starts an isolated PostgreSQL 18.4 Compose project, applies the migration chain, runs feature tests serially, and destroys the stack. `scripts/test-streaming.sh` adds a real Nginx container and synthetic MP3, verifies `206` range responses, rejects tampered/direct paths, and proves an issued capability stops working immediately after policy revocation. Proto wire-compatibility gates remain planned.
 
 ---
 
@@ -686,7 +687,11 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_ADMINER_PORT` | `8080` | Adminer host port |
 | `CANOPY_GRPC_ADDR` | `[::1]:50051` | gRPC server bind address |
 | `CANOPY_DATABASE_URL` | `postgres://canopy:canopy@localhost:5432/canopy` | PostgreSQL connection string; required explicitly by `canopy-admin` |
-| `CANOPY_MEDIA_ROOT` | unset | Managed media root; required by `canopy-admin` |
+| `CANOPY_MEDIA_ROOT` | unset | Managed media root; required by the server and `canopy-admin` |
+| `CANOPY_STREAM_PUBLIC_BASE_URL` | unset | Required public Nginx base URL; HTTPS except loopback development |
+| `CANOPY_STREAM_TOKEN_SECRET` | unset | Required HMAC capability secret of at least 32 bytes |
+| `CANOPY_STREAM_TOKEN_TTL_SECS` | `600` | Positive public capability lifetime in seconds |
+| `CANOPY_STREAM_AUTH_ADDR` | `127.0.0.1:8081` | Private HTTP listener used only by Nginx `auth_request` |
 | `CANOPY_MAX_AUDIO_BYTES` | `2147483648` | Maximum MP3 import size for `canopy-admin` |
 | `CANOPY_MAX_ARTWORK_BYTES` | `20971520` | Maximum embedded or sidecar artwork size for `canopy-admin` |
 | `CANOPY_PROVIDER_FIXTURE_PATH` | unset | Optional provider fixture JSON to ingest at startup when running with `canopy-server/pg` |
@@ -712,30 +717,25 @@ CI builds can then set `SQLX_OFFLINE=true` to skip the live database requirement
 ### Running the Server
 
 ```bash
-# Default: in-memory stores (no external dependencies, no database required)
-cargo run --bin canopy
+mkdir -p /tmp/canopy-media/library
+export CANOPY_MEDIA_ROOT=/tmp/canopy-media
+export CANOPY_STREAM_PUBLIC_BASE_URL=http://127.0.0.1:8080
+export CANOPY_STREAM_TOKEN_SECRET=0123456789abcdef0123456789abcdef
+export CANOPY_STREAM_AUTH_ADDR=127.0.0.1:8081
 
-# With the full persistent stack (PostgreSQL + RustFS + Redis on the roadmap):
-# 1. Start the stack
-#    docker compose up -d
-#
-# 2. Run migrations
-#    sqlx migrate run
-#
-# 3. Run with the `pg` feature — the server auto-detects PostgreSQL and falls
-#    back to in-memory stores only if the connection fails.
-cargo run --bin canopy --features canopy-server/pg
+# In-memory development mode.
+cargo run -p canopy-server --bin canopy
 
-# Override the database URL:
-# CANOPY_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy \
-#   cargo run --bin canopy --features canopy-server/pg
+# Production-style PostgreSQL mode. Connection failure is fatal.
+export CANOPY_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy
+cargo run -p canopy-server --features pg --bin canopy
 ```
 
-When the `pg` feature is enabled, the server attempts to connect to the database URL configured in `CANOPY_DATABASE_URL`. If the connection succeeds, `PgCatalogRepository`, `PgSessionRepository`, and `PgAudioAssetRepository` are used; otherwise it logs a warning and transparently falls back to the in-memory demo stores. This lets the server start standalone without a database for quick iteration, while production and integration-test deployments use the persistent backend.
+When the `pg` feature is enabled, PostgreSQL is mandatory. Startup fails before either listener serves traffic if the database connection, stream configuration, media root, or private listener bind is invalid. Non-PG builds retain isolated in-memory stores for tests and local experimentation only.
 
 If `CANOPY_PROVIDER_FIXTURE_PATH` is set in PostgreSQL mode, Canopy reads the fixture through `TestFixtureProvider` and ingests it with `CatalogIngest` before starting the gRPC server. The operation is idempotent by `provider_tracks(provider, provider_track_id)`, so the same fixture can be replayed during local development.
 
-The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-dependency details. It checks PostgreSQL connectivity when a pool is present; set `CANOPY_HEALTH_CHECK_RUSTFS=true` to include a RustFS TCP reachability probe. Supabase playback URL signing is checked lazily when `ResolvePlayback` asks Supabase Storage for a signed URL.
+The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-dependency details. PostgreSQL and the managed media library participate in readiness; RustFS and Supabase do not participate in active playback health.
 
 ### PostgreSQL Integration Tests
 
@@ -752,9 +752,20 @@ CANOPY_TEST_DATABASE_URL=postgres://user:password@localhost:5432/canopy_test \
 
 Direct `cargo test --workspace --features canopy-server/pg` runs require `CANOPY_TEST_DATABASE_URL`. PostgreSQL tests never fall back to `DATABASE_URL` and intentionally fail when the test database is missing or unreachable. Default `cargo test --workspace` runs remain database-free.
 
+
+### Streaming Integration Tests
+
+The streaming harness creates disposable PostgreSQL 18.4 and Nginx containers on localhost, mounts a temporary read-only media library, starts the real Canopy authorization adapter in the test process, and removes all containers and files on exit.
+
+```bash
+bash scripts/test-streaming.sh
+```
+
+The bundled Nginx configuration intentionally contains no TLS directives. Deploy it behind the external HTTPS reverse proxy, keep `CANOPY_STREAM_AUTH_ADDR` private, and never expose `/_canopy_auth` or `/_canopy_media/`; both locations are marked `internal`.
+
 ### Legacy Supabase Music Source (temporary)
 
-This compatibility adapter accepts legacy Supabase catalog payloads whose external JSON still uses `object_key` and `artwork_key`, maps them to Canopy's `storage_key` domain fields, and quarantines the ingested rows. `CANOPY_MUSIC_SOURCE=supabase` can still resolve signed URLs during the transition, but Supabase sync is not part of the target architecture.
+This dormant compatibility adapter can still parse legacy Supabase catalog payloads and quarantine their rows, but `ResolvePlayback` no longer uses Supabase signed URLs. These variables are retained only until the compatibility modules are deleted.
 
 Required runtime values:
 
