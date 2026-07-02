@@ -2,10 +2,7 @@
 //!
 //! Reports process liveness, build version, and dependency readiness.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "pg")]
 use std::sync::Arc;
@@ -61,7 +58,6 @@ pub struct HealthStatus {
 pub struct HealthService {
     #[cfg(feature = "pg")]
     db_pool: Option<Arc<sqlx::PgPool>>,
-    rustfs_endpoint: Option<String>,
     media_root: Option<PathBuf>,
 }
 
@@ -71,16 +67,10 @@ impl HealthService {
         Self {
             #[cfg(feature = "pg")]
             db_pool: None,
-            rustfs_endpoint: None,
             media_root: None,
         }
     }
 
-    /// Adds an optional RustFS endpoint probe.
-    pub fn with_rustfs(mut self, endpoint: Option<String>) -> Self {
-        self.rustfs_endpoint = endpoint;
-        self
-    }
     /// Adds the managed media root whose `library/` directory must be readable.
     pub fn with_media_root(mut self, media_root: PathBuf) -> Self {
         self.media_root = Some(media_root);
@@ -92,7 +82,6 @@ impl HealthService {
     pub fn with_db(pool: Arc<sqlx::PgPool>) -> Self {
         Self {
             db_pool: Some(pool),
-            rustfs_endpoint: None,
             media_root: None,
         }
     }
@@ -104,10 +93,6 @@ impl HealthService {
         #[cfg(feature = "pg")]
         if let Some(pool) = &self.db_pool {
             dependencies.push(check_postgres(pool).await);
-        }
-
-        if let Some(endpoint) = &self.rustfs_endpoint {
-            dependencies.push(check_tcp_endpoint("rustfs", endpoint).await);
         }
 
         if let Some(media_root) = &self.media_root {
@@ -170,58 +155,6 @@ async fn check_postgres(pool: &Arc<sqlx::PgPool>) -> DependencyStatus {
     }
 }
 
-async fn check_tcp_endpoint(name: &str, endpoint: &str) -> DependencyStatus {
-    let Some(addr) = endpoint_socket_addr(endpoint) else {
-        return DependencyStatus {
-            name: name.to_string(),
-            status: HealthState::Unhealthy,
-            message: format!("invalid endpoint: {endpoint}"),
-        };
-    };
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio::net::TcpStream::connect(&addr),
-    )
-    .await;
-    match result {
-        Ok(Ok(_)) => DependencyStatus {
-            name: name.to_string(),
-            status: HealthState::Healthy,
-            message: format!("tcp connect succeeded: {addr}"),
-        },
-        Ok(Err(err)) => DependencyStatus {
-            name: name.to_string(),
-            status: HealthState::Unhealthy,
-            message: err.to_string(),
-        },
-        Err(_) => DependencyStatus {
-            name: name.to_string(),
-            status: HealthState::Unhealthy,
-            message: format!("tcp connect timed out: {addr}"),
-        },
-    }
-}
-
-fn endpoint_socket_addr(endpoint: &str) -> Option<String> {
-    let endpoint = endpoint.trim();
-    let without_scheme = endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-        .unwrap_or(endpoint);
-    let authority = without_scheme.split('/').next()?;
-    if authority.is_empty() {
-        return None;
-    }
-    if authority.rsplit_once(':').is_some() {
-        Some(authority.to_string())
-    } else if endpoint.starts_with("https://") {
-        Some(format!("{authority}:443"))
-    } else {
-        Some(format!("{authority}:80"))
-    }
-}
-
 fn aggregate(dependencies: &[DependencyStatus]) -> HealthState {
     if dependencies
         .iter()
@@ -256,22 +189,6 @@ mod tests {
             .unwrap();
         let ready = health.check().await;
         assert_eq!(ready.status, HealthState::Healthy);
-    }
-
-    #[test]
-    fn endpoint_socket_addr_defaults_ports() {
-        assert_eq!(
-            endpoint_socket_addr("http://localhost:9000"),
-            Some("localhost:9000".to_string())
-        );
-        assert_eq!(
-            endpoint_socket_addr("https://rustfs.internal"),
-            Some("rustfs.internal:443".to_string())
-        );
-        assert_eq!(
-            endpoint_socket_addr("localhost"),
-            Some("localhost:80".to_string())
-        );
     }
 
     #[test]

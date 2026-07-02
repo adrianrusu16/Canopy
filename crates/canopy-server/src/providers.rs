@@ -1,13 +1,11 @@
 //! Provider adapters — ingestion pipeline entry point.
 //!
-//! Delegates to the submodules defined in `providers/`.
+//! The deterministic fixture adapter is the supported catalog source.
 
 pub mod adapter;
 pub mod fixture;
 pub mod service;
-pub mod supabase;
 
 pub use adapter::ProviderAdapter;
 pub use fixture::TestFixtureProvider;
 pub use service::IngestionService;
-pub use supabase::{SupabaseCatalogConfig, SupabaseCatalogProvider};

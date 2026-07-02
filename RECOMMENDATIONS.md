@@ -1,151 +1,77 @@
 # Recommendations for Canopy
 
-> This document captures architectural recommendations, short-term priorities, and longer-term considerations for the **Canopy** backend and the broader **PandaWave** ecosystem. It is a living document — items should be promoted or removed as the codebase evolves.
+This document is the current engineering progress ledger and roadmap for Canopy. Completed foundations remain visible so recommendations are not repeatedly reopened; obsolete advice is removed.
 
----
+## Completed Foundations
 
-## Quick Wins (Next 1–2 Sprints)
+### Complete: PostgreSQL and Migration Discipline
 
-These items deliver the highest value for the lowest risk and should be prioritized before the codebase grows much larger.
+Canopy has a PostgreSQL-backed JadeStore, versioned migrations, pool configuration, transaction boundaries for media import and policy changes, and a disposable integration harness that applies the complete migration chain.
 
-### 1. Wire Up PostgreSQL + `sqlx`
+### Complete: Dependency-Aware Health
 
-The in-memory `jade_store` implementation has validated the repository port design, but the real complexity of a media catalog service — connection pooling, query optimization, transaction boundaries, and migration discipline — has not been exercised yet. Start with:
+Health reports PostgreSQL and managed-media-library readiness. External storage providers have no runtime health wiring. Nginx has an independent token-free health endpoint for orchestration.
 
-- A `docker-compose.yml` for local PostgreSQL.
-- A minimal `sqlx` migration set (users, artists, albums, tracks, audio_assets, licenses, playback_history).
-- A `PgCatalogRepository` behind the `CatalogRepository` port, even if it only implements read/browse for now.
-- `sqlx prepare` checked into the repo so CI can compile in offline mode.
+### Complete: Deterministic Provider Ingestion
 
-### 2. Implement Health Check Dependency Probes
+The fixture adapter exercises normalized, idempotent catalog ingestion without an external provider dependency. Imported local media is quarantined as personal and pending until finalization succeeds.
 
-The `HealthService` already exists but the dependency-aware checks (PostgreSQL connectivity, RustFS reachability) are marked as planned. Add them now:
+### Complete: Domain Error Taxonomy
 
-- A lightweight PostgreSQL ping (`SELECT 1`).
-- A RustFS/S3-compatible `HEAD` or `ListBuckets` probe.
-- Return `HEALTHY` / `REACHABLE` / `DEGRADED` so PandaEngine can react appropriately.
+CanopyError maps transport-independent failures to intentional tonic status codes, allowing clients to distinguish invalid requests, authentication failures, missing resources, conflicts, and unavailable dependencies.
 
-This is a small amount of code that prevents cascading failures in a Docker Compose or Kubernetes deployment.
+### Complete: Authenticated Durable State
 
-### 3. Add a Skeleton Provider Adapter
+Profiles, opt-in history, libraries, likes, preferences, and private playlists are profile-owned and require verified login metadata. Anonymous users can browse, search, and play but never create durable backend state.
 
-Even a minimal adapter for a single source (e.g., Musopen or a static JSON test fixture) forces the full ingestion pipeline to be exercised end-to-end:
+### Complete: Managed Local Media and Public Streaming
 
-- Metadata extraction and normalization.
-- License record creation and validation.
-- `CatalogService` → `JadeStore` write path.
-- Provider-specific ID tracking (so you don't re-import the same track).
+canopy-admin imports MP3 files and artwork into content-addressed managed storage. ResolvePlayback issues opaque short-lived capabilities, Canopy revalidates current PostgreSQL policy, and Nginx serves authorized files with byte-range support through internal X-Accel locations.
 
-A test fixture adapter is especially useful because it gives you deterministic data for integration tests without relying on external API availability.
+### Complete: Integration and CI Foundations
 
-### 4. Explicit Error Taxonomy
+GitHub Actions runs formatting, checks, all-feature Clippy, default tests, the disposable PostgreSQL harness, the streaming harness, and release builds. Streaming tests cover ranges, generic denial, direct-path protection, and immediate policy revocation.
 
-Define and document the `CanopyError` → `tonic::Status` mapping explicitly. The middleware (`PandaEngine`) needs to react differently to:
+## Current Priorities
 
-- `NOT_FOUND` → skip or surface to user.
-- `UNAVAILABLE` → retry with backoff.
-- `PERMISSION_DENIED` → re-authenticate or fail hard.
-- `INVALID_ARGUMENT` → client bug, do not retry.
+### 1. Owner-Only Personal Playback Issuance
 
-Document this in a short markdown table or code comment block in `api/grpc.rs` so the two sides stay in sync.
+Complete authenticated personal capability issuance for the configured instance owner. Reuse the existing personal token audience and fail-closed repository checks; do not broaden personal media access to every authenticated profile.
 
----
+### 2. Media Reconciliation and Recovery
 
-## Medium-Term Priorities (2–6 Weeks)
+Add an administrative reconciliation command for pending rows, finalized files, missing files, and orphaned staging directories. Recovery must be idempotent, checksum-aware, and explicit about destructive actions.
 
-### 5. Implement Auth Stubs
+### 3. Artwork Delivery and Universal Fallback
 
-Retrofitting authentication into a working gRPC service is harder than building it when the surface is smaller. Even a naive implementation forces interceptors to be wired correctly:
+Define the client-facing artwork contract, authorize managed artwork without exposing storage keys, and provide a stable fallback when imported tracks have no embedded or sidecar image.
 
-- **Service identity:** a static mTLS check or a simple bearer-token validation for the PandaEngine → Canopy gRPC channel.
-- **End-user identity:** a JWT or session-token check scoped to playback history and personalization.
-- Both checks should run on every request, as designed.
+### 4. Proto Compatibility Gate
 
-The stub can be permissive in development (e.g., bypass with an env flag), but the interceptor plumbing should be real.
+Add a wire-compatibility check, such as buf breaking, against the accepted PandaEngine contract. OpenAPI remains a companion document; protobuf remains canonical.
 
-### 6. Complete the Database Schema
+### 5. Observability
 
-The ER diagram is missing operational tables that are mentioned in the text:
+Propagate correlation metadata from PandaEngine, attach it to tonic and SQL spans, export request/dependency metrics, and define latency and error-rate objectives. Avoid adding telemetry that captures track history or user behavior beyond the service's declared persistence model.
 
-- **`playback_history`** — needed for the Discovery service's "exclude recently played" feature.
-- **`users`** — needed for end-user identity and session scoping.
-- **Provider sync state** — a `provider_sync_logs` or `external_ids` table to track last ingestion time and provider-specific IDs.
+### 6. JadeCache Only Where Evidence Supports It
 
-Update the schema diagram and the `sqlx` migrations to include these before the discovery and personalization features are implemented.
+Wire Redis behind a cache port after measuring PostgreSQL load. Start with bounded, TTL-based catalog reads or discovery snapshots; capability validity and authorization must continue to rely on signed claims plus current PostgreSQL policy, not cache presence.
 
-### 7. Add `JadeCache` for Read-Heavy Paths
+### 7. Evidence-Driven Search Evolution
 
-`JadeCache` is named in the hierarchy but not in the architecture. For read-heavy operations like `Browse` and `DiscoveryNext`, a short-lived cache (e.g., Redis, Valkey, or even an in-memory LRU in the server process) can dramatically reduce database load:
+Measure the existing trigram search against real catalog size and query patterns. Add PostgreSQL full-text vectors and GIN indexes before considering a separate search service.
 
-- `Browse` responses are cacheable by path + pagination params.
-- `DiscoveryNext` is less cacheable due to the exclusion/diversity logic, but the underlying pre-shuffled materialized view can be cached.
-- Keep the cache invalidation simple: TTL-based for now, explicit invalidation later when provider adapters write new data.
+### 8. Operational Hardening
 
-### 8. Load-Test the Presigned URL Flow
+Document backup and restore for PostgreSQL and the managed media volume, rehearse recovery, rotate authentication and stream secrets safely, and define resource limits and deployment-specific network isolation.
 
-ExoPlayer's behavior during seeking and buffering generates many concurrent HTTP `Range` requests against the same presigned URL. Verify that:
+## Guardrails
 
-- The presigned URL validation in RustFS is stateless and fast (no DB lookup).
-- RustFS handles concurrent small-range requests without connection exhaustion.
-- The URL expiry is generous enough to cover a full track duration plus buffering, but short enough to limit abuse.
+- Supabase runtime and configuration code has been removed.
+- RustFS is inactive Compose infrastructure only; Canopy has no RustFS runtime or readiness wiring.
+- gRPC is the client control plane. HTTP exists only for Nginx media delivery and its private authorization subrequest.
+- Anonymous activity is not durable backend user data.
+- Storage keys and internal media paths never enter client-visible contracts.
 
-A simple `k6` or `oha` script against RustFS with Range headers is sufficient for an early validation.
-
----
-
-## Longer-Term / Architectural Considerations
-
-### 9. Search: Delayed but Deliberate Upgrade Path
-
-The current strategy — PostgreSQL `pg_trgm` + `ILIKE` — is correct for the prototype stage. When the catalog grows and query patterns demand more, consider an intermediate step before jumping to a dedicated search engine:
-
-- A materialized `search_vectors` table in PostgreSQL with pre-combined artist + album + track tsvectors.
-- GIN indexing on that vector.
-- Only move to Elasticsearch/OpenSearch when PostgreSQL full-text search has been observed to be insufficient with real data and real query logs.
-
-This is a deliberate, evidence-driven addition rather than a default.
-
-### 10. Storage: RustFS vs. Alternatives
-
-The choice of **RustFS** (a Rust-native, S3-compatible store) is defensible, especially given licensing concerns with MinIO. However, before committing to operating RustFS in production:
-
-- Verify it has been tested for concurrent range-request workloads (see #8).
-- Confirm durability guarantees, replication strategy, and corruption detection.
-- Evaluate whether a cloud object store (S3, R2, GCS) with presigned URLs is a viable bridge during early deployment, with RustFS as a later self-hosted target.
-
-The "no foreign runtime" constraint is valuable, but not if it comes at the cost of data durability or operational simplicity.
-
-### 11. Observability: Correlation IDs and Metrics
-
-`tracing` is initialized, but distributed tracing across the FFI/gRPC boundary is one of the hardest parts of a three-tier system (Android app → Rust middleware → Rust backend). The next observability milestone should be:
-
-- **Correlation ID propagation:** generated at the FFI boundary in PandaEngine, passed via `tonic` metadata to Canopy, and attached to every span and log line.
-- **Prometheus metrics:** request count, latency histograms, error rates per RPC method, and dependency health (PostgreSQL, RustFS) as metrics, not just logs.
-
-### 12. CI Expansion: Integration Tests and Proto Compatibility
-
-The CI pipeline now covers the basics. Future gates should include:
-
-- **Database migration tests:** apply migrations against a fresh PostgreSQL container in CI, roll back one step, and verify the application still compiles (`sqlx` offline check).
-- **Integration tests:** spin up real PostgreSQL and RustFS containers in CI, run tests against them rather than mocks alone.
-- **Proto wire-compatibility check:** verify that changes to `canopy-proto` don't break the expected gRPC contract with PandaEngine before merge. This can be a simple `buf breaking` check or a contract test.
-
-### 13. Schema Evolution for Audio Assets
-
-The current asset strategy is one row per codec per track. As the catalog grows, you may want to add:
-
-- **Bitrate / quality tiers** within a codec (e.g., 128 kbps MP3 vs. 320 kbps MP3 vs. V0).
-- **Regional availability** or provider-specific restrictions.
-- **Asset priority / fallback order** so the resolver can select the best available codec for the client's declared capabilities.
-
-Keep the `audio_assets` table flexible — a `metadata` JSONB column or a normalized `asset_attributes` table can accommodate this without breaking the core resolver logic.
-
----
-
-## License Note
-
-MinIO's licensing change (AGPLv3 / SSPL) makes it a poor fit for a proprietary product. The current choice of **RustFS** avoids this issue entirely. Continue to verify that any future storage dependencies remain permissively licensed (Apache 2.0, MIT, BSD) before integration.
-
----
-
-*Last updated: 2025-06-17*
+*Last updated: 2026-07-01*

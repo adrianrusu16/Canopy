@@ -3,12 +3,12 @@
 //! The crate is organized around domain modules that mirror the architecture
 //! in the project README:
 //!
-//! * [`api`] - transport adapters (gRPC today, HTTP later).
+//! * [`api`] - the gRPC client adapter.
 //! * [`auth`], [`catalog`], [`search`], [`discovery`], [`playback`],
-//!   [`providers`], [`health`] - domain services and their (planned) seams.
-//! * [`jade_store`] - the persistence layer (in-memory today; PostgreSQL /
-//!   RustFS planned).
-//! * [`config`], [`observability`] - process wiring.
+//!   [`providers`], [`health`] - domain services and application boundaries.
+//! * [`stream`] - private HTTP authorization for Nginx media delivery.
+//! * [`jade_store`] - in-memory and PostgreSQL repository adapters.
+//! * [`media`], [`config`], [`observability`] - managed media and process wiring.
 //!
 //! Domain services depend on the ports defined in `canopy-core`, never on a
 //! concrete backend, so storage implementations are interchangeable.
@@ -41,11 +41,9 @@ pub mod preferences;
 pub mod profile;
 pub mod providers;
 pub mod search;
-pub mod signing;
 pub mod stream;
-pub mod supabase;
 
-pub use config::{Config, MusicSource, StreamConfig};
+pub use config::{Config, StreamConfig};
 
 use api::grpc::{GrpcApi, GrpcServices};
 use auth::AuthService;
@@ -198,25 +196,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     );
                     if !result.failures.is_empty() {
                         tracing::warn!(failures = ?result.failures, "Provider fixture ingest had failures");
-                    }
-                }
-                if config.music_source == MusicSource::Supabase && config.supabase_sync_on_start {
-                    let provider =
-                        providers::SupabaseCatalogProvider::new(providers::SupabaseCatalogConfig {
-                            project_url: config.supabase_url.clone(),
-                            api_key: config.supabase_key.clone(),
-                            table: config.supabase_catalog_table.clone(),
-                        });
-                    let ingestion = providers::IngestionService::new(Arc::new(pg_catalog.clone()));
-                    let result = ingestion.ingest_from_provider(&provider).await?;
-                    info!(
-                        table = %config.supabase_catalog_table,
-                        succeeded = result.succeeded,
-                        failed = result.failed,
-                        "Ingested Supabase catalog into PostgreSQL catalog"
-                    );
-                    if !result.failures.is_empty() {
-                        tracing::warn!(failures = ?result.failures, "Supabase catalog ingest had failures");
                     }
                 }
                 catalog_repo = Arc::new(pg_catalog.clone());

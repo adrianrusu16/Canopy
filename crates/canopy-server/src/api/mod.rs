@@ -1,6 +1,6 @@
 //! API adapters — the "driving" side of the system.
 //!
-//! These adapters translate an external protocol (gRPC today, HTTP later) into
+//! These adapters translate the public gRPC protocol into
 //! calls on the domain services, and translate domain results and
 //! [`canopy_core::CanopyError`] back into protocol responses. The domain layer
 //! has no knowledge of the transport.

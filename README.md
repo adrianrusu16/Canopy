@@ -4,7 +4,7 @@
 
 ## Status
 
-This document is the **target architecture**. Most of it is not yet implemented — the current codebase is an early prototype. The table below tracks reality so the design and the code stay honest with each other. The code is organized as a Cargo workspace (`canopy-proto` / `canopy-core` / `canopy-server`) with domain-oriented modules and repository ports, so the structure already matches the design even where the behavior is still a stub.
+This document describes the current Canopy architecture and identifies the remaining roadmap explicitly. The codebase is a Cargo workspace (`canopy-proto` / `canopy-core` / `canopy-server`) with domain-oriented services, repository ports, PostgreSQL adapters, managed local media, and a gRPC-first control plane.
 
 | Area                      | Status         | Notes                                                                                       |
 | ------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
@@ -17,7 +17,7 @@ This document is the **target architecture**. Most of it is not yet implemented 
 | Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
 | Playback Resolver         | ✅ Implemented | Public `ResolvePlayback` selects `release_safe` + `ready` assets and returns short-lived opaque Canopy capabilities; storage keys never enter client responses. |
 | Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable state is profile-owned; history supports chronological reads and deletion, and disabling consent atomically purges it. Anonymous users receive no backend history, library, likes, preferences, or playlists. |
-| Provider Adapters         | Transition | Fixture ingestion remains idempotent and quarantined by default; Supabase is no longer a supported source. |
+| Provider Adapters         | Implemented | Deterministic fixture ingestion remains idempotent and quarantined by default; external provider runtime code has been removed. |
 | Persistence (PostgreSQL)  | Partial | Typed adapters cover ownership, media policy, local-import transactions, checksum deduplication, and fail-closed promotion. |
 | Music storage             | ✅ Implemented | MP3 and artwork import into content-addressed local storage; bundled Nginx authorizes through Canopy and serves byte ranges from an internal read-only location. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
@@ -28,11 +28,11 @@ Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
 
 ### Local-media transition
 
-Canopy is moving to a fully owned local-media architecture. PostgreSQL remains the metadata and policy authority; audio, artwork, retained originals, and quarantined files will live under `/srv/canopy/media`; Nginx will serve authorized files with HTTPS and byte-range support. Supabase is no longer part of the target architecture. RustFS is reserved as an inactive, future-compatible storage option and is not part of active playback.
+Canopy uses a fully owned local-media architecture. PostgreSQL remains the metadata and policy authority; audio, artwork, retained originals, and quarantined files live under `/srv/canopy/media`; Nginx serves authorized files with HTTPS and byte-range support. Supabase is not part of the architecture. RustFS is reserved as an inactive, future-compatible storage option and is not part of active playback.
 
 Phases 1 and 2 are implemented. Storage fields use `storage_key`; one existing profile can be assigned as the instance owner; catalog and asset repositories separate public and owner-scoped paths; and `canopy-admin` imports MP3 files and optional artwork into content-addressed managed storage. PostgreSQL records each import as personal and pending before file finalization, then exposes it to the matching owner only after the row becomes ready. Checksum uniqueness makes retries idempotent.
 
-Public Nginx/X-Accel streaming and the public playback cutover are implemented. Owner-only personal playback issuance, reconciliation tooling, universal artwork fallback, and final deletion of dormant Supabase compatibility modules remain subsequent phases. RustFS compatibility may stay dormant until a future storage phase needs it.
+Public Nginx/X-Accel streaming and the public playback cutover are implemented. Supabase runtime/configuration and the obsolete direct-object-URL abstractions have been removed. Owner-only personal playback issuance, reconciliation tooling, and universal artwork fallback remain subsequent phases. RustFS stays outside the runtime as optional future-reserved Compose infrastructure.
 #### Owner and local media administration
 
 Apply the migration chain and create the profile before assigning it as the instance owner. The admin process is intentionally stricter than the server: both the database URL and managed media root are required, and it never falls back to in-memory storage.
@@ -165,34 +165,43 @@ adapters and wiring. Dependencies point inwards only: `canopy-server →
 canopy-core` and `canopy-server → canopy-proto`.
 
 ```text
-canopy/                         # workspace root
-├── crates/
-│   ├── canopy-proto/           # generated gRPC types (single source of truth)
-│   │   ├── proto/canopy.proto
-│   │   └── build.rs
-│   │
-│   ├── canopy-core/            # transport-agnostic domain
-│   │   ├── model.rs            # MediaItem, AudioAsset, PlaybackSource, Session, Page, ...
-│   │   ├── error.rs            # CanopyError / CanopyResult
-│   │   ├── repository.rs       # Catalog / Discovery / AudioAsset / Session ports
-│   │   └── signing.rs          # UrlSigner port (presigned-URL signing)
-│   │
-│   └── canopy-server/          # adapters + wiring (lib + `canopy` binary)
-│       ├── api/                # driving adapters
-│       │   ├── grpc.rs         # gRPC ⇄ domain, CanopyError → Status
-│       │   └── http.rs         # (planned)
-│       │
-│       ├── auth/               # (planned)
-│       ├── catalog/            # CatalogService
-│       ├── search/             # SearchService (normalization; pg_trgm planned)
-│       ├── discovery/          # DiscoveryService (diversity/exclusion; pre-shuffled view planned)
-│       ├── playback/           # PlaybackService (sessions) + ResolverService (stream capabilities)
-│       ├── signing/            # HmacUrlSigner (UrlSigner impl)
-│       ├── providers/          # provider adapter contracts + fixture ingestion
-│       ├── jade_store/         # persistence layer (in-memory + PostgreSQL adapters)
-│       ├── observability/      # tracing init (metrics planned)
-│       ├── health/             # HealthService
-│       └── config.rs
+canopy/
++-- crates/
+|   +-- canopy-proto/
+|   |   +-- proto/canopy.proto    # canonical gRPC contract
+|   |   +-- build.rs
+|   |   `-- src/lib.rs
+|   +-- canopy-core/
+|   |   +-- model.rs              # domain values and playback contracts
+|   |   +-- error.rs              # CanopyError / CanopyResult
+|   |   `-- repository.rs         # storage-independent domain ports
+|   `-- canopy-server/
+|       +-- api/grpc.rs           # tonic adapter and auth metadata boundary
+|       +-- admin.rs              # owner assignment and media import application
+|       +-- auth.rs               # login-token verification
+|       +-- catalog.rs
+|       +-- search.rs
+|       +-- discovery.rs
+|       +-- playback.rs           # sessions and playback resolution
+|       +-- profile.rs
+|       +-- history.rs
+|       +-- library.rs
+|       +-- likes.rs
+|       +-- preferences.rs
+|       +-- playlists.rs
+|       +-- owner.rs
+|       +-- media/                # MP3 inspection, staging, and managed storage
+|       +-- stream/               # capability codec, authorization, private HTTP adapter
+|       +-- providers/            # provider boundary and deterministic fixture adapter
+|       +-- jade_store/           # in-memory and PostgreSQL repositories
+|       +-- observability.rs
+|       +-- health.rs
+|       +-- config.rs
+|       `-- bin/canopy-admin.rs
++-- migrations/
++-- deploy/nginx/
++-- scripts/
+`-- docs/
 ```
 
 > **Naming note.** The persistence layer is `jade_store` in code, matching the
@@ -330,7 +339,7 @@ A recommendation engine is a future layer on top of this service; the initial im
 
 The playback resolver selects a `release_safe` + `ready` audio asset and returns `{CANOPY_STREAM_PUBLIC_BASE_URL}/stream/{opaque-capability}` in `PlaybackSource`. The signed capability contains an asset UUID, audience, expiry, version, and nonce, but no storage key. Nginx delegates every request to Canopy's private authorizer, which rechecks current PostgreSQL policy before returning an internal media redirect; Nginx then serves the bytes with native range support.
 
-Public issuance is anonymous-compatible. The token format reserves a personal audience, but authenticated owner-only personal issuance is a later phase. Supabase is not part of active playback; RustFS is inactive and reserved for possible future storage work.
+Public issuance is anonymous-compatible. The token format reserves a personal audience, but authenticated owner-only personal issuance is a later phase. External provider URL generation has been removed; RustFS is inactive Compose infrastructure reserved for possible future storage work.
 
 ### Playback Session Controls
 
@@ -378,7 +387,7 @@ PostgreSQL stores metadata, ownership, visibility, ingest state, provenance, and
 
 `audio_assets.storage_key` and artwork storage keys are validated relative paths under this managed root. Nginx, not the gRPC process, will serve files after Canopy authorizes a public or owner-scoped request.
 
-The schema foundation, managed directory creation, import CLI, public playback cutover, and Nginx protected locations are implemented. Owner-scoped playback delivery and reconciliation remain. Supabase is removed from the current target, and RustFS is dormant future-reserved infrastructure that is not used by active playback.
+The schema foundation, managed directory creation, import CLI, public playback cutover, and Nginx protected locations are implemented. Supabase runtime code and direct-object-URL compatibility code are removed. Owner-scoped playback delivery and reconciliation remain; RustFS is dormant Compose infrastructure and is not used by active playback.
 
 ### PostgreSQL
 
@@ -472,7 +481,7 @@ sequenceDiagram
     PandaWave-->>User: Playback
 ```
 
-Canopy remains the policy authority while Nginx handles the byte-serving path. The local route and X-Accel integration are planned for the playback-cutover phase.
+Canopy remains the policy authority while Nginx handles byte delivery. Every public stream request passes through Nginx `auth_request`; Canopy validates the opaque capability and current PostgreSQL policy before returning an internal X-Accel redirect. Nginx then serves the managed file with native byte-range support.
 
 ---
 
@@ -588,9 +597,7 @@ Future:
 
 ## Observability
 
-PandaEngine and Canopy share a single trace per request. A correlation ID is generated at the earliest possible point — the FFI boundary in PandaEngine — and propagated across the gRPC call to Canopy via a `tonic` interceptor, the same mechanism already used for `x-client-name` metadata. Every span from the Android call site down to Canopy's database queries is part of one trace, not two disconnected ones.
-
-`tracing` is the instrumentation layer on both sides. Prometheus metrics are layered on top once the service is running in production.
+Canopy initializes structured `tracing` instrumentation for server lifecycle and application events. End-to-end correlation-ID propagation from PandaEngine, OpenTelemetry export, and Prometheus request/dependency metrics remain roadmap work; current logs must not be described as a complete distributed trace.
 
 ---
 
@@ -626,8 +633,8 @@ Canopy ships with a full `docker-compose.yml` stack for local development and in
 
 | Service | Image | Role | Port |
 | ------- | ----- | ---- | ---- |
-| PostgreSQL | `postgres:18.4-trixie` | Metadata persistence (catalog, sessions, playback history) | 5432 |
-| Redis | `redis:8` | Cache layer (JadeCache: browse results, discovery pools, presigned-URL TTL) | 6379 |
+| PostgreSQL | `postgres:18.4-alpine` | Metadata persistence (catalog, sessions, playback history) | 5432 |
+| Redis | `redis:8` | Reserved cache infrastructure for the future JadeCache adapter; not yet wired into Canopy | 6379 |
 | RustFS | `rustfs/rustfs:latest` | Optional inactive S3-compatible storage reserved for future experiments; not used by active playback | 9000 |
 | Adminer | `adminer` | Database management UI (dev-only, opt-in) | 8080 |
 
@@ -688,6 +695,7 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_MAX_AUDIO_BYTES` | `2147483648` | Maximum MP3 import size for `canopy-admin` |
 | `CANOPY_MAX_ARTWORK_BYTES` | `20971520` | Maximum embedded or sidecar artwork size for `canopy-admin` |
 | `CANOPY_PROVIDER_FIXTURE_PATH` | unset | Optional provider fixture JSON to ingest at startup when running with `canopy-server/pg` |
+| `CANOPY_REDIS_URL` | `redis://localhost:6379` | Reserved JadeCache connection setting; Redis is not yet wired into the server |
 
 ### sqlx Compile-Time Checks
 
@@ -705,7 +713,7 @@ cargo sqlx prepare --workspace
 git add .sqlx
 ```
 
-CI builds can then set `SQLX_OFFLINE=true` to skip the live database requirement for compile-time checked queries. The GitHub Actions workflow will be updated in a future iteration to spin up a PostgreSQL service container and run `sqlx migrate run` before `cargo check`.
+A future compile-time-query pass can check generated `.sqlx/` metadata into the repository and enable `SQLX_OFFLINE=true`. Current CI instead exercises the complete migration chain and PostgreSQL-backed behavior through the disposable `scripts/test-pg.sh` harness.
 
 ### Running the Server
 
@@ -728,7 +736,7 @@ When the `pg` feature is enabled, PostgreSQL is mandatory. Startup fails before 
 
 If `CANOPY_PROVIDER_FIXTURE_PATH` is set in PostgreSQL mode, Canopy reads the fixture through `TestFixtureProvider` and ingests it with `CatalogIngest` before starting the gRPC server. The operation is idempotent by `provider_tracks(provider, provider_track_id)`, so the same fixture can be replayed during local development.
 
-The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-dependency details. PostgreSQL and the managed media library participate in readiness. RustFS is not part of active playback readiness, and Supabase is not a supported dependency.
+The `HealthService` returns `healthy`, `version`, aggregate `status`, and per-dependency details. Only PostgreSQL and the managed media library participate in Canopy readiness.
 
 ### PostgreSQL Integration Tests
 
@@ -758,20 +766,20 @@ The bundled Nginx configuration intentionally contains no TLS directives. Deploy
 
 ### Supabase Removed
 
-Supabase is no longer a supported catalog or storage source. Current imports go through `canopy-admin`, metadata lives in PostgreSQL, and playable MP3/artwork files live under the managed media root served by Nginx after Canopy authorization. Historical notes may mention Supabase for migration context, but new development should not add Supabase configuration, playback URLs, catalog sync, or user-data dependencies.
+Supabase runtime modules, startup synchronization, configuration parsing, and tests have been removed. Current imports go through `canopy-admin`, metadata lives in PostgreSQL, and playable MP3/artwork files live under the managed media root served by Nginx after Canopy authorization.
 
 ### RustFS Reserved
 
-RustFS remains in the local Compose stack only as inactive, future-reserved S3-compatible infrastructure. Active playback does not issue RustFS presigned URLs, readiness does not depend on RustFS, and imported media should be placed through `canopy-admin` into the managed local library. If RustFS becomes useful later, it should sit behind the same Canopy policy and Nginx authorization boundary instead of becoming a direct client-facing source.
+RustFS remains in the local Compose stack only as inactive, future-reserved S3-compatible infrastructure. Canopy has no RustFS runtime configuration, readiness probe, or playback provider, and imported media should be placed through `canopy-admin` into the managed local library. If RustFS becomes useful later, it should sit behind the same Canopy policy and Nginx authorization boundary instead of becoming a direct client-facing source.
 
 ### Redis (JadeCache)
 
 Redis is started by default but is not yet wired into the server. The `JadeCache` layer will use it for:
 - Cached `Browse` responses (keyed by path + pagination params)
 - Pre-shuffled discovery pool snapshots
-- Stream capability TTL tracking and rate-limiting
+- Capability rate-limit counters and abuse controls
 
-Redis configuration is defined in `docker-compose.yml` with `allkeys-lru` eviction and AOF persistence. The server will auto-connect to `redis://localhost:6379` when the cache layer is implemented.
+Redis configuration is defined in `docker-compose.yml` with `allkeys-lru` eviction and AOF persistence. `CANOPY_REDIS_URL` reserves the connection setting, but the current server does not connect to Redis until the JadeCache adapter is implemented.
 
 ---
 

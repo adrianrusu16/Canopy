@@ -7,7 +7,7 @@
 #
 #   postgres  — metadata persistence (catalog, sessions, playback history)
 #   redis     — cache layer (JadeCache: browse results, discovery pools)
-#   rustfs    — object storage (audio bytes, artwork, licenses)
+#   rustfs    — inactive, future-reserved S3-compatible service
 #   adminer   — database management UI (optional, dev-only)
 #
 # To start:
@@ -72,7 +72,7 @@ services:
 
   redis:
     # Redis 8 — used by the JadeCache layer for browse results, discovery
-    # pools, and presigned-URL TTL tracking.
+    # pools and other read-heavy data once the JadeCache adapter is implemented.
     image: redis:8
     container_name: canopy-redis
     restart: unless-stopped
@@ -94,12 +94,14 @@ services:
       retries: 5
       start_period: 3s
 
+  # Reserved for future storage experiments. Canopy does not read from, write
+  # to, health-check, or issue client URLs for this service today.
   rustfs:
     image: rustfs/rustfs:latest
     container_name: canopy-rustfs
     restart: unless-stopped
     environment:
-      # RustFS configuration (adjust per RustFS docs as they evolve).
+      # Inactive development-only defaults; never use these as production secrets.
       RUSTFS_BUCKET: ${CANOPY_RUSTFS_BUCKET:-pandawave-media}
       RUSTFS_ACCESS_KEY: ${CANOPY_RUSTFS_ACCESS_KEY:-canopy}
       RUSTFS_SECRET_KEY: ${CANOPY_RUSTFS_SECRET_KEY:-canopy-secret}

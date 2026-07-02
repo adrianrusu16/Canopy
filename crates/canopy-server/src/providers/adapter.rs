@@ -1,9 +1,8 @@
 //! Provider adapter traits and implementations.
 //!
-//! A provider adapter fetches catalog content from an external source
-//! (Musopen, Pixabay Music, Internet Archive, or a local test fixture),
-//! normalizes it into the Canopy domain model, and hands it to the ingestion
-//! service for persistence.
+//! A provider adapter maps catalog source data into the Canopy domain model
+//! and hands it to the ingestion service. The deterministic local fixture is
+//! the supported implementation; adapters never become playback authorities.
 
 use async_trait::async_trait;
 use canopy_core::{CanopyResult, ProviderTrack};
@@ -16,7 +15,7 @@ use canopy_core::{CanopyResult, ProviderTrack};
 /// storage — those live in the `CatalogIngest` port.
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {
-    /// Human-readable name of the provider (e.g., `musopen`, `pixabay`).
+    /// Human-readable stable source name.
     fn name(&self) -> &str;
 
     /// Fetches all available tracks from the provider.

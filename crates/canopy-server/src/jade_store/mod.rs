@@ -1,9 +1,8 @@
 //! JadeStore - the persistence layer.
 //!
-//! This module is the home of all storage-backend implementations of the
-//! [`canopy_core`] repository ports. Today it ships in-memory
-//! implementations used by the prototype; the future PostgreSQL (`sqlx`) and
-//! RustFS backends will live alongside them and be selected at wiring time.
+//! This module implements the [`canopy_core`] repository ports with in-memory
+//! stores for isolated development and tests, plus PostgreSQL stores for durable
+//! catalog, profile, policy, and managed-media metadata.
 
 mod memory;
 

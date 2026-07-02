@@ -197,16 +197,6 @@ impl Default for ResolverConfig {
     }
 }
 
-/// Legacy URL-provider contract retained for storage adapter compatibility.
-///
-/// Public playback no longer depends on this port; capabilities are minted by
-/// [`ResolverService`] instead.
-#[async_trait::async_trait]
-pub trait PlaybackUrlProvider: Send + Sync {
-    /// Returns a stream URL valid until `expires_at_epoch_ms`.
-    async fn signed_url(&self, storage_key: &str, expires_at_epoch_ms: u64)
-    -> CanopyResult<String>;
-}
 /// Playback resolver: turns a track identifier into a short-lived
 /// [`PlaybackSource`] capability.
 ///
@@ -411,8 +401,6 @@ mod tests {
         assert_eq!(claims.asset_id, ASSET_ID);
         assert_eq!(claims.audience, StreamAudience::Public);
         assert!(!source.stream_url.contains("audio/tracks"));
-        assert!(!source.stream_url.contains("rustfs"));
-        assert!(!source.stream_url.contains("supabase"));
     }
 
     #[tokio::test]

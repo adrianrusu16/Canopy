@@ -8,7 +8,6 @@
 pub mod error;
 pub mod model;
 pub mod repository;
-pub mod signing;
 
 pub use error::{CanopyError, CanopyResult};
 pub use model::{
@@ -24,5 +23,3 @@ pub use repository::{
     PlayableAssetRepository, PlaybackHistoryRepository, PlaylistRepository, PreferencesRepository,
     ProfileRepository, SessionRepository,
 };
-
-pub use signing::UrlSigner;

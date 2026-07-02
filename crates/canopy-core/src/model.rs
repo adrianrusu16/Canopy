@@ -142,13 +142,13 @@ pub struct AuthorizedStreamAsset {
 /// A resolved, ready-to-stream source for a track.
 ///
 /// This is the domain counterpart of the proto `PlaybackSource` contract: it
-/// carries a presigned, time-limited URL that the player streams directly from
-/// object storage, keeping Canopy out of the byte-serving path.
+/// carries a short-lived Canopy capability URL. Nginx authorizes the capability
+/// through Canopy and serves managed bytes without proxying them through Rust.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlaybackSource {
     /// Identifier of the resolved track.
     pub track_id: String,
-    /// Presigned URL the player streams from (signature + expiry embedded).
+    /// Short-lived opaque capability URL the player streams from.
     pub stream_url: String,
     /// MIME type of the stream, e.g. `audio/mpeg`.
     pub content_type: String,

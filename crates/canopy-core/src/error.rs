@@ -3,7 +3,7 @@
 //! Domain and repository code returns [`CanopyError`] rather than a
 //! transport-specific error (such as `tonic::Status`). The mapping to a wire
 //! status code lives in the API adapter layer, which keeps the domain free of
-//! any knowledge of how it is exposed (gRPC today, HTTP later).
+//! any knowledge of how it is exposed over gRPC or private HTTP infrastructure.
 
 use thiserror::Error;
 
@@ -28,7 +28,7 @@ pub enum CanopyError {
     #[error("unauthenticated: {0}")]
     Unauthenticated(String),
 
-    /// A dependency (database, object storage, ...) failed.
+    /// A persistence or managed-media dependency failed.
     #[error("storage error: {0}")]
     Storage(String),
 

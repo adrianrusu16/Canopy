@@ -1,8 +1,8 @@
 //! Repository ports (hexagonal "driven" interfaces).
 //!
 //! Domain services depend on these traits, never on a concrete backend. The
-//! in-memory implementation used by the prototype and the future PostgreSQL /
-//! RustFS implementations are interchangeable behind these abstractions.
+//! in-memory and PostgreSQL implementations are interchangeable behind these
+//! abstractions. Managed media remains behind the same policy-oriented ports.
 
 use async_trait::async_trait;
 
@@ -60,8 +60,8 @@ pub trait DiscoveryRepository: Send + Sync {
 /// Read access to the encoded audio assets backing a track.
 ///
 /// The playback resolver uses this to discover which codecs a track is
-/// available in and where the bytes live in object storage, without itself
-/// touching the storage backend.
+/// available in and which managed asset identity backs playback, without
+/// reading media bytes itself.
 #[async_trait]
 pub trait AudioAssetRepository: Send + Sync {
     /// Returns assets for a release-safe, ready track.
