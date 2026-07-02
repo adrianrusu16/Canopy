@@ -47,6 +47,7 @@ use crate::likes::LikeService;
 use crate::playback::{PlaybackService, ResolverService};
 use crate::playlists::PlaylistService;
 use crate::preferences::PreferencesService;
+use crate::principal::PrincipalService;
 use crate::profile::ProfileService;
 use crate::search::SearchService;
 
@@ -65,6 +66,7 @@ pub struct GrpcServices {
     pub resolver: ResolverService,
     pub discovery: DiscoveryService,
     pub auth: AuthService,
+    pub principal: PrincipalService,
 }
 
 /// gRPC entry point wiring the wire contract to the domain services.
@@ -82,6 +84,7 @@ pub struct GrpcApi {
     resolver: ResolverService,
     discovery: DiscoveryService,
     auth: AuthService,
+    principal: PrincipalService,
 }
 
 impl GrpcApi {
@@ -101,6 +104,7 @@ impl GrpcApi {
             resolver: services.resolver,
             discovery: services.discovery,
             auth: services.auth,
+            principal: services.principal,
         }
     }
 }
@@ -205,6 +209,17 @@ fn extract_metadata_identity(
     auth: &AuthService,
 ) -> CanopyResult<UserIdentity> {
     extract_identity(metadata, "", auth)
+}
+
+fn extract_optional_metadata_identity(
+    metadata: &tonic::metadata::MetadataMap,
+    auth: &AuthService,
+) -> CanopyResult<Option<UserIdentity>> {
+    if metadata.get("authorization").is_none() && metadata.get("x-canopy-auth-token").is_none() {
+        return Ok(None);
+    }
+
+    extract_metadata_identity(metadata, auth).map(Some)
 }
 
 fn current_epoch_ms() -> u64 {
@@ -788,11 +803,20 @@ impl Canopy for GrpcApi {
         &self,
         request: Request<PlaybackRequest>,
     ) -> Result<Response<ProtoPlaybackSource>, Status> {
+        let metadata = request.metadata().clone();
         let req = request.into_inner();
+        let identity =
+            extract_optional_metadata_identity(&metadata, &self.auth).map_err(to_status)?;
+        let principal = self
+            .principal
+            .classify(identity.as_ref())
+            .await
+            .map_err(to_status)?;
         let source = self
             .resolver
             .resolve_for_session(
                 &self.playback,
+                &principal,
                 &req.session_id,
                 &req.track_id,
                 current_epoch_ms(),
@@ -921,6 +945,46 @@ mod tests {
 
         assert!(matches!(err, canopy_core::CanopyError::Unauthenticated(_)));
     }
+    #[test]
+    fn optional_identity_treats_absent_metadata_as_anonymous() {
+        let identity =
+            extract_optional_metadata_identity(&tonic::metadata::MetadataMap::new(), &auth())
+                .unwrap();
+
+        assert_eq!(identity, None);
+    }
+
+    #[test]
+    fn optional_identity_verifies_supplied_bearer_token() {
+        let mut request = Request::new(());
+        let token = token_for("optional-user");
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {token}")).unwrap(),
+        );
+
+        let identity = extract_optional_metadata_identity(request.metadata(), &auth()).unwrap();
+
+        assert_eq!(
+            identity,
+            Some(UserIdentity {
+                user_id: "optional-user".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn optional_identity_rejects_invalid_supplied_metadata() {
+        let mut request = Request::new(());
+        request
+            .metadata_mut()
+            .insert("authorization", MetadataValue::from_static("Token abc"));
+
+        let error = extract_optional_metadata_identity(request.metadata(), &auth()).unwrap_err();
+
+        assert!(matches!(error, CanopyError::Unauthenticated(_)));
+    }
+
     #[test]
     fn history_page_rejects_negative_values() {
         let negative_limit = history_page(-1, 0).unwrap_err();

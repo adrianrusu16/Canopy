@@ -65,7 +65,7 @@
     "/internal/stream/authorize": {
       "get": {
         "summary": "Authorize an Nginx media subrequest",
-        "description": "Infrastructure-only endpoint on the private listener. Clients must use ResolvePlayback and never call this endpoint directly.",
+        "description": "Infrastructure-only endpoint on the private listener. Clients must use ResolvePlayback and never call this endpoint directly. Public capabilities recheck release-safe readiness; personal capabilities recheck personal readiness and require the asset owner to remain the currently configured instance owner.",
         "operationId": "AuthorizeStream",
         "tags": [
           "Infrastructure"
@@ -484,7 +484,7 @@
       "post": {
         "summary": "Resolve playback stream URL",
         "operationId": "ResolvePlayback",
-        "description": "Selects a ready local audio asset and returns a short-lived Canopy stream capability URL served through Nginx.",
+        "description": "Accepts optional gRPC authentication metadata and returns a short-lived Canopy stream capability URL served through Nginx. Anonymous and authenticated non-owner callers resolve release-safe ready media only. The configured owner resolves owner-scoped personal ready media first, with public fallback. Invalid supplied credentials are unauthenticated; inaccessible personal media is indistinguishable from missing media.",
         "requestBody": {
           "required": true,
           "content": {
@@ -505,6 +505,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Authentication metadata was supplied but is malformed, expired, or invalid."
+          },
+          "404": {
+            "description": "No eligible media is visible to the caller. Missing and inaccessible personal media use the same response."
           }
         },
         "tags": [
@@ -1498,7 +1504,7 @@
           },
           "artwork_uri": {
             "type": "string",
-            "description": "content://… URI that the Android resolver knows"
+            "description": "content://??? URI that the Android resolver knows"
           },
           "duration_ms": {
             "type": "integer",
@@ -1594,7 +1600,7 @@
           "speed": {
             "type": "number",
             "format": "double",
-            "description": "Playback speed (0.5 … 2.0 typical)"
+            "description": "Playback speed (0.5 ??? 2.0 typical)"
           },
           "session_id": {
             "type": "string",
@@ -2411,7 +2417,7 @@
     "providerFixtureStartup": "Set CANOPY_PROVIDER_FIXTURE_PATH in PostgreSQL mode to ingest a local ProviderTrack fixture before serving gRPC.",
     "healthStatus": "Health responses include aggregate status plus dependency details. PostgreSQL and managed local media are the active readiness dependencies.",
     "authModel": "Anonymous users may browse, search, and play, but anonymous sessions are not durable users and receive no backend history, library, likes, preferences, or playlists. Durable state starts with UpsertProfile and a verified login token sent through gRPC metadata authorization: Bearer <token> or x-canopy-auth-token; request-body auth_token remains a compatibility fallback only for older profile/history RPCs.",
-    "playbackResolution": "ResolvePlayback accepts track_id plus optional session_id. It selects a ready local audio asset, returns a short-lived Canopy stream URL, and loads the track into the resolved session.",
+    "playbackResolution": "ResolvePlayback accepts track_id, optional session_id, and optional gRPC auth metadata. The configured owner receives owner-scoped personal media first with public fallback; anonymous and non-owner callers receive release-safe public media only. Invalid supplied auth is rejected, inaccessible personal media is concealed as not found, and successful resolution loads the track into the session.",
     "storageModel": "Active playback uses Canopy-managed local media authorized by Canopy and served through Nginx. No external catalog or object-storage provider is wired into the runtime; RustFS remains optional Compose infrastructure only.",
     "profileStatus": "UpsertProfile verifies metadata auth, upserts profiles(external_user_id), and stores history_enabled as the logged-in user history preference.",
     "historyStatus": "Playback history is an append-only profile-owned event ledger. Lifecycle RPCs require metadata auth. Disabling history atomically and irreversibly purges existing events, and consent-safe recording prevents concurrent repopulation. Anonymous sessions never create or read backend history.",

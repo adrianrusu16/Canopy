@@ -1,7 +1,7 @@
 //! In-memory implementations of the repository ports.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use canopy_core::{
@@ -172,6 +172,7 @@ pub struct InMemoryAudioAssetEntry {
 pub struct InMemoryAudioAssetStore {
     entries: Vec<InMemoryAudioAssetEntry>,
     asset_ids: Vec<String>,
+    instance_settings: Option<Arc<dyn InstanceSettingsRepository>>,
 }
 
 impl InMemoryAudioAssetStore {
@@ -196,7 +197,17 @@ impl InMemoryAudioAssetStore {
             .iter()
             .map(|_| uuid::Uuid::new_v4().to_string())
             .collect();
-        Self { entries, asset_ids }
+        Self {
+            entries,
+            asset_ids,
+            instance_settings: None,
+        }
+    }
+
+    /// Shares current instance-owner settings for personal stream authorization.
+    pub fn with_instance_settings(mut self, settings: Arc<dyn InstanceSettingsRepository>) -> Self {
+        self.instance_settings = Some(settings);
+        self
     }
 }
 
@@ -236,6 +247,30 @@ impl AudioAssetRepository for InMemoryAudioAssetStore {
 
 #[async_trait]
 impl PlayableAssetRepository for InMemoryAudioAssetStore {
+    async fn assets_for_personal_playback(
+        &self,
+        owner_profile_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<Vec<PlayableAsset>> {
+        Ok(self
+            .entries
+            .iter()
+            .zip(&self.asset_ids)
+            .filter(|(entry, _)| {
+                entry.asset.track_id == track_id
+                    && entry.visibility == MediaVisibility::Personal
+                    && entry.ingest_status == IngestStatus::Ready
+                    && entry.owner_profile_id.as_deref() == Some(owner_profile_id)
+            })
+            .map(|(entry, asset_id)| PlayableAsset {
+                asset_id: asset_id.clone(),
+                track_id: entry.asset.track_id.clone(),
+                codec: entry.asset.codec.clone(),
+                content_type: entry.asset.content_type.clone(),
+                duration_ms: entry.asset.duration_ms,
+            })
+            .collect())
+    }
     async fn assets_for_public_playback(&self, track_id: &str) -> CanopyResult<Vec<PlayableAsset>> {
         Ok(self
             .entries
@@ -261,6 +296,16 @@ impl PlayableAssetRepository for InMemoryAudioAssetStore {
         asset_id: &str,
         audience: StreamAudience,
     ) -> CanopyResult<Option<AuthorizedStreamAsset>> {
+        let configured_owner = match audience {
+            StreamAudience::Public => None,
+            StreamAudience::Personal => {
+                let Some(settings) = &self.instance_settings else {
+                    return Ok(None);
+                };
+                settings.owner_profile_id().await?
+            }
+        };
+
         Ok(self
             .entries
             .iter()
@@ -272,7 +317,7 @@ impl PlayableAssetRepository for InMemoryAudioAssetStore {
                         StreamAudience::Public => entry.visibility == MediaVisibility::ReleaseSafe,
                         StreamAudience::Personal => {
                             entry.visibility == MediaVisibility::Personal
-                                && entry.owner_profile_id.is_some()
+                                && entry.owner_profile_id.as_deref() == configured_owner.as_deref()
                         }
                     }
             })

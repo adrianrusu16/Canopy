@@ -38,6 +38,7 @@ pub mod owner;
 pub mod playback;
 pub mod playlists;
 pub mod preferences;
+pub mod principal;
 pub mod profile;
 pub mod providers;
 pub mod search;
@@ -53,15 +54,16 @@ use health::HealthService;
 use history::HistoryService;
 #[cfg(not(feature = "pg"))]
 use jade_store::{
-    InMemoryAudioAssetStore, InMemoryCatalog, InMemoryLibraryStore, InMemoryLikeStore,
-    InMemoryPlaybackHistoryStore, InMemoryPlaylistStore, InMemoryPreferencesStore,
-    InMemorySessionStore,
+    InMemoryAudioAssetStore, InMemoryCatalog, InMemoryInstanceSettingsStore, InMemoryLibraryStore,
+    InMemoryLikeStore, InMemoryPlaybackHistoryStore, InMemoryPlaylistStore,
+    InMemoryPreferencesStore, InMemorySessionStore,
 };
 use library::LibraryService;
 use likes::LikeService;
 use playback::{PlaybackService, ResolverConfig, ResolverService};
 use playlists::PlaylistService;
 use preferences::PreferencesService;
+use principal::PrincipalService;
 use profile::ProfileService;
 use search::SearchService;
 
@@ -158,6 +160,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let playable_asset_repo: Arc<dyn canopy_core::PlayableAssetRepository>;
     let session_repo: Arc<dyn canopy_core::SessionRepository>;
     let profile_repo: Arc<dyn canopy_core::ProfileRepository>;
+    let instance_settings_repo: Arc<dyn canopy_core::InstanceSettingsRepository>;
     let history_repo: Arc<dyn canopy_core::PlaybackHistoryRepository>;
     let library_repo: Arc<dyn canopy_core::LibraryRepository>;
     let like_repo: Arc<dyn canopy_core::LikeRepository>;
@@ -204,6 +207,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     Arc::new(jade_store::PgPlayableAssetRepository::new((*pool).clone()));
                 session_repo = Arc::new(jade_store::PgSessionRepository::new((*pool).clone()));
                 profile_repo = Arc::new(jade_store::PgProfileRepository::new((*pool).clone()));
+                instance_settings_repo = Arc::new(jade_store::PgInstanceSettingsRepository::new(
+                    (*pool).clone(),
+                ));
                 history_repo = Arc::new(jade_store::PgPlaybackHistoryRepository::new(
                     (*pool).clone(),
                 ));
@@ -223,9 +229,11 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         let catalog = demo_catalog();
         catalog_repo = Arc::new(catalog.clone());
         discovery_repo = Arc::new(catalog);
-        playable_asset_repo = Arc::new(demo_assets());
+        let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+        playable_asset_repo = Arc::new(demo_assets().with_instance_settings(settings.clone()));
         session_repo = Arc::new(InMemorySessionStore::default());
         profile_repo = Arc::new(jade_store::InMemoryProfileStore::default());
+        instance_settings_repo = settings;
         history_repo = Arc::new(InMemoryPlaybackHistoryStore::default());
         library_repo = Arc::new(InMemoryLibraryStore::default());
         like_repo = Arc::new(InMemoryLikeStore::default());
@@ -239,6 +247,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let search = SearchService::new(catalog_repo);
     let playback = PlaybackService::new(session_repo);
     let auth = AuthService::new(config.auth_token_secret.clone());
+    let principal = PrincipalService::new(profile_repo.clone(), instance_settings_repo);
     let profile = ProfileService::new(profile_repo.clone(), history_repo.clone());
     let history = HistoryService::new(profile_repo.clone(), history_repo);
     let library = LibraryService::new(profile_repo.clone(), library_repo);
@@ -279,6 +288,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         resolver,
         discovery,
         auth,
+        principal,
     });
 
     info!(grpc_addr = %config.grpc_addr, "Public gRPC listener ready");

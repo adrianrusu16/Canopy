@@ -54,7 +54,11 @@ impl PgPlayableAssetRepository {
                 WHERE aa.id = $1
                   AND t.visibility = 'personal'
                   AND t.ingest_status = 'ready'
-                  AND t.owner_profile_id IS NOT NULL
+                  AND t.owner_profile_id = (
+                      SELECT owner_profile_id
+                      FROM instance_settings
+                      WHERE singleton = TRUE
+                  )
             "#,
         )
         .bind(asset_id)
@@ -68,6 +72,44 @@ impl PgPlayableAssetRepository {
 
 #[async_trait]
 impl PlayableAssetRepository for PgPlayableAssetRepository {
+    async fn assets_for_personal_playback(
+        &self,
+        owner_profile_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<Vec<PlayableAsset>> {
+        let owner_profile_id = parse_uuid(owner_profile_id, "owner_profile_id")?;
+        let track_id = parse_uuid(track_id, "track_id")?;
+        let rows = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String, String, i64)>(
+            r#"
+                SELECT aa.id, aa.track_id, aa.codec, aa.content_type, aa.duration_ms
+                FROM audio_assets aa
+                JOIN tracks t ON t.id = aa.track_id
+                WHERE t.id = $1
+                  AND t.owner_profile_id = $2
+                  AND t.visibility = 'personal'
+                  AND t.ingest_status = 'ready'
+                ORDER BY aa.codec, aa.id
+            "#,
+        )
+        .bind(track_id)
+        .bind(owner_profile_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(asset_id, track_id, codec, content_type, duration_ms)| PlayableAsset {
+                    asset_id: asset_id.to_string(),
+                    track_id: track_id.to_string(),
+                    codec,
+                    content_type,
+                    duration_ms: duration_ms.max(0) as u64,
+                },
+            )
+            .collect())
+    }
     async fn assets_for_public_playback(&self, track_id: &str) -> CanopyResult<Vec<PlayableAsset>> {
         let track_id = parse_uuid(track_id, "track_id")?;
         let rows = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String, String, i64)>(

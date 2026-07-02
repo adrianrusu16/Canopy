@@ -555,6 +555,19 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
             .is_empty()
     );
 
+    let personal_playable = stream_assets
+        .assets_for_personal_playback(&owner_a.id, &personal_a_id)
+        .await
+        .unwrap();
+    assert_eq!(personal_playable.len(), 1);
+    assert!(
+        stream_assets
+            .assets_for_personal_playback(&owner_b.id, &personal_a_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     let public_asset_id = public_playable[0].asset_id.clone();
     let personal_asset_id: String =
         sqlx::query_scalar("SELECT id::text FROM audio_assets WHERE track_id = $1::uuid")
@@ -587,6 +600,14 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
     assert!(
         stream_assets
             .authorize_stream_asset(&personal_asset_id, StreamAudience::Public)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    settings.set_owner_profile_id(&owner_b.id).await.unwrap();
+    assert!(
+        stream_assets
+            .authorize_stream_asset(&personal_asset_id, StreamAudience::Personal)
             .await
             .unwrap()
             .is_none()

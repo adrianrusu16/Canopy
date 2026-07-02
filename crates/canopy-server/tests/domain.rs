@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CatalogRepository, IngestStatus,
-    MediaItem, MediaVisibility, Page, PendingImportOutcome, PendingMediaImport, PlayableAsset,
-    PlayableAssetRepository, StreamAudience,
+    InstanceSettingsRepository, MediaItem, MediaVisibility, Page, PendingImportOutcome,
+    PendingMediaImport, PlayableAsset, PlayableAssetRepository, StreamAudience,
 };
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
 use canopy_server::jade_store::{
     InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
-    InMemorySessionStore,
+    InMemoryInstanceSettingsStore, InMemorySessionStore,
 };
 use canopy_server::playback::PlaybackService;
 use canopy_server::providers::{ProviderAdapter, TestFixtureProvider};
@@ -185,6 +185,8 @@ async fn catalog_scope_public_assets_hide_personal_tracks() {
         storage_key: "audio/personal.mp3".to_string(),
         ..AudioAsset::default()
     };
+    let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+    settings.set_owner_profile_id("owner-a").await.unwrap();
     let assets = InMemoryAudioAssetStore::from_entries(vec![
         InMemoryAudioAssetEntry {
             asset: public_asset.clone(),
@@ -198,7 +200,8 @@ async fn catalog_scope_public_assets_hide_personal_tracks() {
             ingest_status: IngestStatus::Ready,
             owner_profile_id: Some("owner-a".to_string()),
         },
-    ]);
+    ])
+    .with_instance_settings(settings.clone());
 
     assert_eq!(
         assets.assets_for_public_track("public").await.unwrap(),
@@ -224,6 +227,34 @@ async fn catalog_scope_public_assets_hide_personal_tracks() {
             .await
             .unwrap()
             .is_empty()
+    );
+
+    let personal_playable = assets
+        .assets_for_personal_playback("owner-a", "personal")
+        .await
+        .unwrap();
+    assert_eq!(personal_playable.len(), 1);
+    assert!(
+        assets
+            .assets_for_personal_playback("owner-b", "personal")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        assets
+            .authorize_stream_asset(&personal_playable[0].asset_id, StreamAudience::Personal,)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    settings.set_owner_profile_id("owner-b").await.unwrap();
+    assert!(
+        assets
+            .authorize_stream_asset(&personal_playable[0].asset_id, StreamAudience::Personal,)
+            .await
+            .unwrap()
+            .is_none()
     );
 
     let playable = assets.assets_for_public_playback("public").await.unwrap();

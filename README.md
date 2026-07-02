@@ -15,7 +15,7 @@ This document describes the current Canopy architecture and identifies the remai
 | Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs now mutate persisted session state. Queue semantics and multi-device conflict handling are still planned. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
-| Playback Resolver         | ✅ Implemented | Public `ResolvePlayback` selects `release_safe` + `ready` assets and returns short-lived opaque Canopy capabilities; storage keys never enter client responses. |
+| Playback Resolver         | ✅ Implemented | `ResolvePlayback` is anonymous-compatible and auth-aware: the configured owner receives owner-scoped personal media first with public fallback; other callers receive release-safe public media. Capabilities remain opaque and storage keys never enter client responses. |
 | Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable state is profile-owned; history supports chronological reads and deletion, and disabling consent atomically purges it. Anonymous users receive no backend history, library, likes, preferences, or playlists. |
 | Provider Adapters         | Implemented | Deterministic fixture ingestion remains idempotent and quarantined by default; external provider runtime code has been removed. |
 | Persistence (PostgreSQL)  | Partial | Typed adapters cover ownership, media policy, local-import transactions, checksum deduplication, and fail-closed promotion. |
@@ -32,7 +32,7 @@ Canopy uses a fully owned local-media architecture. PostgreSQL remains the metad
 
 Phases 1 and 2 are implemented. Storage fields use `storage_key`; one existing profile can be assigned as the instance owner; catalog and asset repositories separate public and owner-scoped paths; and `canopy-admin` imports MP3 files and optional artwork into content-addressed managed storage. PostgreSQL records each import as personal and pending before file finalization, then exposes it to the matching owner only after the row becomes ready. Checksum uniqueness makes retries idempotent.
 
-Public Nginx/X-Accel streaming and the public playback cutover are implemented. Supabase runtime/configuration and the obsolete direct-object-URL abstractions have been removed. Owner-only personal playback issuance, reconciliation tooling, and universal artwork fallback remain subsequent phases. RustFS stays outside the runtime as optional future-reserved Compose infrastructure.
+Public Nginx/X-Accel streaming and the public playback cutover are implemented. Supabase runtime/configuration and the obsolete direct-object-URL abstractions have been removed. Owner-first personal playback issuance is implemented. Reconciliation tooling and universal artwork fallback remain subsequent phases. RustFS stays outside the runtime as optional future-reserved Compose infrastructure.
 #### Owner and local media administration
 
 Apply the migration chain and create the profile before assigning it as the instance owner. The admin process is intentionally stricter than the server: both the database URL and managed media root are required, and it never falls back to in-memory storage.
@@ -337,9 +337,9 @@ A recommendation engine is a future layer on top of this service; the initial im
 
 ### Playback Resolver
 
-The playback resolver selects a `release_safe` + `ready` audio asset and returns `{CANOPY_STREAM_PUBLIC_BASE_URL}/stream/{opaque-capability}` in `PlaybackSource`. The signed capability contains an asset UUID, audience, expiry, version, and nonce, but no storage key. Nginx delegates every request to Canopy's private authorizer, which rechecks current PostgreSQL policy before returning an internal media redirect; Nginx then serves the bytes with native range support.
+The playback resolver returns `{CANOPY_STREAM_PUBLIC_BASE_URL}/stream/{opaque-capability}` in `PlaybackSource`. `ResolvePlayback` accepts optional authentication metadata. With no credentials, or with a valid non-owner identity, it selects only `release_safe` + `ready` media. For the configured instance owner it first selects `personal` + `ready` media owned by that profile, then falls back to release-safe public media. Invalid supplied credentials return `Unauthenticated`; inaccessible personal media is concealed with the same `NotFound` result as missing media.
 
-Public issuance is anonymous-compatible. The token format reserves a personal audience, but authenticated owner-only personal issuance is a later phase. External provider URL generation has been removed; RustFS is inactive Compose infrastructure reserved for possible future storage work.
+The signed capability contains an asset UUID, audience, expiry, version, and nonce, but no storage key. Public and personal audiences are minted according to the selected asset. Nginx delegates every request to Canopy's private authorizer, which rechecks current PostgreSQL policy before returning an internal media redirect. Personal authorization additionally requires the asset owner to remain the currently configured instance owner, so ownership changes revoke unexpired personal capabilities. Nginx then serves the bytes with native range support. External provider URL generation has been removed; RustFS is inactive Compose infrastructure reserved for possible future storage work.
 
 ### Playback Session Controls
 
@@ -387,7 +387,7 @@ PostgreSQL stores metadata, ownership, visibility, ingest state, provenance, and
 
 `audio_assets.storage_key` and artwork storage keys are validated relative paths under this managed root. Nginx, not the gRPC process, will serve files after Canopy authorizes a public or owner-scoped request.
 
-The schema foundation, managed directory creation, import CLI, public playback cutover, and Nginx protected locations are implemented. Supabase runtime code and direct-object-URL compatibility code are removed. Owner-scoped playback delivery and reconciliation remain; RustFS is dormant Compose infrastructure and is not used by active playback.
+The schema foundation, managed directory creation, import CLI, public playback cutover, and Nginx protected locations are implemented. Supabase runtime code and direct-object-URL compatibility code are removed. Owner-scoped playback delivery is implemented; reconciliation remains; RustFS is dormant Compose infrastructure and is not used by active playback.
 
 ### PostgreSQL
 

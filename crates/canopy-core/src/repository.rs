@@ -77,6 +77,12 @@ pub trait AudioAssetRepository: Send + Sync {
 /// Playback asset access scoped to capability issuance and authorization.
 #[async_trait]
 pub trait PlayableAssetRepository: Send + Sync {
+    /// Returns selectable assets for a ready personal track owned by the profile.
+    async fn assets_for_personal_playback(
+        &self,
+        owner_profile_id: &str,
+        track_id: &str,
+    ) -> CanopyResult<Vec<PlayableAsset>>;
     /// Returns selectable assets for a release-safe, ready track.
     async fn assets_for_public_playback(&self, track_id: &str) -> CanopyResult<Vec<PlayableAsset>>;
 

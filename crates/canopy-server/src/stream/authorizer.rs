@@ -82,6 +82,13 @@ mod tests {
 
     #[async_trait]
     impl PlayableAssetRepository for FakeRepository {
+        async fn assets_for_personal_playback(
+            &self,
+            _owner_profile_id: &str,
+            _track_id: &str,
+        ) -> CanopyResult<Vec<PlayableAsset>> {
+            Ok(Vec::new())
+        }
         async fn assets_for_public_playback(
             &self,
             _track_id: &str,

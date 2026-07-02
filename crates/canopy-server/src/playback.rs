@@ -13,6 +13,7 @@ use canopy_core::{
     SessionRepository, StreamAudience,
 };
 
+use crate::principal::PlaybackPrincipal;
 use crate::stream::StreamTokenCodec;
 
 /// Application service for session state.
@@ -224,32 +225,76 @@ impl ResolverService {
         }
     }
 
-    /// Resolves `track_id` to a playable source valid from now.
+    /// Resolves a track for an anonymous caller using the current time.
     pub async fn resolve(&self, track_id: &str) -> CanopyResult<PlaybackSource> {
-        self.resolve_at(track_id, now_epoch_ms()).await
+        self.resolve_at(&PlaybackPrincipal::Anonymous, track_id, now_epoch_ms())
+            .await
     }
 
-    /// Resolves `track_id` using an explicit `now` (epoch ms); the expiry is
-    /// computed relative to it. Split out so the time-dependent behavior is
-    /// deterministically testable.
+    /// Resolves a track for the principal using an explicit epoch time.
     pub async fn resolve_at(
         &self,
+        principal: &PlaybackPrincipal,
         track_id: &str,
         now_epoch_ms: u64,
     ) -> CanopyResult<PlaybackSource> {
-        let assets = self.assets.assets_for_public_playback(track_id).await?;
+        let (assets, audience) = match principal {
+            PlaybackPrincipal::Owner { profile_id } => {
+                let personal = self
+                    .assets
+                    .assets_for_personal_playback(profile_id, track_id)
+                    .await?;
+                if personal.is_empty() {
+                    (
+                        self.assets.assets_for_public_playback(track_id).await?,
+                        StreamAudience::Public,
+                    )
+                } else {
+                    (personal, StreamAudience::Personal)
+                }
+            }
+            PlaybackPrincipal::Anonymous | PlaybackPrincipal::Authenticated => (
+                self.assets.assets_for_public_playback(track_id).await?,
+                StreamAudience::Public,
+            ),
+        };
         let asset = self
             .select_asset(assets)
             .ok_or_else(|| CanopyError::not_found("audio_asset", track_id))?;
 
+        self.playback_source(asset, audience, now_epoch_ms)
+    }
+
+    /// Resolves a track and synchronizes the lightweight session.
+    pub async fn resolve_for_session(
+        &self,
+        playback: &PlaybackService,
+        principal: &PlaybackPrincipal,
+        session_id: &str,
+        track_id: &str,
+        now_epoch_ms: u64,
+    ) -> CanopyResult<PlaybackSource> {
+        let source = self.resolve_at(principal, track_id, now_epoch_ms).await?;
+        playback
+            .load_media(session_id, source.track_id.clone())
+            .await?;
+        Ok(source)
+    }
+
+    fn playback_source(
+        &self,
+        asset: PlayableAsset,
+        audience: StreamAudience,
+        now_epoch_ms: u64,
+    ) -> CanopyResult<PlaybackSource> {
         let ttl_ms = u64::try_from(self.config.token_ttl.as_millis())
             .map_err(|_| CanopyError::Internal("stream token TTL is too large".into()))?;
         let expires_at_epoch_ms = now_epoch_ms
             .checked_add(ttl_ms)
             .ok_or_else(|| CanopyError::Internal("stream token expiry overflow".into()))?;
-        let token =
-            self.tokens
-                .mint(&asset.asset_id, StreamAudience::Public, expires_at_epoch_ms)?;
+        let token = self
+            .tokens
+            .mint(&asset.asset_id, audience, expires_at_epoch_ms)?;
         let stream_url = format!(
             "{}/stream/{token}",
             self.config.public_base_url.trim_end_matches('/')
@@ -264,22 +309,6 @@ impl ResolverService {
             expires_at_epoch_ms,
         })
     }
-
-    /// Resolves a track and synchronizes the lightweight anonymous session.
-    pub async fn resolve_for_session(
-        &self,
-        playback: &PlaybackService,
-        session_id: &str,
-        track_id: &str,
-        now_epoch_ms: u64,
-    ) -> CanopyResult<PlaybackSource> {
-        let source = self.resolve_at(track_id, now_epoch_ms).await?;
-        playback
-            .load_media(session_id, source.track_id.clone())
-            .await?;
-        Ok(source)
-    }
-
     /// Picks the most preferred available asset, falling back to the first one
     /// when none match the preference list (so an ingested-but-unranked codec
     /// is still playable).
@@ -314,23 +343,42 @@ mod tests {
     };
 
     use crate::jade_store::InMemorySessionStore;
+    use crate::principal::PlaybackPrincipal;
     use crate::stream::StreamTokenCodec;
 
     const SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
     const ASSET_ID: &str = "018f0000-0000-7000-8000-000000000001";
 
     struct FakePlayableAssets {
-        assets: Vec<PlayableAsset>,
+        public_assets: Vec<PlayableAsset>,
+        personal_assets: Vec<PlayableAsset>,
+        personal_error: bool,
     }
 
     #[async_trait]
     impl PlayableAssetRepository for FakePlayableAssets {
+        async fn assets_for_personal_playback(
+            &self,
+            _owner_profile_id: &str,
+            track_id: &str,
+        ) -> CanopyResult<Vec<PlayableAsset>> {
+            if self.personal_error {
+                return Err(CanopyError::Storage("personal lookup failed".into()));
+            }
+            Ok(self
+                .personal_assets
+                .iter()
+                .filter(|asset| asset.track_id == track_id)
+                .cloned()
+                .collect())
+        }
+
         async fn assets_for_public_playback(
             &self,
             track_id: &str,
         ) -> CanopyResult<Vec<PlayableAsset>> {
             Ok(self
-                .assets
+                .public_assets
                 .iter()
                 .filter(|asset| asset.track_id == track_id)
                 .cloned()
@@ -357,8 +405,20 @@ mod tests {
     }
 
     fn resolver(assets: Vec<PlayableAsset>) -> ResolverService {
+        resolver_with_assets(assets, Vec::new(), false)
+    }
+
+    fn resolver_with_assets(
+        public_assets: Vec<PlayableAsset>,
+        personal_assets: Vec<PlayableAsset>,
+        personal_error: bool,
+    ) -> ResolverService {
         ResolverService::new(
-            Arc::new(FakePlayableAssets { assets }),
+            Arc::new(FakePlayableAssets {
+                public_assets,
+                personal_assets,
+                personal_error,
+            }),
             Arc::new(StreamTokenCodec::new(SECRET).unwrap()),
             ResolverConfig {
                 public_base_url: "https://media.test".into(),
@@ -369,13 +429,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_prefers_personal_asset_and_mints_personal_capability() {
+        let resolver = resolver_with_assets(
+            vec![asset("trk_1", "mp3", "public.mp3")],
+            vec![asset("trk_1", "opus", "personal.opus")],
+            false,
+        );
+
+        let source = resolver
+            .resolve_at(
+                &PlaybackPrincipal::Owner {
+                    profile_id: "owner-a".into(),
+                },
+                "trk_1",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let token = source
+            .stream_url
+            .strip_prefix("https://media.test/stream/")
+            .unwrap();
+        let claims = StreamTokenCodec::new(SECRET)
+            .unwrap()
+            .verify(token, 1_000)
+            .unwrap();
+
+        assert_eq!(source.codec, "opus");
+        assert_eq!(claims.audience, StreamAudience::Personal);
+    }
+
+    #[tokio::test]
+    async fn owner_falls_back_to_public_capability() {
+        let resolver =
+            resolver_with_assets(vec![asset("trk_1", "mp3", "public.mp3")], Vec::new(), false);
+
+        let source = resolver
+            .resolve_at(
+                &PlaybackPrincipal::Owner {
+                    profile_id: "owner-a".into(),
+                },
+                "trk_1",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let token = source
+            .stream_url
+            .strip_prefix("https://media.test/stream/")
+            .unwrap();
+        let claims = StreamTokenCodec::new(SECRET)
+            .unwrap()
+            .verify(token, 1_000)
+            .unwrap();
+
+        assert_eq!(claims.audience, StreamAudience::Public);
+    }
+
+    #[tokio::test]
+    async fn anonymous_cannot_resolve_personal_only_media() {
+        let resolver = resolver_with_assets(
+            Vec::new(),
+            vec![asset("trk_1", "mp3", "personal.mp3")],
+            false,
+        );
+
+        let error = resolver
+            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", 1_000)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CanopyError::NotFound { entity, .. } if entity == "audio_asset"));
+    }
+
+    #[tokio::test]
+    async fn personal_lookup_failure_does_not_fall_back_to_public() {
+        let resolver =
+            resolver_with_assets(vec![asset("trk_1", "mp3", "public.mp3")], Vec::new(), true);
+
+        let error = resolver
+            .resolve_at(
+                &PlaybackPrincipal::Owner {
+                    profile_id: "owner-a".into(),
+                },
+                "trk_1",
+                1_000,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, CanopyError::Storage(message) if message == "personal lookup failed")
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_prefers_higher_ranked_codec() {
         let resolver = resolver(vec![
             asset("trk_1", "mp3", "audio/tracks/trk_1.mp3"),
             asset("trk_1", "opus", "audio/tracks/trk_1.opus"),
         ]);
 
-        let source = resolver.resolve_at("trk_1", 1_000_000).await.unwrap();
+        let source = resolver
+            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", 1_000_000)
+            .await
+            .unwrap();
         // `opus` outranks `mp3` in the default preference list.
         assert_eq!(source.codec, "opus");
         assert_eq!(source.content_type, "audio/opus");
@@ -387,7 +545,10 @@ mod tests {
         let resolver = resolver(vec![asset("trk_1", "mp3", "audio/tracks/trk_1.mp3")]);
 
         let now = 1_000_000;
-        let source = resolver.resolve_at("trk_1", now).await.unwrap();
+        let source = resolver
+            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", now)
+            .await
+            .unwrap();
 
         assert_eq!(source.expires_at_epoch_ms, now + 600_000);
         let token = source
@@ -406,14 +567,20 @@ mod tests {
     #[tokio::test]
     async fn resolve_falls_back_when_no_preferred_codec() {
         let resolver = resolver(vec![asset("trk_1", "wav", "audio/tracks/trk_1.wav")]);
-        let source = resolver.resolve_at("trk_1", 0).await.unwrap();
+        let source = resolver
+            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", 0)
+            .await
+            .unwrap();
         assert_eq!(source.codec, "wav");
     }
 
     #[tokio::test]
     async fn resolve_missing_track_is_not_found() {
         let resolver = resolver(vec![]);
-        let err = resolver.resolve_at("missing", 0).await.unwrap_err();
+        let err = resolver
+            .resolve_at(&PlaybackPrincipal::Anonymous, "missing", 0)
+            .await
+            .unwrap_err();
         assert!(matches!(err, CanopyError::NotFound { entity, .. } if entity == "audio_asset"));
     }
 
@@ -423,7 +590,13 @@ mod tests {
         let resolver = resolver(vec![asset("trk_1", "mp3", "audio/tracks/trk_1.mp3")]);
 
         let source = resolver
-            .resolve_for_session(&playback, "", "trk_1", 1_000_000)
+            .resolve_for_session(
+                &playback,
+                &PlaybackPrincipal::Anonymous,
+                "",
+                "trk_1",
+                1_000_000,
+            )
             .await
             .unwrap();
 
