@@ -10,8 +10,8 @@ use crate::error::CanopyResult;
 use crate::model::{
     AudioAsset, AuthorizedStreamAsset, LibraryItem, MediaItem, MediaPage, Page,
     PendingImportOutcome, PendingMediaImport, PlayableAsset, PlaybackHistoryEvent,
-    PlaybackHistoryPage, Playlist, PlaylistPage, ProfilePreferences, ProviderTrack, Session,
-    StreamAudience, TrackLike, UserProfile,
+    PlaybackHistoryPage, Playlist, PlaylistPage, ProfilePreferences, ProviderTrack, StreamAudience,
+    TrackLike, UserProfile,
 };
 
 /// Read access to public and owner-scoped catalog partitions.
@@ -94,22 +94,6 @@ pub trait PlayableAssetRepository: Send + Sync {
     ) -> CanopyResult<Option<AuthorizedStreamAsset>>;
 }
 
-/// Persistence of lightweight playback sessions.
-#[async_trait]
-pub trait SessionRepository: Send + Sync {
-    /// Creates a fresh session and returns its identifier.
-    async fn create(&self) -> CanopyResult<String>;
-
-    /// Fetches a session by identifier, if present.
-    async fn get(&self, id: &str) -> CanopyResult<Option<Session>>;
-
-    /// Persists the given session state.
-    async fn update(&self, session: Session) -> CanopyResult<()>;
-
-    /// Removes a session by identifier.
-    async fn delete(&self, id: &str) -> CanopyResult<()>;
-}
-
 /// Persistence of durable logged-in user profiles.
 #[async_trait]
 pub trait ProfileRepository: Send + Sync {
@@ -126,6 +110,9 @@ pub trait ProfileRepository: Send + Sync {
         &self,
         external_user_id: &str,
     ) -> CanopyResult<Option<UserProfile>>;
+
+    /// Deletes a profile by external identity after lifecycle policy checks.
+    async fn delete_by_external_user_id(&self, external_user_id: &str) -> CanopyResult<()>;
 }
 
 /// Persistence of singleton settings for this Canopy installation.

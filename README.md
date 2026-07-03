@@ -8,11 +8,12 @@ This document describes the current Canopy architecture and identifies the remai
 
 | Area                      | Status         | Notes                                                                                       |
 | ------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
-| Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (wire contract), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (domain services + `api::grpc` adapter + `jade_store`). |
-| gRPC server (`tonic`)     | 🟡 Prototype   | Catalog, session playback controls, playback resolution, discovery, and authenticated profile-state RPCs including private playlists are wired through the shared proto contract. `Search` and `Browse` still use the unary demo response shape (not streaming `SearchResult` yet). |
+| Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (BSR SDK facade), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (bounded gRPC adapters + `jade_store`). |
+| gRPC server (`tonic`)     | 🟡 Partial     | Eight bounded `canopy.v1` services share one listener. Catalog, playback-source resolution, discovery, system, profile, history, and collection mutations use the audited BSR contract; remaining collection list/playlist resource work is explicit below. |
 | Configuration             | ✅ Implemented | Env-driven configuration validates the public stream URL, 32-byte capability secret, private authorization bind, PostgreSQL URL, and managed media root before listeners start. |
+| API contract / BSR        | ✅ Canopy migrated | Private module uf.build/pandawave/canopy-api commit 8e44e0fa997a4160bfefd5d68599de1b; canopy-proto pins immutable Prost/Tonic SDK versions. PandaEngine migration and the 0.1.0 release label remain. |
 | Catalog service           | Partial | Public repository paths are explicit; PostgreSQL and in-memory adapters isolate `release_safe` media from owner-scoped personal media. |
-| Session handling          | 🟡 Prototype   | `PlaybackService` over the `SessionRepository` port; `play`/`pause`/`seek`/`stop`/speed RPCs now mutate persisted session state. Queue semantics and multi-device conflict handling are still planned. |
+| Player/session handling   | ✅ Engine-owned | Canopy owns playback-source authorization only. Play/pause/seek/speed/queue/session state belongs to PandaEngine and no backend session repository or control RPC remains. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
 | Playback Resolver         | ✅ Implemented | `ResolvePlayback` is anonymous-compatible and auth-aware: the configured owner receives owner-scoped personal media first with public fallback; other callers receive release-safe public media. Capabilities remain opaque and storage keys never enter client responses. |
@@ -168,21 +169,20 @@ canopy-core` and `canopy-server → canopy-proto`.
 canopy/
 +-- crates/
 |   +-- canopy-proto/
-|   |   +-- proto/canopy.proto    # canonical gRPC contract
-|   |   +-- build.rs
-|   |   `-- src/lib.rs
+|   |   +-- proto/canopy/v1/canopy.proto # temporary audited rollback copy
+|   |   `-- src/lib.rs                    # immutable BSR SDK re-exports
 |   +-- canopy-core/
 |   |   +-- model.rs              # domain values and playback contracts
 |   |   +-- error.rs              # CanopyError / CanopyResult
 |   |   `-- repository.rs         # storage-independent domain ports
 |   `-- canopy-server/
-|       +-- api/grpc.rs           # tonic adapter and auth metadata boundary
+|       +-- api/grpc/             # bounded Tonic adapters and auth boundary
 |       +-- admin.rs              # owner assignment and media import application
 |       +-- auth.rs               # login-token verification
 |       +-- catalog.rs
 |       +-- search.rs
 |       +-- discovery.rs
-|       +-- playback.rs           # sessions and playback resolution
+|       +-- playback.rs           # owner-aware playback-source resolution
 |       +-- profile.rs
 |       +-- history.rs
 |       +-- library.rs
@@ -623,7 +623,7 @@ cargo build --workspace --release
 
 The workflow installs `protoc` so that the `canopy-proto` crate's `build.rs` compiles successfully in CI, and uses `Swatinem/rust-cache` for fast incremental builds.
 
-The PostgreSQL harness starts an isolated PostgreSQL 18.4 Compose project, applies the migration chain, runs feature tests serially, and destroys the stack. `scripts/test-streaming.sh` adds a real Nginx container and synthetic MP3, verifies `206` range responses, rejects tampered/direct paths, and proves an issued capability stops working immediately after policy revocation. Proto wire-compatibility gates remain planned.
+The PostgreSQL harness starts an isolated PostgreSQL 18.4 Compose project, applies the migration chain, runs feature tests serially, and destroys the stack. `scripts/test-streaming.sh` adds a real Nginx container and synthetic MP3, verifies `206` range responses, rejects tampered/direct paths, and proves an issued capability stops working immediately after policy revocation. The canonical `canopy-api` repository runs Buf format/lint/build checks; breaking-change enforcement begins after the initial `v0.1.0` release label.
 
 ---
 

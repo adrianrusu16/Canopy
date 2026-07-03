@@ -10,8 +10,7 @@ use canopy_core::{
     LibraryRepository, LikeRepository, MediaItem, MediaPage, MediaVisibility, Page, PlayableAsset,
     PlayableAssetRepository, PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage,
     PlaybackHistoryRepository, Playlist, PlaylistPage, PlaylistRepository, PreferencesRepository,
-    ProfilePreferences, ProfileRepository, Session, SessionRepository, StreamAudience, TrackLike,
-    UserProfile,
+    ProfilePreferences, ProfileRepository, StreamAudience, TrackLike, UserProfile,
 };
 
 /// Catalog item together with its mandatory access policy.
@@ -329,42 +328,6 @@ impl PlayableAssetRepository for InMemoryAudioAssetStore {
     }
 }
 
-/// In-memory session store.
-#[derive(Default)]
-pub struct InMemorySessionStore {
-    sessions: Mutex<HashMap<String, Session>>,
-}
-
-#[async_trait]
-impl SessionRepository for InMemorySessionStore {
-    async fn create(&self) -> CanopyResult<String> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let session = Session {
-            id: id.clone(),
-            ..Session::default()
-        };
-        self.sessions.lock().unwrap().insert(id.clone(), session);
-        Ok(id)
-    }
-
-    async fn get(&self, id: &str) -> CanopyResult<Option<Session>> {
-        Ok(self.sessions.lock().unwrap().get(id).cloned())
-    }
-
-    async fn update(&self, session: Session) -> CanopyResult<()> {
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session.id.clone(), session);
-        Ok(())
-    }
-
-    async fn delete(&self, id: &str) -> CanopyResult<()> {
-        self.sessions.lock().unwrap().remove(id);
-        Ok(())
-    }
-}
-
 /// In-memory logged-in profile store.
 #[derive(Default)]
 pub struct InMemoryProfileStore {
@@ -397,6 +360,11 @@ impl ProfileRepository for InMemoryProfileStore {
         external_user_id: &str,
     ) -> CanopyResult<Option<UserProfile>> {
         Ok(self.profiles.lock().unwrap().get(external_user_id).cloned())
+    }
+
+    async fn delete_by_external_user_id(&self, external_user_id: &str) -> CanopyResult<()> {
+        self.profiles.lock().unwrap().remove(external_user_id);
+        Ok(())
     }
 }
 

@@ -17,14 +17,14 @@ pub use memory::{
     InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
     InMemoryInstanceSettingsStore, InMemoryLibraryStore, InMemoryLikeStore,
     InMemoryPlaybackHistoryStore, InMemoryPlaylistStore, InMemoryPreferencesStore,
-    InMemoryProfileStore, InMemorySessionStore,
+    InMemoryProfileStore,
 };
 
 #[cfg(feature = "pg")]
 pub use pg::{
     PgAudioAssetRepository, PgCatalogRepository, PgInstanceSettingsRepository, PgLibraryRepository,
     PgLikeRepository, PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
-    PgProfileRepository, PgSessionRepository,
+    PgProfileRepository,
 };
 #[cfg(feature = "pg")]
 pub use pg_stream::PgPlayableAssetRepository;

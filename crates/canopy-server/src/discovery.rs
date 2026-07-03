@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use canopy_core::{CanopyResult, DiscoveryRepository, MediaItem, MediaPage};
+use canopy_core::{CanopyResult, DiscoveryRepository, MediaItem, MediaPage, Page};
 
 /// Application service for the discovery shuffle channel.
 #[derive(Clone)]
@@ -40,7 +40,13 @@ impl DiscoveryService {
     /// no two consecutive items share an artist where avoidable, and is capped
     /// at a clamped page size.
     pub async fn next(&self, recently_played: &[String], limit: u32) -> CanopyResult<MediaPage> {
-        let limit = Self::clamp_limit(limit) as usize;
+        self.feed(recently_played, Page { limit, offset: 0 }).await
+    }
+
+    /// Returns an offset page from the diversified discovery pool.
+    pub async fn feed(&self, recently_played: &[String], page: Page) -> CanopyResult<MediaPage> {
+        let limit = Self::clamp_limit(page.limit) as usize;
+        let offset = page.offset as usize;
         let excluded: HashSet<&str> = recently_played.iter().map(String::as_str).collect();
 
         let candidates: Vec<MediaItem> = self
@@ -52,8 +58,12 @@ impl DiscoveryService {
             .collect();
 
         let total = candidates.len();
-        let items = diversify(candidates, limit);
-        let has_more = total > items.len();
+        let items: Vec<_> = diversify(candidates, total)
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+        let has_more = total > offset.saturating_add(items.len());
 
         Ok(MediaPage {
             total_count: items.len() as i32,

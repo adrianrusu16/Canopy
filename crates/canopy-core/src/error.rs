@@ -28,6 +28,14 @@ pub enum CanopyError {
     #[error("unauthenticated: {0}")]
     Unauthenticated(String),
 
+    /// The operation cannot proceed while the resource is in its current state.
+    #[error("failed precondition: {0}")]
+    FailedPrecondition(String),
+
+    /// The operation lost an optimistic concurrency race and may be retried.
+    #[error("aborted: {0}")]
+    Aborted(String),
+
     /// A persistence or managed-media dependency failed.
     #[error("storage error: {0}")]
     Storage(String),

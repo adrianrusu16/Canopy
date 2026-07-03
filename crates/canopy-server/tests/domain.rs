@@ -4,17 +4,17 @@
 use std::sync::Arc;
 
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CatalogRepository, IngestStatus,
-    InstanceSettingsRepository, MediaItem, MediaVisibility, Page, PendingImportOutcome,
-    PendingMediaImport, PlayableAsset, PlayableAssetRepository, StreamAudience,
+    AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CanopyError, CatalogRepository,
+    IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility, Page, PageTokenCodec,
+    PendingImportOutcome, PendingMediaImport, PlayableAsset, PlayableAssetRepository,
+    StreamAudience,
 };
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
 use canopy_server::jade_store::{
     InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
-    InMemoryInstanceSettingsStore, InMemorySessionStore,
+    InMemoryInstanceSettingsStore,
 };
-use canopy_server::playback::PlaybackService;
 use canopy_server::providers::{ProviderAdapter, TestFixtureProvider};
 use canopy_server::search::SearchService;
 
@@ -37,6 +37,25 @@ fn sample_items() -> Vec<MediaItem> {
 
 fn page(limit: u32, offset: u32) -> Page {
     Page { limit, offset }
+}
+
+#[test]
+fn page_token_round_trips_offset_without_exposing_it() {
+    let codec = PageTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap();
+    let token = codec.encode(42).unwrap();
+
+    assert!(!token.contains("42"));
+    assert_eq!(codec.decode(&token).unwrap(), 42);
+}
+
+#[test]
+fn page_token_rejects_tampering() {
+    let codec = PageTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap();
+
+    assert!(matches!(
+        codec.decode("tampered"),
+        Err(CanopyError::InvalidArgument(_))
+    ));
 }
 
 #[test]
@@ -376,60 +395,13 @@ async fn discovery_spreads_artists() {
 }
 
 #[tokio::test]
-async fn session_lifecycle() {
-    let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
+async fn discovery_feed_applies_offset_after_diversification() {
+    let discovery = DiscoveryService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
-    let empty = playback.get_session("sess_1").await.unwrap();
-    assert_eq!(empty.current_media_id, None);
+    let result = discovery.feed(&[], page(1, 1)).await.unwrap();
 
-    playback
-        .update_session("sess_1", Some("trk_1".into()), Some(5_000))
-        .await
-        .unwrap();
-    let updated = playback.get_session("sess_1").await.unwrap();
-    assert_eq!(updated.current_media_id.as_deref(), Some("trk_1"));
-    assert_eq!(updated.position_ms, 5_000);
-
-    playback.end_session("sess_1").await.unwrap();
-    let after = playback.get_session("sess_1").await.unwrap();
-    assert_eq!(after.current_media_id, None);
-}
-
-#[tokio::test]
-async fn playback_controls_mutate_session_state() {
-    let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
-
-    let session_id = playback.play("", "trk_1".into(), 1_250).await.unwrap();
-    assert_eq!(session_id, PlaybackService::DEFAULT_SESSION_ID);
-
-    let playing = playback.get_session(&session_id).await.unwrap();
-    assert_eq!(playing.current_media_id.as_deref(), Some("trk_1"));
-    assert_eq!(playing.position_ms, 1_250);
-    assert!(playing.is_playing);
-
-    playback.seek(&session_id, 9_000).await.unwrap();
-    playback.set_playback_speed(&session_id, 1.5).await.unwrap();
-    playback.pause(&session_id).await.unwrap();
-
-    let paused = playback.get_session(&session_id).await.unwrap();
-    assert_eq!(paused.position_ms, 9_000);
-    assert_eq!(paused.playback_speed, 1.5);
-    assert!(!paused.is_playing);
-
-    playback.stop(&session_id).await.unwrap();
-    let stopped = playback.get_session(&session_id).await.unwrap();
-    assert_eq!(stopped.position_ms, 0);
-    assert!(!stopped.is_playing);
-}
-
-#[tokio::test]
-async fn playback_controls_reject_invalid_inputs() {
-    let playback = PlaybackService::new(Arc::new(InMemorySessionStore::default()));
-
-    assert!(playback.play("sess_1", "".into(), 0).await.is_err());
-    assert!(playback.play("sess_1", "trk_1".into(), -1).await.is_err());
-    assert!(playback.seek("sess_1", -1).await.is_err());
-    assert!(playback.set_playback_speed("sess_1", 0.0).await.is_err());
+    assert_eq!(result.items[0].id, "trk_2");
+    assert!(!result.has_more);
 }
 
 #[tokio::test]

@@ -26,11 +26,9 @@ canopy-core = { path = "crates/canopy-core" }
 
 # Async runtime / RPC
 tonic = "0.14.6"
-tonic-build = "0.14.6"
 prost = "0.14.4"
+prost-types = "0.14.4"
 tokio = { version = "1.38", features = ["full"] }
-tonic-prost-build = "0.14.6"
-tonic-prost = "0.14.6"
 
 # Database
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres", "macros", "uuid", "chrono"] }

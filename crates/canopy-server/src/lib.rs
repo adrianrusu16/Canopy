@@ -17,7 +17,14 @@ use std::sync::Arc;
 
 #[cfg(not(feature = "pg"))]
 use canopy_core::{AudioAsset, MediaItem};
-use canopy_proto::canopy_server::CanopyServer;
+use canopy_proto::catalog_service_server::CatalogServiceServer;
+use canopy_proto::discovery_service_server::DiscoveryServiceServer;
+use canopy_proto::history_service_server::HistoryServiceServer;
+use canopy_proto::library_service_server::LibraryServiceServer;
+use canopy_proto::playback_service_server::PlaybackServiceServer;
+use canopy_proto::playlist_service_server::PlaylistServiceServer;
+use canopy_proto::profile_service_server::ProfileServiceServer;
+use canopy_proto::system_service_server::SystemServiceServer;
 use tonic::transport::Server;
 use tracing::info;
 
@@ -46,7 +53,10 @@ pub mod stream;
 
 pub use config::{Config, StreamConfig};
 
-use api::grpc::{GrpcApi, GrpcServices};
+use api::grpc::{
+    CatalogGrpc, DiscoveryGrpc, GrpcServices, HistoryGrpc, LibraryGrpc, PlaybackGrpc, PlaylistGrpc,
+    ProfileGrpc, SystemGrpc,
+};
 use auth::AuthService;
 use catalog::CatalogService;
 use discovery::DiscoveryService;
@@ -56,11 +66,11 @@ use history::HistoryService;
 use jade_store::{
     InMemoryAudioAssetStore, InMemoryCatalog, InMemoryInstanceSettingsStore, InMemoryLibraryStore,
     InMemoryLikeStore, InMemoryPlaybackHistoryStore, InMemoryPlaylistStore,
-    InMemoryPreferencesStore, InMemorySessionStore,
+    InMemoryPreferencesStore,
 };
 use library::LibraryService;
 use likes::LikeService;
-use playback::{PlaybackService, ResolverConfig, ResolverService};
+use playback::{ResolverConfig, ResolverService};
 use playlists::PlaylistService;
 use preferences::PreferencesService;
 use principal::PrincipalService;
@@ -158,7 +168,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let catalog_repo: Arc<dyn canopy_core::CatalogRepository>;
     let discovery_repo: Arc<dyn canopy_core::DiscoveryRepository>;
     let playable_asset_repo: Arc<dyn canopy_core::PlayableAssetRepository>;
-    let session_repo: Arc<dyn canopy_core::SessionRepository>;
     let profile_repo: Arc<dyn canopy_core::ProfileRepository>;
     let instance_settings_repo: Arc<dyn canopy_core::InstanceSettingsRepository>;
     let history_repo: Arc<dyn canopy_core::PlaybackHistoryRepository>;
@@ -205,7 +214,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 discovery_repo = Arc::new(pg_catalog);
                 playable_asset_repo =
                     Arc::new(jade_store::PgPlayableAssetRepository::new((*pool).clone()));
-                session_repo = Arc::new(jade_store::PgSessionRepository::new((*pool).clone()));
                 profile_repo = Arc::new(jade_store::PgProfileRepository::new((*pool).clone()));
                 instance_settings_repo = Arc::new(jade_store::PgInstanceSettingsRepository::new(
                     (*pool).clone(),
@@ -231,7 +239,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         discovery_repo = Arc::new(catalog);
         let settings = Arc::new(InMemoryInstanceSettingsStore::default());
         playable_asset_repo = Arc::new(demo_assets().with_instance_settings(settings.clone()));
-        session_repo = Arc::new(InMemorySessionStore::default());
         profile_repo = Arc::new(jade_store::InMemoryProfileStore::default());
         instance_settings_repo = settings;
         history_repo = Arc::new(InMemoryPlaybackHistoryStore::default());
@@ -244,11 +251,11 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     // Domain services over the ports.
     let catalog = CatalogService::new(catalog_repo.clone());
-    let search = SearchService::new(catalog_repo);
-    let playback = PlaybackService::new(session_repo);
+    let search = SearchService::new(catalog_repo.clone());
     let auth = AuthService::new(config.auth_token_secret.clone());
-    let principal = PrincipalService::new(profile_repo.clone(), instance_settings_repo);
-    let profile = ProfileService::new(profile_repo.clone(), history_repo.clone());
+    let principal = PrincipalService::new(profile_repo.clone(), instance_settings_repo.clone());
+    let profile = ProfileService::new(profile_repo.clone(), history_repo.clone())
+        .with_deletion_policy(instance_settings_repo, catalog_repo);
     let history = HistoryService::new(profile_repo.clone(), history_repo);
     let library = LibraryService::new(profile_repo.clone(), library_repo);
     let likes = LikeService::new(profile_repo.clone(), like_repo);
@@ -274,10 +281,12 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Health service is already created above (with or without DB pool).
 
     // gRPC adapter.
-    let api = GrpcApi::new(GrpcServices {
+    let page_tokens = Arc::new(canopy_core::PageTokenCodec::new(
+        &config.stream.token_secret,
+    )?);
+    let services = Arc::new(GrpcServices {
         catalog,
         search,
-        playback,
         profile,
         history,
         library,
@@ -289,6 +298,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         discovery,
         auth,
         principal,
+        page_tokens,
     });
 
     info!(grpc_addr = %config.grpc_addr, "Public gRPC listener ready");
@@ -308,7 +318,14 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let grpc_state = shutting_down.clone();
     let grpc = async move {
         let result = Server::builder()
-            .add_service(CanopyServer::new(api))
+            .add_service(CatalogServiceServer::new(CatalogGrpc(services.clone())))
+            .add_service(PlaybackServiceServer::new(PlaybackGrpc(services.clone())))
+            .add_service(DiscoveryServiceServer::new(DiscoveryGrpc(services.clone())))
+            .add_service(ProfileServiceServer::new(ProfileGrpc(services.clone())))
+            .add_service(HistoryServiceServer::new(HistoryGrpc(services.clone())))
+            .add_service(LibraryServiceServer::new(LibraryGrpc(services.clone())))
+            .add_service(PlaylistServiceServer::new(PlaylistGrpc(services.clone())))
+            .add_service(SystemServiceServer::new(SystemGrpc(services)))
             .serve_with_shutdown(config.grpc_addr, wait_for_shutdown(grpc_shutdown))
             .await;
         listener_result("gRPC", &grpc_state, result)

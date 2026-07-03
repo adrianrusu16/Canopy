@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: crates/canopy-proto/proto
+lint:
+  use:
+    - STANDARD
+  # Resource-oriented RPCs return canonical resources or google.protobuf.Empty.
+  except:
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE

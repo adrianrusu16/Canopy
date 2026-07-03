@@ -69,6 +69,8 @@ async fn authorize_stream(
         Err(
             CanopyError::Unauthenticated(_)
             | CanopyError::InvalidArgument(_)
+            | CanopyError::FailedPrecondition(_)
+            | CanopyError::Aborted(_)
             | CanopyError::NotFound { .. },
         ) => forbidden(),
         Err(CanopyError::Storage(_) | CanopyError::Internal(_)) => unavailable(),

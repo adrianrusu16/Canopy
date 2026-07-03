@@ -4,6 +4,14 @@
 //! of any storage backend. Adapters translate between these types and their
 //! proto / database representations at the edges of the system.
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
+
+use crate::{CanopyError, CanopyResult};
+
+type HmacSha256 = Hmac<Sha256>;
+
 /// A single browsable / playable catalog entry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaItem {
@@ -69,6 +77,83 @@ pub struct Page {
     pub limit: u32,
     /// Number of leading items to skip.
     pub offset: u32,
+}
+
+/// Encodes page offsets as opaque, authenticated continuation tokens.
+#[derive(Clone)]
+pub struct PageTokenCodec {
+    signing_key: [u8; 32],
+}
+
+impl PageTokenCodec {
+    const VERSION: u8 = 1;
+    const MIN_SECRET_BYTES: usize = 32;
+    const PAYLOAD_BYTES: usize = 5;
+    const MAX_TOKEN_BYTES: usize = 128;
+    const KEY_CONTEXT: &'static [u8] = b"canopy/page-token/v1";
+
+    /// Derives a page-token signing key from the instance capability secret.
+    pub fn new(secret: impl AsRef<[u8]>) -> CanopyResult<Self> {
+        let secret = secret.as_ref();
+        if secret.len() < Self::MIN_SECRET_BYTES {
+            return Err(CanopyError::InvalidArgument(
+                "page token secret must contain at least 32 bytes".into(),
+            ));
+        }
+
+        let mut derivation =
+            HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts keys of any length");
+        derivation.update(Self::KEY_CONTEXT);
+        let signing_key: [u8; 32] = derivation.finalize().into_bytes().into();
+        Ok(Self { signing_key })
+    }
+
+    /// Encodes an offset without exposing it as client-editable state.
+    pub fn encode(&self, offset: u32) -> CanopyResult<String> {
+        let mut payload = [0_u8; Self::PAYLOAD_BYTES];
+        payload[0] = Self::VERSION;
+        payload[1..].copy_from_slice(&offset.to_be_bytes());
+        let encoded_payload = URL_SAFE_NO_PAD.encode(payload);
+        let signature = self.sign(encoded_payload.as_bytes());
+        Ok(format!(
+            "{encoded_payload}.{}",
+            URL_SAFE_NO_PAD.encode(signature)
+        ))
+    }
+
+    /// Verifies and decodes a continuation token.
+    pub fn decode(&self, token: &str) -> CanopyResult<u32> {
+        self.decode_inner(token)
+            .map_err(|()| CanopyError::InvalidArgument("invalid page token".into()))
+    }
+
+    fn decode_inner(&self, token: &str) -> Result<u32, ()> {
+        if token.len() > Self::MAX_TOKEN_BYTES {
+            return Err(());
+        }
+        let (payload, signature) = token.split_once('.').ok_or(())?;
+        if signature.contains('.') {
+            return Err(());
+        }
+        let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| ())?;
+        let mut mac = HmacSha256::new_from_slice(&self.signing_key).map_err(|_| ())?;
+        mac.update(payload.as_bytes());
+        mac.verify_slice(&signature).map_err(|_| ())?;
+
+        let payload = URL_SAFE_NO_PAD.decode(payload).map_err(|_| ())?;
+        let payload: [u8; Self::PAYLOAD_BYTES] = payload.try_into().map_err(|_| ())?;
+        if payload[0] != Self::VERSION {
+            return Err(());
+        }
+        Ok(u32::from_be_bytes(payload[1..].try_into().map_err(|_| ())?))
+    }
+
+    fn sign(&self, payload: &[u8]) -> [u8; 32] {
+        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
+            .expect("HMAC-SHA256 accepts keys of any length");
+        mac.update(payload);
+        mac.finalize().into_bytes().into()
+    }
 }
 
 /// A single encoded representation of a track in Canopy-managed storage.
@@ -294,21 +379,6 @@ pub struct PlaylistPage {
     /// Whether more playlists exist beyond this page.
     pub has_more: bool,
 }
-/// A lightweight playback session.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Session {
-    /// Opaque session identifier.
-    pub id: String,
-    /// Currently loaded media, if any.
-    pub current_media_id: Option<String>,
-    /// Playback position in milliseconds.
-    pub position_ms: i64,
-    /// Playback speed multiplier.
-    pub playback_speed: f64,
-    /// Whether playback is currently active.
-    pub is_playing: bool,
-}
-
 // ---------------------------------------------------------------------------
 // Local media import model
 // ---------------------------------------------------------------------------
@@ -416,4 +486,28 @@ pub struct ProviderTrack {
     /// Album artwork storage key.
     #[serde(alias = "album_artwork_key")]
     pub album_artwork_storage_key: Option<String>,
+}
+
+#[cfg(test)]
+mod page_token_tests {
+    use crate::{CanopyError, PageTokenCodec};
+
+    #[test]
+    fn round_trips_offset_without_exposing_it() {
+        let codec = PageTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap();
+        let token = codec.encode(42).unwrap();
+
+        assert!(!token.contains("42"));
+        assert_eq!(codec.decode(&token).unwrap(), 42);
+    }
+
+    #[test]
+    fn rejects_tampering() {
+        let codec = PageTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap();
+
+        assert!(matches!(
+            codec.decode("tampered"),
+            Err(CanopyError::InvalidArgument(_))
+        ));
+    }
 }

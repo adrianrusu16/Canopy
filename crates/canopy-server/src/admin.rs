@@ -130,6 +130,8 @@ impl AdminOutput {
                 ("not_found", format!("{entity} not found: {id}"))
             }
             CanopyError::InvalidArgument(message) => ("invalid_argument", message),
+            CanopyError::FailedPrecondition(message) => ("failed_precondition", message),
+            CanopyError::Aborted(message) => ("aborted", message),
             CanopyError::Unauthenticated(_) => ("unauthenticated", "authentication failed".into()),
             CanopyError::Storage(_) => (
                 "storage_unavailable",

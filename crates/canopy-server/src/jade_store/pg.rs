@@ -29,7 +29,7 @@ use canopy_core::{
     LibraryRepository, LikeRepository, MediaItem, MediaPage, Page, PlaybackHistoryEntry,
     PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository, Playlist, PlaylistPage,
     PlaylistRepository, PreferencesRepository, ProfilePreferences, ProfileRepository,
-    ProviderTrack, Session, SessionRepository, TrackLike, UserProfile,
+    ProviderTrack, TrackLike, UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
 
@@ -946,6 +946,28 @@ impl ProfileRepository for PgProfileRepository {
         .map_err(db_err)?;
 
         Ok(row.as_ref().map(profile_from_row))
+    }
+
+    async fn delete_by_external_user_id(&self, external_user_id: &str) -> CanopyResult<()> {
+        sqlx::query("DELETE FROM profiles WHERE external_user_id = $1")
+            .bind(external_user_id)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(|error| {
+                if error
+                    .as_database_error()
+                    .and_then(|db| db.code())
+                    .as_deref()
+                    == Some("23503")
+                {
+                    CanopyError::FailedPrecondition(
+                        "profile is still referenced by protected resources".into(),
+                    )
+                } else {
+                    db_err(error)
+                }
+            })?;
+        Ok(())
     }
 }
 
@@ -1867,101 +1889,5 @@ impl PreferencesRepository for PgPreferencesRepository {
                 .try_get("preferences")
                 .unwrap_or_else(|_| "{}".to_string()),
         })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PgSessionRepository
-// ---------------------------------------------------------------------------
-
-/// PostgreSQL-backed session repository.
-#[derive(Clone)]
-pub struct PgSessionRepository {
-    pool: Arc<sqlx::PgPool>,
-}
-
-impl PgSessionRepository {
-    /// Creates a new repository backed by the given connection pool.
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self {
-            pool: Arc::new(pool),
-        }
-    }
-}
-
-#[async_trait]
-impl SessionRepository for PgSessionRepository {
-    async fn create(&self) -> CanopyResult<String> {
-        let id = uuid::Uuid::new_v4().to_string();
-
-        let sql = r#"
-            INSERT INTO sessions (id, current_media_id, position_ms, playback_speed, is_playing)
-            VALUES ($1, NULL, 0, 1.0, FALSE)
-        "#;
-
-        sqlx::query(sql)
-            .bind(&id)
-            .execute(self.pool.as_ref())
-            .await
-            .map_err(db_err)?;
-
-        Ok(id)
-    }
-
-    async fn get(&self, id: &str) -> CanopyResult<Option<Session>> {
-        let sql = r#"
-            SELECT id, current_media_id, position_ms, playback_speed, is_playing
-            FROM sessions
-            WHERE id = $1
-        "#;
-
-        let row = sqlx::query(sql)
-            .bind(id)
-            .fetch_optional(self.pool.as_ref())
-            .await
-            .map_err(db_err)?;
-
-        Ok(row.map(|r| Session {
-            id: r.try_get("id").unwrap_or_default(),
-            current_media_id: r.try_get("current_media_id").ok(),
-            position_ms: r.try_get("position_ms").unwrap_or(0),
-            playback_speed: r.try_get("playback_speed").unwrap_or(1.0),
-            is_playing: r.try_get("is_playing").unwrap_or(false),
-        }))
-    }
-
-    async fn update(&self, session: Session) -> CanopyResult<()> {
-        let sql = r#"
-            INSERT INTO sessions (id, current_media_id, position_ms, playback_speed, is_playing)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (id) DO UPDATE SET
-                current_media_id = EXCLUDED.current_media_id,
-                position_ms      = EXCLUDED.position_ms,
-                playback_speed   = EXCLUDED.playback_speed,
-                is_playing       = EXCLUDED.is_playing,
-                updated_at       = NOW()
-        "#;
-
-        sqlx::query(sql)
-            .bind(&session.id)
-            .bind(&session.current_media_id)
-            .bind(session.position_ms)
-            .bind(session.playback_speed)
-            .bind(session.is_playing)
-            .execute(self.pool.as_ref())
-            .await
-            .map_err(db_err)?;
-
-        Ok(())
-    }
-
-    async fn delete(&self, id: &str) -> CanopyResult<()> {
-        sqlx::query("DELETE FROM sessions WHERE id = $1")
-            .bind(id)
-            .execute(self.pool.as_ref())
-            .await
-            .map_err(db_err)?;
-
-        Ok(())
     }
 }
