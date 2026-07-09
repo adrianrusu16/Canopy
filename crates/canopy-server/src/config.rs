@@ -17,6 +17,115 @@ pub struct StreamConfig {
     pub auth_addr: SocketAddr,
 }
 
+/// Configuration for native identity access-token signing and validation.
+#[derive(Clone)]
+pub struct IdentityTokenConfig {
+    /// JWT issuer claim for native identity access tokens.
+    pub issuer: String,
+    /// JWT audience claim expected by first-party clients.
+    pub audience: String,
+    /// Key identifier embedded into access-token headers and payloads.
+    pub key_id: String,
+    /// Lifetime of an issued identity access token.
+    pub ttl_seconds: u64,
+    /// Base64-encoded 32-byte Ed25519 signing key seed.
+    pub signing_key_base64: Option<String>,
+    /// Explicit development escape hatch for local ephemeral signing keys.
+    pub allow_ephemeral_dev_key: bool,
+}
+
+impl IdentityTokenConfig {
+    const DEFAULT_ISSUER: &'static str = "canopy";
+    const DEFAULT_AUDIENCE: &'static str = "pandawave";
+    const DEFAULT_KEY_ID: &'static str = "identity-access-v1";
+    const DEFAULT_TTL_SECONDS: u64 = 900;
+
+    /// Builds native identity token configuration through an injected environment lookup.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> canopy_core::CanopyResult<Self> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use canopy_core::CanopyError;
+
+        let issuer = lookup("CANOPY_IDENTITY_ACCESS_TOKEN_ISSUER")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Self::DEFAULT_ISSUER.into());
+        let audience = lookup("CANOPY_IDENTITY_ACCESS_TOKEN_AUDIENCE")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Self::DEFAULT_AUDIENCE.into());
+        let key_id = lookup("CANOPY_IDENTITY_ACCESS_TOKEN_KEY_ID")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Self::DEFAULT_KEY_ID.into());
+        let ttl_seconds = lookup("CANOPY_IDENTITY_ACCESS_TOKEN_TTL_SECS")
+            .unwrap_or_else(|| Self::DEFAULT_TTL_SECONDS.to_string())
+            .parse::<u64>()
+            .map_err(|_| {
+                CanopyError::InvalidArgument(
+                    "CANOPY_IDENTITY_ACCESS_TOKEN_TTL_SECS must be a positive integer".into(),
+                )
+            })?;
+        if ttl_seconds == 0 {
+            return Err(CanopyError::InvalidArgument(
+                "CANOPY_IDENTITY_ACCESS_TOKEN_TTL_SECS must be a positive integer".into(),
+            ));
+        }
+
+        let allow_ephemeral_dev_key = lookup("CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY")
+            .map(|value| parse_bool(&value))
+            .transpose()?
+            .unwrap_or(false);
+        let signing_key_base64 = lookup("CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+
+        if let Some(signing_key) = signing_key_base64.as_deref() {
+            let decoded = STANDARD.decode(signing_key).map_err(|_| {
+                CanopyError::InvalidArgument(
+                    "CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64 must be valid base64".into(),
+                )
+            })?;
+            if decoded.len() != 32 {
+                return Err(CanopyError::InvalidArgument(
+                    "CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64 must decode to 32 bytes"
+                        .into(),
+                ));
+            }
+        } else if !allow_ephemeral_dev_key {
+            return Err(CanopyError::InvalidArgument(
+                "CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64 is required unless CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY=true".into(),
+            ));
+        }
+
+        Ok(Self {
+            issuer,
+            audience,
+            key_id,
+            ttl_seconds,
+            signing_key_base64,
+            allow_ephemeral_dev_key,
+        })
+    }
+
+    pub fn access_token_config(&self) -> crate::identity::AccessTokenConfig {
+        crate::identity::AccessTokenConfig {
+            issuer: self.issuer.clone(),
+            audience: self.audience.clone(),
+            key_id: self.key_id.clone(),
+            ttl_seconds: self.ttl_seconds,
+        }
+    }
+}
+
+fn parse_bool(value: &str) -> canopy_core::CanopyResult<bool> {
+    use canopy_core::CanopyError;
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(CanopyError::InvalidArgument(
+            "CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY must be true or false".into(),
+        )),
+    }
+}
+
 impl StreamConfig {
     /// Builds stream configuration through an injected environment lookup.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> canopy_core::CanopyResult<Self> {
@@ -99,6 +208,8 @@ pub struct Config {
     pub provider_fixture_path: Option<String>,
     /// Public capability and private stream-authorization configuration.
     pub stream: StreamConfig,
+    /// Native identity access-token signing and validation configuration.
+    pub identity_tokens: IdentityTokenConfig,
     /// Root containing Canopy's managed `library/` directory.
     pub media_root: PathBuf,
 }
@@ -154,6 +265,7 @@ impl Config {
             .ok()
             .filter(|v| !v.trim().is_empty());
         let stream = StreamConfig::from_lookup(|key| env::var(key).ok())?;
+        let identity_tokens = IdentityTokenConfig::from_lookup(|key| env::var(key).ok())?;
         let media_root = env::var("CANOPY_MEDIA_ROOT")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -169,6 +281,7 @@ impl Config {
             redis_url,
             provider_fixture_path,
             stream,
+            identity_tokens,
             media_root,
         })
     }
@@ -267,6 +380,79 @@ mod tests {
             values.push(("CANOPY_STREAM_TOKEN_TTL_SECS", ttl));
             assert!(matches!(
                 parse(&values),
+                Err(CanopyError::InvalidArgument(_))
+            ));
+        }
+    }
+    mod identity_access_token {
+        use std::collections::HashMap;
+
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use canopy_core::CanopyError;
+
+        use super::super::IdentityTokenConfig;
+
+        fn parse(values: &[(&str, &str)]) -> canopy_core::CanopyResult<IdentityTokenConfig> {
+            let values: HashMap<_, _> = values
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            IdentityTokenConfig::from_lookup(|key| values.get(key).cloned())
+        }
+
+        #[test]
+        fn rejects_missing_signing_material_without_dev_flag() {
+            assert!(matches!(
+                parse(&[]),
+                Err(CanopyError::InvalidArgument(message))
+                    if message.contains("CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64")
+            ));
+        }
+
+        #[test]
+        fn accepts_configured_signing_material() {
+            let signing_key = STANDARD.encode([7_u8; 32]);
+            let config = parse(&[
+                ("CANOPY_IDENTITY_ACCESS_TOKEN_ISSUER", "canopy.example"),
+                ("CANOPY_IDENTITY_ACCESS_TOKEN_AUDIENCE", "pandawave"),
+                (
+                    "CANOPY_IDENTITY_ACCESS_TOKEN_KEY_ID",
+                    "identity-key-2026-07",
+                ),
+                ("CANOPY_IDENTITY_ACCESS_TOKEN_TTL_SECS", "1200"),
+                (
+                    "CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64",
+                    signing_key.as_str(),
+                ),
+            ])
+            .unwrap();
+
+            assert_eq!(config.issuer, "canopy.example");
+            assert_eq!(config.audience, "pandawave");
+            assert_eq!(config.key_id, "identity-key-2026-07");
+            assert_eq!(config.ttl_seconds, 1200);
+            assert_eq!(
+                config.signing_key_base64.as_deref(),
+                Some(signing_key.as_str())
+            );
+            assert!(!config.allow_ephemeral_dev_key);
+        }
+
+        #[test]
+        fn permits_missing_signing_material_only_with_explicit_dev_flag() {
+            let config = parse(&[("CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY", "true")]).unwrap();
+
+            assert!(config.signing_key_base64.is_none());
+            assert!(config.allow_ephemeral_dev_key);
+        }
+
+        #[test]
+        fn rejects_malformed_signing_material() {
+            assert!(matches!(
+                parse(&[(
+                    "CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64",
+                    "not valid base64",
+                )]),
                 Err(CanopyError::InvalidArgument(_))
             ));
         }

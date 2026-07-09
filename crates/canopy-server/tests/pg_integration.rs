@@ -1,17 +1,18 @@
 #![cfg(feature = "pg")]
 
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, CatalogIngest, CatalogRepository, InstanceSettingsRepository,
-    LibraryRepository, LikeRepository, MediaImportRepository, Page, PendingImportOutcome,
-    PendingMediaImport, PlayableAssetRepository, PlaybackHistoryEvent, PlaybackHistoryRepository,
-    PlaylistRepository, PreferencesRepository, ProfileRepository, ProviderAudioAsset,
-    ProviderLicense, ProviderTrack, StreamAudience,
+    AudioAsset, AudioAssetRepository, CatalogIngest, CatalogRepository, ConsumeChallenge,
+    CreateSessionRecord, IdentityRepository, InstanceSettingsRepository, LibraryRepository,
+    LikeRepository, MediaImportRepository, Page, PendingImportOutcome, PendingMediaImport,
+    PlayableAssetRepository, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
+    PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
+    RegisterPasswordRecord, RotateRefreshTokenRecord, StreamAudience,
 };
 use canopy_server::jade_store::{
-    PgAudioAssetRepository, PgCatalogRepository, PgInstanceSettingsRepository, PgLibraryRepository,
-    PgLikeRepository, PgMediaImportRepository, PgPlayableAssetRepository,
-    PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
-    PgProfileRepository,
+    PgAudioAssetRepository, PgCatalogRepository, PgIdentityRepository,
+    PgInstanceSettingsRepository, PgLibraryRepository, PgLikeRepository, PgMediaImportRepository,
+    PgPlayableAssetRepository, PgPlaybackHistoryRepository, PgPlaylistRepository,
+    PgPreferencesRepository, PgProfileRepository,
 };
 use sqlx::{Row, postgres::PgPoolOptions};
 
@@ -28,6 +29,114 @@ async fn connect_test_pool() -> sqlx::PgPool {
         .unwrap_or_else(|err| panic!("failed to connect to CANOPY_TEST_DATABASE_URL: {err}"))
 }
 
+fn identity_epoch_ms(offset_ms: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after Unix epoch")
+        .as_millis() as u64
+        + offset_ms
+}
+
+fn identity_digest(seed: u8) -> [u8; 32] {
+    [seed; 32]
+}
+
+fn identity_session(seed: u8, expires_at_epoch_ms: u64) -> CreateSessionRecord {
+    CreateSessionRecord {
+        account_id: "ignored-during-email-activation".into(),
+        device_label: format!("PandaWave test device {seed}"),
+        refresh_token_hash: identity_digest(seed),
+        expires_at_epoch_ms,
+    }
+}
+
+#[tokio::test]
+async fn postgres_identity_activation_consumes_challenge_once_and_creates_profile_session() {
+    let pool = connect_test_pool().await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let identity = PgIdentityRepository::new(pool.clone());
+    let email = format!("identity-{}@example.test", uuid::Uuid::new_v4());
+    let verification_hash = identity_digest(7);
+    let now = identity_epoch_ms(0);
+    let expires_at = identity_epoch_ms(3_600_000);
+
+    identity
+        .register_password(RegisterPasswordRecord {
+            normalized_email: email.clone(),
+            password_hash_phc: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZmFrZS1oYXNo".into(),
+            policy_version: 1,
+            verification_token_hash: verification_hash,
+            verification_expires_at_epoch_ms: expires_at,
+            encrypted_outbox_payload: vec![42; 32],
+            outbox_key_id: "test-key".into(),
+        })
+        .await
+        .expect("pending password account should be registered");
+
+    let first = identity.activate_email_and_create_session(
+        ConsumeChallenge {
+            token_hash: verification_hash,
+            challenge_type: "email_verification",
+            now_epoch_ms: now,
+        },
+        identity_session(11, expires_at),
+    );
+    let second = identity.activate_email_and_create_session(
+        ConsumeChallenge {
+            token_hash: verification_hash,
+            challenge_type: "email_verification",
+            now_epoch_ms: now,
+        },
+        identity_session(12, expires_at),
+    );
+
+    let (first, second) = tokio::join!(first, second);
+    let activated = match (first, second) {
+        (Ok(session), Err(_)) | (Err(_), Ok(session)) => session,
+        (Ok(_), Ok(_)) => panic!("challenge was consumed more than once"),
+        (Err(first), Err(second)) => {
+            panic!("both activation attempts failed: {first:?}; {second:?}")
+        }
+    };
+
+    assert_eq!(
+        activated.account.primary_email.as_deref(),
+        Some(email.as_str())
+    );
+    assert!(activated.session.is_active_at(now));
+    assert_eq!(activated.session.account_id, activated.account.id);
+
+    let profile_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM profiles WHERE account_id = $1::uuid AND external_user_id = $1",
+    )
+    .bind(&activated.account.id)
+    .fetch_one(&pool)
+    .await
+    .expect("profile count should be queryable");
+    assert_eq!(profile_count, 1);
+
+    let consumed_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM auth_challenges WHERE token_hash = $1 AND consumed_at IS NOT NULL",
+    )
+    .bind(verification_hash.as_slice())
+    .fetch_one(&pool)
+    .await
+    .expect("challenge count should be queryable");
+    assert_eq!(consumed_count, 1);
+
+    let refresh_token_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM auth_session_tokens WHERE session_id = $1::uuid")
+            .bind(&activated.session.id)
+            .fetch_one(&pool)
+            .await
+            .expect("session token count should be queryable");
+    assert_eq!(refresh_token_count, 1);
+}
 fn provider_track(provider_id: String) -> ProviderTrack {
     ProviderTrack {
         provider_id,
@@ -90,6 +199,291 @@ async fn cleanup_provider_track(pool: &sqlx::PgPool, provider: &str, provider_id
     }
 }
 
+#[tokio::test]
+async fn postgres_identity_repository_supports_password_login_and_session_creation() {
+    let pool = connect_test_pool().await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let identity = PgIdentityRepository::new(pool.clone());
+    let email = format!("login-{}@example.test", uuid::Uuid::new_v4());
+    let verification_hash = identity_digest(57);
+    let now = identity_epoch_ms(0);
+    let expires_at = identity_epoch_ms(3_600_000);
+
+    identity
+        .register_password(RegisterPasswordRecord {
+            normalized_email: email.clone(),
+            password_hash_phc: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZmFrZS1oYXNo".into(),
+            policy_version: 1,
+            verification_token_hash: verification_hash,
+            verification_expires_at_epoch_ms: expires_at,
+            encrypted_outbox_payload: vec![12; 32],
+            outbox_key_id: "test-key".into(),
+        })
+        .await
+        .expect("pending password account should be registered");
+
+    identity
+        .activate_email_and_create_session(
+            ConsumeChallenge {
+                token_hash: verification_hash,
+                challenge_type: "email_verification",
+                now_epoch_ms: now,
+            },
+            identity_session(61, expires_at),
+        )
+        .await
+        .expect("activation should create an initial session");
+
+    let login = identity
+        .password_login_record(&email)
+        .await
+        .expect("login lookup should query successfully")
+        .expect("login record should exist");
+    assert_eq!(login.account.primary_email.as_deref(), Some(email.as_str()));
+    assert_eq!(login.policy_version, 1);
+
+    identity
+        .update_password_hash(
+            &login.account.id,
+            "$argon2id$v=19$m=19456,t=2,p=1$dXBkYXRlZA$aGFzaA",
+            2,
+        )
+        .await
+        .expect("password hash should update");
+
+    let updated = identity
+        .password_login_record(&email)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.policy_version, 2);
+
+    let created = identity
+        .create_session(CreateSessionRecord {
+            account_id: login.account.id.clone(),
+            device_label: "PandaWave login device".into(),
+            refresh_token_hash: identity_digest(62),
+            expires_at_epoch_ms: expires_at,
+        })
+        .await
+        .expect("active account should receive a new session");
+    assert_eq!(created.account.id, login.account.id);
+    assert_eq!(created.session.device_label, "PandaWave login device");
+    assert!(created.session.is_active_at(now));
+}
+#[tokio::test]
+async fn postgres_identity_session_validation_listing_and_revocation_are_account_scoped() {
+    let pool = connect_test_pool().await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let identity = PgIdentityRepository::new(pool.clone());
+    let email = format!("sessions-{}@example.test", uuid::Uuid::new_v4());
+    let verification_hash = identity_digest(87);
+    let now = identity_epoch_ms(0);
+    let expires_at = identity_epoch_ms(3_600_000);
+
+    identity
+        .register_password(RegisterPasswordRecord {
+            normalized_email: email,
+            password_hash_phc: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZmFrZS1oYXNo".into(),
+            policy_version: 1,
+            verification_token_hash: verification_hash,
+            verification_expires_at_epoch_ms: expires_at,
+            encrypted_outbox_payload: vec![33; 32],
+            outbox_key_id: "test-key".into(),
+        })
+        .await
+        .expect("pending password account should be registered");
+
+    let activated = identity
+        .activate_email_and_create_session(
+            ConsumeChallenge {
+                token_hash: verification_hash,
+                challenge_type: "email_verification",
+                now_epoch_ms: now,
+            },
+            CreateSessionRecord {
+                account_id: "ignored-during-email-activation".into(),
+                device_label: "PandaWave primary device".into(),
+                refresh_token_hash: identity_digest(88),
+                expires_at_epoch_ms: expires_at,
+            },
+        )
+        .await
+        .expect("email verification should create an initial session");
+
+    let second = identity
+        .create_session(CreateSessionRecord {
+            account_id: activated.account.id.clone(),
+            device_label: "PandaWave secondary device".into(),
+            refresh_token_hash: identity_digest(89),
+            expires_at_epoch_ms: expires_at,
+        })
+        .await
+        .expect("active account should receive a second session");
+
+    identity
+        .validate_active_session(&activated.account.id, &activated.session.id, now)
+        .await
+        .expect("fresh primary session should validate");
+    identity
+        .validate_active_session(&activated.account.id, &second.session.id, now)
+        .await
+        .expect("fresh secondary session should validate");
+
+    let listed = identity
+        .list_sessions(&activated.account.id)
+        .await
+        .expect("account sessions should list");
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .all(|session| session.account_id == activated.account.id)
+    );
+
+    identity
+        .revoke_session(&activated.account.id, &second.session.id)
+        .await
+        .expect("single-session revocation should be idempotent");
+    identity
+        .revoke_session(&activated.account.id, &second.session.id)
+        .await
+        .expect("repeating single-session revocation should remain idempotent");
+
+    assert!(
+        identity
+            .validate_active_session(&activated.account.id, &second.session.id, now)
+            .await
+            .is_err(),
+        "revoked session should fail validation immediately"
+    );
+    identity
+        .validate_active_session(&activated.account.id, &activated.session.id, now)
+        .await
+        .expect("other account-owned session should remain active");
+
+    identity
+        .revoke_all_sessions(&activated.account.id, "logout_all")
+        .await
+        .expect("all account sessions should revoke idempotently");
+    identity
+        .revoke_all_sessions(&activated.account.id, "logout_all")
+        .await
+        .expect("repeating all-session revocation should remain idempotent");
+
+    assert!(
+        identity
+            .validate_active_session(&activated.account.id, &activated.session.id, now)
+            .await
+            .is_err(),
+        "logout-all should revoke the remaining active session"
+    );
+
+    let listed = identity
+        .list_sessions(&activated.account.id)
+        .await
+        .expect("revoked sessions should remain visible for device management");
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .all(|session| session.revoked_at_epoch_ms.is_some())
+    );
+}
+#[tokio::test]
+async fn postgres_identity_refresh_rotation_reuse_revokes_session_family() {
+    let pool = connect_test_pool().await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let identity = PgIdentityRepository::new(pool.clone());
+    let email = format!("refresh-{}@example.test", uuid::Uuid::new_v4());
+    let verification_hash = identity_digest(17);
+    let initial_refresh_hash = identity_digest(31);
+    let now = identity_epoch_ms(0);
+    let expires_at = identity_epoch_ms(3_600_000);
+
+    identity
+        .register_password(RegisterPasswordRecord {
+            normalized_email: email,
+            password_hash_phc: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZmFrZS1oYXNo".into(),
+            policy_version: 1,
+            verification_token_hash: verification_hash,
+            verification_expires_at_epoch_ms: expires_at,
+            encrypted_outbox_payload: vec![24; 32],
+            outbox_key_id: "test-key".into(),
+        })
+        .await
+        .expect("pending password account should be registered");
+
+    let activated = identity
+        .activate_email_and_create_session(
+            ConsumeChallenge {
+                token_hash: verification_hash,
+                challenge_type: "email_verification",
+                now_epoch_ms: now,
+            },
+            CreateSessionRecord {
+                account_id: "ignored-during-email-activation".into(),
+                device_label: "PandaWave refresh test".into(),
+                refresh_token_hash: initial_refresh_hash,
+                expires_at_epoch_ms: expires_at,
+            },
+        )
+        .await
+        .expect("email verification should create a session");
+
+    let first = identity.rotate_refresh_token(RotateRefreshTokenRecord {
+        presented_token_hash: initial_refresh_hash,
+        replacement_token_hash: identity_digest(41),
+        replacement_expires_at_epoch_ms: expires_at,
+        now_epoch_ms: now,
+    });
+    let second = identity.rotate_refresh_token(RotateRefreshTokenRecord {
+        presented_token_hash: initial_refresh_hash,
+        replacement_token_hash: identity_digest(42),
+        replacement_expires_at_epoch_ms: expires_at,
+        now_epoch_ms: now,
+    });
+
+    let (first, second) = tokio::join!(first, second);
+    match (first, second) {
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {}
+        (Ok(_), Ok(_)) => panic!("refresh token was rotated more than once"),
+        (Err(first), Err(second)) => panic!("both refresh attempts failed: {first:?}; {second:?}"),
+    }
+
+    let revoked_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM auth_sessions WHERE id = $1::uuid AND revoked_at IS NOT NULL",
+    )
+    .bind(&activated.session.id)
+    .fetch_one(&pool)
+    .await
+    .expect("revoked session count should be queryable");
+    assert_eq!(revoked_count, 1);
+
+    let live_token_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM auth_session_tokens WHERE session_id = $1::uuid AND consumed_at IS NULL",
+    )
+    .bind(&activated.session.id)
+    .fetch_one(&pool)
+    .await
+    .expect("live token count should be queryable");
+    assert_eq!(live_token_count, 0);
+}
 #[tokio::test]
 async fn postgres_migrations_support_idempotent_provider_ingest() {
     let pool = connect_test_pool().await;

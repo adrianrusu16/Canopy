@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 #[cfg(not(feature = "pg"))]
 use canopy_core::{AudioAsset, MediaItem};
+#[cfg(feature = "pg")]
+use canopy_proto::auth_service_server::AuthServiceServer;
 use canopy_proto::catalog_service_server::CatalogServiceServer;
 use canopy_proto::discovery_service_server::DiscoveryServiceServer;
 use canopy_proto::history_service_server::HistoryServiceServer;
@@ -36,6 +38,7 @@ pub mod config;
 pub mod discovery;
 pub mod health;
 pub mod history;
+pub mod identity;
 pub mod jade_store;
 pub mod library;
 pub mod likes;
@@ -51,8 +54,10 @@ pub mod providers;
 pub mod search;
 pub mod stream;
 
-pub use config::{Config, StreamConfig};
+pub use config::{Config, IdentityTokenConfig, StreamConfig};
 
+#[cfg(feature = "pg")]
+use api::grpc::AuthGrpc;
 use api::grpc::{
     CatalogGrpc, DiscoveryGrpc, GrpcServices, HistoryGrpc, LibraryGrpc, PlaybackGrpc, PlaylistGrpc,
     ProfileGrpc, SystemGrpc,
@@ -175,6 +180,8 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let like_repo: Arc<dyn canopy_core::LikeRepository>;
     let preferences_repo: Arc<dyn canopy_core::PreferencesRepository>;
     let playlist_repo: Arc<dyn canopy_core::PlaylistRepository>;
+    #[cfg(feature = "pg")]
+    let identity_service: Arc<identity::IdentityService>;
     let health: HealthService;
 
     #[cfg(feature = "pg")]
@@ -226,6 +233,27 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 preferences_repo =
                     Arc::new(jade_store::PgPreferencesRepository::new((*pool).clone()));
                 playlist_repo = Arc::new(jade_store::PgPlaylistRepository::new((*pool).clone()));
+                let access_token_config = config.identity_tokens.access_token_config();
+                let access_tokens = if let Some(signing_key) =
+                    config.identity_tokens.signing_key_base64.as_deref()
+                {
+                    identity::Ed25519AccessTokenIssuer::from_signing_key_base64(
+                        access_token_config,
+                        signing_key,
+                    )?
+                } else if config.identity_tokens.allow_ephemeral_dev_key {
+                    identity::Ed25519AccessTokenIssuer::generate(access_token_config)
+                } else {
+                    return Err(Box::new(canopy_core::CanopyError::InvalidArgument(
+                        "identity access-token signing key is required".into(),
+                    )));
+                };
+                identity_service = Arc::new(identity::IdentityService::new(
+                    Arc::new(jade_store::PgIdentityRepository::new((*pool).clone())),
+                    Arc::new(identity::Argon2PasswordHasher::default()),
+                    access_tokens,
+                    Arc::new(identity::SystemClock),
+                ));
                 health = HealthService::with_db(pool).with_media_root(config.media_root.clone());
             }
             Err(error) => return Err(Box::new(error)),
@@ -317,14 +345,17 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let grpc_state = shutting_down.clone();
     let grpc = async move {
-        let result = Server::builder()
+        let router = Server::builder()
             .add_service(CatalogServiceServer::new(CatalogGrpc(services.clone())))
             .add_service(PlaybackServiceServer::new(PlaybackGrpc(services.clone())))
             .add_service(DiscoveryServiceServer::new(DiscoveryGrpc(services.clone())))
             .add_service(ProfileServiceServer::new(ProfileGrpc(services.clone())))
             .add_service(HistoryServiceServer::new(HistoryGrpc(services.clone())))
             .add_service(LibraryServiceServer::new(LibraryGrpc(services.clone())))
-            .add_service(PlaylistServiceServer::new(PlaylistGrpc(services.clone())))
+            .add_service(PlaylistServiceServer::new(PlaylistGrpc(services.clone())));
+        #[cfg(feature = "pg")]
+        let router = router.add_service(AuthServiceServer::new(AuthGrpc(identity_service)));
+        let result = router
             .add_service(SystemServiceServer::new(SystemGrpc(services)))
             .serve_with_shutdown(config.grpc_addr, wait_for_shutdown(grpc_shutdown))
             .await;

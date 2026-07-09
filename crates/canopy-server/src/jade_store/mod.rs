@@ -9,6 +9,8 @@ mod memory;
 #[cfg(feature = "pg")]
 mod pg;
 #[cfg(feature = "pg")]
+mod pg_identity;
+#[cfg(feature = "pg")]
 mod pg_media_import;
 #[cfg(feature = "pg")]
 mod pg_stream;
@@ -26,6 +28,8 @@ pub use pg::{
     PgLikeRepository, PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
     PgProfileRepository,
 };
+#[cfg(feature = "pg")]
+pub use pg_identity::PgIdentityRepository;
 #[cfg(feature = "pg")]
 pub use pg_stream::PgPlayableAssetRepository;
 

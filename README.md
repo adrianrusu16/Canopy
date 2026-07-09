@@ -17,7 +17,7 @@ This document describes the current Canopy architecture and identifies the remai
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
 | Playback Resolver         | ✅ Implemented | `ResolvePlayback` is anonymous-compatible and auth-aware: the configured owner receives owner-scoped personal media first with public fallback; other callers receive release-safe public media. Capabilities remain opaque and storage keys never enter client responses. |
-| Auth / Profiles           | 🟡 Partial     | Browse/search/playback remain anonymous-compatible. Durable state is profile-owned; history supports chronological reads and deletion, and disabling consent atomically purges it. Anonymous users receive no backend history, library, likes, preferences, or playlists. |
+| Auth / Profiles           | 🟡 Partial     | Native email/password identity, verification-time profile creation, refresh rotation, and account-scoped session revocation/listing are implemented. Browse/search/playback remain anonymous-compatible; anonymous users receive no backend history, library, likes, preferences, or playlists. Google login, password reset, and account deletion remain planned. |
 | Provider Adapters         | Implemented | Deterministic fixture ingestion remains idempotent and quarantined by default; external provider runtime code has been removed. |
 | Persistence (PostgreSQL)  | Partial | Typed adapters cover ownership, media policy, local-import transactions, checksum deduplication, and fail-closed promotion. |
 | Music storage             | ✅ Implemented | MP3 and artwork import into content-addressed local storage; bundled Nginx authorizes through Canopy and serves byte ranges from an internal read-only location. |
@@ -303,7 +303,11 @@ This proto is the single source of truth for the wire contract between PandaEngi
 
 Canopy is designed to let anonymous users browse, search, and play music without logging in. Anonymous `session_id` values are operational playback state only; they are not users and must not own durable backend history, libraries, likes, preferences, or playlists. The client is responsible for any anonymous local cache.
 
-Durable user state starts at `UpsertProfile`. Authenticated profile-scoped RPCs send the end-user token in gRPC metadata as `authorization: Bearer <token>`; `x-canopy-auth-token` is accepted for clients that cannot set authorization metadata. Legacy request-body `auth_token` fields remain only on older profile/history RPCs as a compatibility fallback. New durable-state RPCs, including playlists, accept metadata auth only. Canopy verifies the token with `AuthService`, and the resulting external user identity creates or updates a `profiles` row. The profile includes `history_enabled`, so even logged-in playback history remains an explicit opt-in.
+Native identity is now separate from profile/app state. `AuthService.RegisterPassword` creates a pending account and stores only hashed credentials and hashed challenge tokens. `VerifyEmail` atomically consumes the single-use email-verification challenge, activates the account, creates the profile row, and issues the first access/refresh token pair. `LoginPassword` issues later device sessions for active accounts, and `RefreshSession` transactionally rotates refresh tokens; reuse of a consumed refresh token revokes the session family.
+
+Identity access tokens are sent to implemented AuthService protected calls as `authorization: Bearer <access-token>`. `Logout`, `LogoutAll`, `ListSessions`, and `RevokeSession` verify the Ed25519 access token and recheck the referenced session in PostgreSQL before reading or mutating session state. Revocation is idempotent, account-scoped, consumes outstanding refresh tokens, and is checked on refresh and protected AuthService calls. Google login, password reset, email resend, account summary, and deletion are still explicit follow-up work.
+
+The existing profile-scoped application RPCs still use the legacy app auth-token verifier while the native identity boundary is rolled outward. Those RPCs send the end-user token in gRPC metadata as `authorization: Bearer <token>`; `x-canopy-auth-token` is accepted for clients that cannot set authorization metadata. Legacy request-body `auth_token` fields remain only on older profile/history RPCs as a compatibility fallback. New durable-state RPCs, including playlists, accept metadata auth only. The profile includes `history_enabled`, so even logged-in playback history remains an explicit opt-in.
 
 `RecordPlaybackHistory` records one append-only event only while `history_enabled=true`; disabled history returns `recorded=false`. Authenticated clients can list repeated events newest first, delete one event idempotently, or clear all history. Each listed event includes its ID, timestamp, listening facts, and renderable media metadata. Disabling history is destructive: PostgreSQL purges the profile's rows inside the profile-update transaction, and consent-safe recording prevents a concurrent request from repopulating them.
 
@@ -692,6 +696,12 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_STREAM_TOKEN_SECRET` | unset | Required HMAC capability secret of at least 32 bytes |
 | `CANOPY_STREAM_TOKEN_TTL_SECS` | `600` | Positive public capability lifetime in seconds |
 | `CANOPY_STREAM_AUTH_ADDR` | `127.0.0.1:8081` | Private HTTP listener used only by Nginx `auth_request` |
+| `CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64` | unset | Required 32-byte Ed25519 signing key seed for native identity access tokens in PostgreSQL mode |
+| `CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY` | `false` | Explicit local-development escape hatch for generated native identity access-token keys |
+| `CANOPY_IDENTITY_ACCESS_TOKEN_ISSUER` | `canopy` | Issuer claim for native identity access tokens |
+| `CANOPY_IDENTITY_ACCESS_TOKEN_AUDIENCE` | `pandawave` | Audience claim for native identity access tokens |
+| `CANOPY_IDENTITY_ACCESS_TOKEN_KEY_ID` | `identity-access-v1` | Key identifier embedded in native identity access tokens |
+| `CANOPY_IDENTITY_ACCESS_TOKEN_TTL_SECS` | `900` | Positive native identity access-token lifetime in seconds |
 | `CANOPY_MAX_AUDIO_BYTES` | `2147483648` | Maximum MP3 import size for `canopy-admin` |
 | `CANOPY_MAX_ARTWORK_BYTES` | `20971520` | Maximum embedded or sidecar artwork size for `canopy-admin` |
 | `CANOPY_PROVIDER_FIXTURE_PATH` | unset | Optional provider fixture JSON to ingest at startup when running with `canopy-server/pg` |
@@ -728,7 +738,9 @@ export CANOPY_STREAM_AUTH_ADDR=127.0.0.1:8081
 cargo run -p canopy-server --bin canopy
 
 # Production-style PostgreSQL mode. Connection failure is fatal.
+# Use CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64 for real deployments.
 export CANOPY_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy
+export CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY=true
 cargo run -p canopy-server --features pg --bin canopy
 ```
 

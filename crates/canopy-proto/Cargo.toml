@@ -6,5 +6,5 @@ license.workspace = true
 description = "Shared gRPC wire contract between PandaEngine and Canopy."
 
 [dependencies]
-canopy-api-prost = { package = "pandawave_canopy-api_community_neoeinstein-prost", version = "=0.5.0-20260703122722-8e44e0fa997a.2", registry = "buf" }
-canopy-api-tonic = { package = "pandawave_canopy-api_community_neoeinstein-tonic", version = "=0.5.0-20260703122722-8e44e0fa997a.4", registry = "buf" }
+canopy-api-prost = { package = "pandawave_canopy-api_community_neoeinstein-prost", version = "=0.5.0-00000000000000-145678c1d73e.2", registry = "buf" }
+canopy-api-tonic = { package = "pandawave_canopy-api_community_neoeinstein-tonic", version = "=0.5.0-00000000000000-145678c1d73e.4", registry = "buf" }

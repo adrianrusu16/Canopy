@@ -49,6 +49,9 @@ hmac = "0.13.0"
 sha2 = "0.11.0"
 hex = "0.4"
 lofty = "0.24.0"
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 # Test utilities
 mockall = "0.14.0"

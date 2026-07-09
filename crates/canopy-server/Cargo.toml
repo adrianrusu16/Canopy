@@ -33,6 +33,9 @@ uuid.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 hex.workspace = true
+argon2.workspace = true
+rand_core.workspace = true
+ed25519-dalek.workspace = true
 lofty.workspace = true
 clap.workspace = true
 sqlx = { workspace = true, optional = true }

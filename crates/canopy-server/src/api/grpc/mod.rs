@@ -21,6 +21,7 @@ use crate::principal::PrincipalService;
 use crate::profile::ProfileService;
 use crate::search::SearchService;
 
+mod auth;
 mod catalog;
 mod discovery;
 mod history;
@@ -30,6 +31,7 @@ mod playlist;
 mod profile;
 mod system;
 
+pub use auth::AuthGrpc;
 pub use catalog::CatalogGrpc;
 pub use discovery::DiscoveryGrpc;
 pub use history::HistoryGrpc;

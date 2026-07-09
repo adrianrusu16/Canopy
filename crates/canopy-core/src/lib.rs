@@ -6,10 +6,18 @@
 //! that it can be unit-tested in isolation and reused across adapters.
 
 pub mod error;
+pub mod identity;
+pub mod identity_repository;
 pub mod model;
 pub mod repository;
 
 pub use error::{CanopyError, CanopyResult};
+pub use identity::{AccountStatus, AuthSession};
+pub use identity_repository::{
+    AccountRecord, ConsumeChallenge, CreateSessionRecord, ExternalIdentityRecord,
+    IdentityRepository, PasswordLoginRecord, RegisterPasswordRecord, RotateRefreshTokenRecord,
+    StoredAuthenticatedSession,
+};
 pub use model::{
     AudioAsset, AuthorizedStreamAsset, IngestStatus, LibraryItem, MediaItem, MediaPage,
     MediaVisibility, Page, PageTokenCodec, PendingImportOutcome, PendingMediaImport, PlayableAsset,
