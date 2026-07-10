@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use canopy_core::{CanopyError, LibraryItem, MediaItem, TrackLike};
+use canopy_core::{CanopyError, LibraryItem, LikedTrackItem, MediaItem, SavedTrackItem, TrackLike};
 use canopy_proto::library_service_server::LibraryService;
 use canopy_proto::{
     LikeTrackRequest, LikedTrack, ListLikedTracksRequest, ListLikedTracksResponse,
@@ -10,7 +10,9 @@ use canopy_proto::{
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
-use super::{GrpcServices, extract_durable_principal, not_implemented, to_track_summary};
+use super::{
+    GrpcServices, extract_durable_principal, page_from_request, page_info, to_track_summary,
+};
 use crate::api::to_status;
 
 pub struct LibraryGrpc(pub Arc<GrpcServices>);
@@ -56,9 +58,38 @@ impl LibraryService for LibraryGrpc {
 
     async fn list_saved_tracks(
         &self,
-        _: Request<ListSavedTracksRequest>,
+        request: Request<ListSavedTracksRequest>,
     ) -> Result<Response<ListSavedTracksResponse>, Status> {
-        Err(not_implemented("LibraryService.ListSavedTracks"))
+        let metadata = request.metadata().clone();
+        let request = request.into_inner();
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
+        let page = page_from_request(request.page, &self.0.page_tokens).map_err(to_status)?;
+        let result = self
+            .0
+            .library
+            .list_tracks(&identity, page)
+            .await
+            .map_err(to_status)?;
+        let page_info = page_info(
+            page,
+            result.items.len(),
+            result.has_more,
+            &self.0.page_tokens,
+        )
+        .map_err(to_status)?;
+        let tracks = result
+            .items
+            .into_iter()
+            .map(to_saved_track_item)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_status)?;
+        Ok(Response::new(ListSavedTracksResponse {
+            tracks,
+            page_info: Some(page_info),
+        }))
     }
 
     async fn like_track(
@@ -100,10 +131,53 @@ impl LibraryService for LibraryGrpc {
 
     async fn list_liked_tracks(
         &self,
-        _: Request<ListLikedTracksRequest>,
+        request: Request<ListLikedTracksRequest>,
     ) -> Result<Response<ListLikedTracksResponse>, Status> {
-        Err(not_implemented("LibraryService.ListLikedTracks"))
+        let metadata = request.metadata().clone();
+        let request = request.into_inner();
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
+        let page = page_from_request(request.page, &self.0.page_tokens).map_err(to_status)?;
+        let result = self
+            .0
+            .likes
+            .list_liked_tracks(&identity, page)
+            .await
+            .map_err(to_status)?;
+        let page_info = page_info(
+            page,
+            result.items.len(),
+            result.has_more,
+            &self.0.page_tokens,
+        )
+        .map_err(to_status)?;
+        let tracks = result
+            .items
+            .into_iter()
+            .map(to_liked_track_item)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_status)?;
+        Ok(Response::new(ListLikedTracksResponse {
+            tracks,
+            page_info: Some(page_info),
+        }))
     }
+}
+
+fn to_saved_track_item(item: SavedTrackItem) -> Result<SavedTrack, CanopyError> {
+    Ok(SavedTrack {
+        track: Some(to_track_summary(item.item)),
+        saved_at: Some(timestamp_from_epoch_ms(item.saved_at_epoch_ms)?),
+    })
+}
+
+fn to_liked_track_item(item: LikedTrackItem) -> Result<LikedTrack, CanopyError> {
+    Ok(LikedTrack {
+        track: Some(to_track_summary(item.item)),
+        liked_at: Some(timestamp_from_epoch_ms(item.liked_at_epoch_ms)?),
+    })
 }
 
 fn to_saved_track(item: LibraryItem) -> Result<SavedTrack, CanopyError> {
@@ -136,7 +210,7 @@ fn timestamp_from_epoch_ms(epoch_ms: u64) -> Result<Timestamp, CanopyError> {
 
 #[cfg(test)]
 mod tests {
-    use canopy_core::{LibraryItem, TrackLike};
+    use canopy_core::{LibraryItem, LikedTrackItem, SavedTrackItem, TrackLike};
 
     use super::*;
 
@@ -154,6 +228,22 @@ mod tests {
     }
 
     #[test]
+    fn saved_track_list_resource_preserves_track_and_timestamp() {
+        let saved = to_saved_track_item(SavedTrackItem {
+            item: MediaItem {
+                id: "track-1".into(),
+                title: "Track".into(),
+                ..MediaItem::default()
+            },
+            saved_at_epoch_ms: 3_456,
+        })
+        .unwrap();
+
+        assert_eq!(saved.track.unwrap().id, "track-1");
+        assert_eq!(saved.saved_at.unwrap().nanos, 456_000_000);
+    }
+
+    #[test]
     fn liked_track_resource_preserves_track_and_timestamp() {
         let liked = to_liked_track(TrackLike {
             profile_id: "profile-1".into(),
@@ -164,5 +254,21 @@ mod tests {
 
         assert_eq!(liked.track.unwrap().id, "track-2");
         assert_eq!(liked.liked_at.unwrap().seconds, 2);
+    }
+
+    #[test]
+    fn liked_track_list_resource_preserves_track_and_timestamp() {
+        let liked = to_liked_track_item(LikedTrackItem {
+            item: MediaItem {
+                id: "track-2".into(),
+                title: "Track".into(),
+                ..MediaItem::default()
+            },
+            liked_at_epoch_ms: 4_567,
+        })
+        .unwrap();
+
+        assert_eq!(liked.track.unwrap().id, "track-2");
+        assert_eq!(liked.liked_at.unwrap().seconds, 4);
     }
 }

@@ -23,6 +23,7 @@ pub(crate) fn to_status(err: CanopyError) -> Status {
         CanopyError::Unauthenticated(message) => Status::unauthenticated(message),
         CanopyError::FailedPrecondition(message) => Status::failed_precondition(message),
         CanopyError::Aborted(message) => Status::aborted(message),
+        CanopyError::RateLimited(message) => Status::resource_exhausted(message),
         CanopyError::Storage(message) => Status::unavailable(message),
         CanopyError::Internal(message) => Status::internal(message),
     }
@@ -53,6 +54,11 @@ mod tests {
                 "state",
             ),
             (CanopyError::Aborted("stale".into()), Code::Aborted, "stale"),
+            (
+                CanopyError::RateLimited("slow down".into()),
+                Code::ResourceExhausted,
+                "slow down",
+            ),
             (
                 CanopyError::Storage("database".into()),
                 Code::Unavailable,

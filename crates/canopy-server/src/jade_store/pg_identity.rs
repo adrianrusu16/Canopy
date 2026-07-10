@@ -7,10 +7,12 @@ use canopy_core::{
     AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
     CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
     CreatePasswordResetChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
-    PasswordCredentialRecord, PasswordLoginRecord, RegisterPasswordRecord,
-    RotateRefreshTokenRecord, StoredAuthenticatedSession,
+    PasswordCredentialRecord, PasswordLoginRecord, RateLimitBucket, RateLimitState,
+    RegisterPasswordRecord, RotateRefreshTokenRecord, StoredAuthenticatedSession,
 };
 use sqlx::Row;
+
+const RATE_LIMIT_WINDOW_MS: u64 = 15 * 60 * 1000;
 
 #[derive(Clone)]
 pub struct PgIdentityRepository {
@@ -42,6 +44,32 @@ fn parse_uuid(value: &str, field: &str) -> CanopyResult<uuid::Uuid> {
 
 fn timestamp_expr(epoch_ms: u64) -> f64 {
     epoch_ms as f64 / 1000.0
+}
+
+fn validate_rate_limit_bucket(bucket: &RateLimitBucket) -> CanopyResult<()> {
+    if bucket.operation.trim().is_empty() || bucket.operation.len() > 64 {
+        return Err(CanopyError::InvalidArgument(
+            "rate-limit operation must be between 1 and 64 bytes".into(),
+        ));
+    }
+    if bucket.max_attempts == 0 {
+        return Err(CanopyError::InvalidArgument(
+            "rate-limit max_attempts must be positive".into(),
+        ));
+    }
+    if bucket.window_end_epoch_ms <= bucket.window_start_epoch_ms {
+        return Err(CanopyError::InvalidArgument(
+            "rate-limit window_end must be after window_start".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn rate_limit_state(request_count: u32, max_attempts: u32) -> RateLimitState {
+    RateLimitState {
+        request_count,
+        limited: request_count >= max_attempts,
+    }
 }
 
 fn epoch_ms(row: &sqlx::postgres::PgRow, column: &str) -> u64 {
@@ -96,6 +124,56 @@ fn session_from_row(row: &sqlx::postgres::PgRow) -> CanopyResult<AuthSession> {
 
 #[async_trait]
 impl IdentityRepository for PgIdentityRepository {
+    async fn rate_limit_state(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState> {
+        validate_rate_limit_bucket(&bucket)?;
+        let count: Option<i32> = sqlx::query_scalar(
+            r#"
+                SELECT request_count
+                FROM auth_rate_limits
+                WHERE operation = $1
+                  AND subject_hash = $2
+                  AND window_start = to_timestamp($3)
+            "#,
+        )
+        .bind(bucket.operation)
+        .bind(bucket.subject_hash.as_slice())
+        .bind(timestamp_expr(bucket.window_start_epoch_ms))
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(rate_limit_state(
+            count.unwrap_or(0).max(0) as u32,
+            bucket.max_attempts,
+        ))
+    }
+
+    async fn record_rate_limit_hit(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState> {
+        validate_rate_limit_bucket(&bucket)?;
+        let count: i32 = sqlx::query_scalar(
+            r#"
+                INSERT INTO auth_rate_limits (
+                    operation, subject_hash, window_start, window_end, request_count
+                )
+                VALUES ($1, $2, to_timestamp($3), to_timestamp($4), 1)
+                ON CONFLICT (operation, subject_hash, window_start)
+                DO UPDATE SET
+                    request_count = auth_rate_limits.request_count + 1,
+                    window_end = EXCLUDED.window_end
+                RETURNING request_count
+            "#,
+        )
+        .bind(bucket.operation)
+        .bind(bucket.subject_hash.as_slice())
+        .bind(timestamp_expr(bucket.window_start_epoch_ms))
+        .bind(timestamp_expr(bucket.window_end_epoch_ms))
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(rate_limit_state(count.max(0) as u32, bucket.max_attempts))
+    }
+
     async fn register_password(&self, record: RegisterPasswordRecord) -> CanopyResult<()> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
 
@@ -854,6 +932,29 @@ impl IdentityRepository for PgIdentityRepository {
         let session_expired: bool = token_row.try_get("session_expired").map_err(db_err)?;
 
         if token_consumed {
+            let window_start_epoch_ms =
+                record.now_epoch_ms - (record.now_epoch_ms % RATE_LIMIT_WINDOW_MS);
+            sqlx::query(
+                r#"
+                    INSERT INTO auth_rate_limits (
+                        operation, subject_hash, window_start, window_end, request_count
+                    )
+                    VALUES (
+                        'refresh_token_reuse', $1, to_timestamp($2), to_timestamp($3), 1
+                    )
+                    ON CONFLICT (operation, subject_hash, window_start)
+                    DO UPDATE SET
+                        request_count = auth_rate_limits.request_count + 1,
+                        window_end = EXCLUDED.window_end
+                "#,
+            )
+            .bind(record.presented_token_hash.as_slice())
+            .bind(timestamp_expr(window_start_epoch_ms))
+            .bind(timestamp_expr(window_start_epoch_ms + RATE_LIMIT_WINDOW_MS))
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
             sqlx::query(
                 r#"
                     UPDATE auth_sessions

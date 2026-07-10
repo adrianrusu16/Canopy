@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use canopy_core::{
-    CanopyError, CanopyResult, LibraryItem, LibraryRepository, MediaPage, Page, ProfileRepository,
-    UserIdentity,
+    CanopyError, CanopyResult, LibraryItem, LibraryRepository, Page, ProfileRepository,
+    SavedTrackPage, UserIdentity,
 };
 
 /// Application service for profile-owned saved library items.
@@ -46,7 +46,7 @@ impl LibraryService {
         &self,
         identity: &UserIdentity,
         page: Page,
-    ) -> CanopyResult<MediaPage> {
+    ) -> CanopyResult<SavedTrackPage> {
         let profile_id = self.profile_id(identity).await?;
         self.library.list_tracks(&profile_id, page).await
     }
@@ -139,21 +139,19 @@ mod tests {
         assert_eq!(saved.profile_id, profile.id);
         assert_eq!(saved_again.track_id, "track-1");
         assert!(service.is_saved(&identity(), "track-1").await.unwrap());
-        assert_eq!(
-            service
-                .list_tracks(
-                    &identity(),
-                    Page {
-                        limit: 10,
-                        offset: 0,
-                    },
-                )
-                .await
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
+        let page = service
+            .list_tracks(
+                &identity(),
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].item.id, "track-1");
+        assert_eq!(page.items[0].saved_at_epoch_ms, saved.added_at_epoch_ms);
 
         service.remove_track(&identity(), "track-1").await.unwrap();
         service.remove_track(&identity(), "track-1").await.unwrap();

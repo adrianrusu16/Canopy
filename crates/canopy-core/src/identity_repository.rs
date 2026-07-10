@@ -142,6 +142,30 @@ pub struct RotateRefreshTokenRecord {
     pub now_epoch_ms: u64,
 }
 
+/// Fixed-window abuse-control bucket keyed by a hashed subject.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitBucket {
+    /// Stable operation name, such as login_password_failure.
+    pub operation: &'static str,
+    /// SHA-256 digest of the operation-specific subject. Never store raw email, IP, or token values.
+    pub subject_hash: [u8; 32],
+    /// Inclusive fixed-window start in Unix epoch milliseconds.
+    pub window_start_epoch_ms: u64,
+    /// Exclusive fixed-window end in Unix epoch milliseconds.
+    pub window_end_epoch_ms: u64,
+    /// Maximum permitted hits within this window before requests are throttled.
+    pub max_attempts: u32,
+}
+
+/// Current fixed-window rate-limit state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RateLimitState {
+    /// Number of hits recorded in the current window.
+    pub request_count: u32,
+    /// Whether this bucket has reached its configured limit.
+    pub limited: bool,
+}
+
 /// Account and session returned by successful activation/login/refresh work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredAuthenticatedSession {
@@ -165,6 +189,12 @@ pub struct ExternalIdentityRecord {
 /// Transaction-oriented persistence operations required by `IdentityService`.
 #[async_trait]
 pub trait IdentityRepository: Send + Sync {
+    /// Returns the current state for a fixed-window abuse-control bucket.
+    async fn rate_limit_state(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState>;
+
+    /// Atomically records one hit in a fixed-window abuse-control bucket.
+    async fn record_rate_limit_hit(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState>;
+
     /// Registers a pending native account and queues its verification email.
     async fn register_password(&self, record: RegisterPasswordRecord) -> CanopyResult<()>;
 

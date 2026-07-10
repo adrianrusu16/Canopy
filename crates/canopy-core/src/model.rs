@@ -319,6 +319,26 @@ pub struct LibraryItem {
     pub added_at_epoch_ms: u64,
 }
 
+/// A saved catalog item rendered with relationship metadata.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SavedTrackItem {
+    /// Renderable catalog item that was saved.
+    pub item: MediaItem,
+    /// Time the item was saved, in epoch milliseconds.
+    pub saved_at_epoch_ms: u64,
+}
+
+/// A page of saved catalog items.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SavedTrackPage {
+    /// Items in the current page, newest first.
+    pub items: Vec<SavedTrackItem>,
+    /// Total number of saved tracks owned by the profile.
+    pub total_count: i32,
+    /// Whether more saved tracks exist beyond this page.
+    pub has_more: bool,
+}
+
 /// A positive track like from a real logged-in profile.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrackLike {
@@ -328,6 +348,26 @@ pub struct TrackLike {
     pub track_id: String,
     /// Time the track was liked, in epoch milliseconds.
     pub liked_at_epoch_ms: u64,
+}
+
+/// A liked catalog item rendered with relationship metadata.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LikedTrackItem {
+    /// Renderable catalog item that was liked.
+    pub item: MediaItem,
+    /// Time the track was liked, in epoch milliseconds.
+    pub liked_at_epoch_ms: u64,
+}
+
+/// A page of liked catalog items.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LikedTrackPage {
+    /// Items in the current page, newest first.
+    pub items: Vec<LikedTrackItem>,
+    /// Total number of liked tracks owned by the profile.
+    pub total_count: i32,
+    /// Whether more liked tracks exist beyond this page.
+    pub has_more: bool,
 }
 
 /// Profile-scoped preferences stored as a JSON document at the repository boundary.
@@ -369,6 +409,19 @@ pub struct PlaylistTrack {
     pub added_at_epoch_ms: u64,
 }
 
+/// A playlist track rendered with relationship metadata.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaylistTrackItem {
+    /// Playlist identifier.
+    pub playlist_id: String,
+    /// Renderable catalog item in the playlist.
+    pub item: MediaItem,
+    /// Zero-based ordering position.
+    pub position: i32,
+    /// Time the track was added, in epoch milliseconds.
+    pub added_at_epoch_ms: u64,
+}
+
 /// A page of playlists.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlaylistPage {
@@ -377,6 +430,17 @@ pub struct PlaylistPage {
     /// Total number of playlists for the profile.
     pub total_count: i32,
     /// Whether more playlists exist beyond this page.
+    pub has_more: bool,
+}
+
+/// A page of playlist tracks.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaylistTrackPage {
+    /// Tracks in the current page.
+    pub items: Vec<PlaylistTrackItem>,
+    /// Total number of tracks in the playlist.
+    pub total_count: i32,
+    /// Whether more tracks exist beyond this page.
     pub has_more: bool,
 }
 // ---------------------------------------------------------------------------

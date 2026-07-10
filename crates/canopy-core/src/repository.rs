@@ -8,10 +8,10 @@ use async_trait::async_trait;
 
 use crate::error::CanopyResult;
 use crate::model::{
-    AudioAsset, AuthorizedStreamAsset, LibraryItem, MediaItem, MediaPage, Page,
+    AudioAsset, AuthorizedStreamAsset, LibraryItem, LikedTrackPage, MediaItem, MediaPage, Page,
     PendingImportOutcome, PendingMediaImport, PlayableAsset, PlaybackHistoryEvent,
-    PlaybackHistoryPage, Playlist, PlaylistPage, ProfilePreferences, ProviderTrack, StreamAudience,
-    TrackLike, UserProfile,
+    PlaybackHistoryPage, Playlist, PlaylistPage, PlaylistTrackItem, PlaylistTrackPage,
+    ProfilePreferences, ProviderTrack, SavedTrackPage, StreamAudience, TrackLike, UserProfile,
 };
 
 /// Read access to public and owner-scoped catalog partitions.
@@ -170,7 +170,7 @@ pub trait LibraryRepository: Send + Sync {
     async fn remove_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()>;
 
     /// Lists saved library items newest first.
-    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage>;
+    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<SavedTrackPage>;
 
     /// Returns whether the profile has saved the track.
     async fn is_saved(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool>;
@@ -186,7 +186,8 @@ pub trait LikeRepository: Send + Sync {
     async fn unlike_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()>;
 
     /// Lists liked tracks newest first.
-    async fn list_liked_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage>;
+    async fn list_liked_tracks(&self, profile_id: &str, page: Page)
+    -> CanopyResult<LikedTrackPage>;
 
     /// Returns whether the profile has liked the track.
     async fn is_liked(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool>;
@@ -217,6 +218,13 @@ pub trait PlaylistRepository: Send + Sync {
         description: &str,
     ) -> CanopyResult<Playlist>;
 
+    /// Fetches one playlist owned by a real profile.
+    async fn get_playlist(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+    ) -> CanopyResult<Option<Playlist>>;
+
     /// Updates playlist metadata for a real profile.
     async fn update_playlist(
         &self,
@@ -239,7 +247,7 @@ pub trait PlaylistRepository: Send + Sync {
         playlist_id: &str,
         track_id: &str,
         position: Option<i32>,
-    ) -> CanopyResult<()>;
+    ) -> CanopyResult<PlaylistTrackItem>;
 
     /// Removes a track from a playlist. Removing an absent track succeeds.
     async fn remove_track(
@@ -255,7 +263,7 @@ pub trait PlaylistRepository: Send + Sync {
         profile_id: &str,
         playlist_id: &str,
         track_ids: &[String],
-    ) -> CanopyResult<()>;
+    ) -> CanopyResult<Playlist>;
 
     /// Lists playlist tracks as renderable media items in playlist order.
     async fn list_tracks(
@@ -263,7 +271,7 @@ pub trait PlaylistRepository: Send + Sync {
         profile_id: &str,
         playlist_id: &str,
         page: Page,
-    ) -> CanopyResult<MediaPage>;
+    ) -> CanopyResult<PlaylistTrackPage>;
 }
 /// Write access to the catalog for provider ingestion.
 ///

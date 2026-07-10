@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use canopy_core::{
-    CanopyError, CanopyResult, LikeRepository, MediaPage, Page, ProfileRepository, TrackLike,
+    CanopyError, CanopyResult, LikeRepository, LikedTrackPage, Page, ProfileRepository, TrackLike,
     UserIdentity,
 };
 
@@ -45,7 +45,7 @@ impl LikeService {
         &self,
         identity: &UserIdentity,
         page: Page,
-    ) -> CanopyResult<MediaPage> {
+    ) -> CanopyResult<LikedTrackPage> {
         let profile_id = self.profile_id(identity).await?;
         self.likes.list_liked_tracks(&profile_id, page).await
     }
@@ -135,21 +135,19 @@ mod tests {
         assert_eq!(liked.profile_id, profile.id);
         assert_eq!(liked_again.track_id, "track-1");
         assert!(service.is_liked(&identity(), "track-1").await.unwrap());
-        assert_eq!(
-            service
-                .list_liked_tracks(
-                    &identity(),
-                    Page {
-                        limit: 10,
-                        offset: 0,
-                    },
-                )
-                .await
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
+        let page = service
+            .list_liked_tracks(
+                &identity(),
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].item.id, "track-1");
+        assert_eq!(page.items[0].liked_at_epoch_ms, liked.liked_at_epoch_ms);
 
         service.unlike_track(&identity(), "track-1").await.unwrap();
         service.unlike_track(&identity(), "track-1").await.unwrap();

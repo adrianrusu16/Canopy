@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use canopy_core::{
-    CanopyError, CanopyResult, MediaPage, Page, Playlist, PlaylistPage, PlaylistRepository,
-    ProfileRepository, UserIdentity,
+    CanopyError, CanopyResult, Page, Playlist, PlaylistPage, PlaylistRepository, PlaylistTrackItem,
+    PlaylistTrackPage, ProfileRepository, UserIdentity,
 };
 
 /// Application service for profile-owned playlists.
@@ -42,6 +42,20 @@ impl PlaylistService {
         self.playlists
             .create_playlist(&profile_id, name, description)
             .await
+    }
+
+    /// Returns one playlist for the authenticated profile.
+    pub async fn get_playlist(
+        &self,
+        identity: &UserIdentity,
+        playlist_id: &str,
+    ) -> CanopyResult<Playlist> {
+        let profile_id = self.profile_id(identity).await?;
+        let playlist_id = validate_playlist_id(playlist_id)?;
+        self.playlists
+            .get_playlist(&profile_id, playlist_id)
+            .await?
+            .ok_or_else(|| CanopyError::not_found("playlist", playlist_id))
     }
 
     /// Updates playlist metadata for the authenticated profile.
@@ -91,7 +105,7 @@ impl PlaylistService {
         playlist_id: &str,
         track_id: &str,
         position: Option<i32>,
-    ) -> CanopyResult<()> {
+    ) -> CanopyResult<PlaylistTrackItem> {
         let profile_id = self.profile_id(identity).await?;
         let playlist_id = validate_playlist_id(playlist_id)?;
         let track_id = validate_track_id(track_id)?;
@@ -121,7 +135,7 @@ impl PlaylistService {
         identity: &UserIdentity,
         playlist_id: &str,
         track_ids: Vec<String>,
-    ) -> CanopyResult<()> {
+    ) -> CanopyResult<Playlist> {
         let profile_id = self.profile_id(identity).await?;
         let playlist_id = validate_playlist_id(playlist_id)?;
         let track_ids = track_ids
@@ -139,7 +153,7 @@ impl PlaylistService {
         identity: &UserIdentity,
         playlist_id: &str,
         page: Page,
-    ) -> CanopyResult<MediaPage> {
+    ) -> CanopyResult<PlaylistTrackPage> {
         let profile_id = self.profile_id(identity).await?;
         let playlist_id = validate_playlist_id(playlist_id)?;
         self.playlists
@@ -256,6 +270,12 @@ mod tests {
         assert_eq!(playlist.name, "Road Mix");
         assert_eq!(playlist.description, "For drives");
 
+        let fetched = service
+            .get_playlist(&identity(), &playlist.id)
+            .await
+            .unwrap();
+        assert_eq!(fetched.id, playlist.id);
+
         let updated = service
             .update_playlist(&identity(), &playlist.id, "Night Drive", "Late routes")
             .await
@@ -296,15 +316,23 @@ mod tests {
             .await
             .unwrap();
 
-        service
+        let added = service
             .add_track(&identity(), &playlist.id, "track-1", None)
             .await
             .unwrap();
-        service
+        assert_eq!(added.playlist_id, playlist.id);
+        assert_eq!(added.item.id, "track-1");
+        assert_eq!(added.position, 0);
+        assert!(added.added_at_epoch_ms > 0);
+
+        let inserted = service
             .add_track(&identity(), &playlist.id, "track-2", Some(0))
             .await
             .unwrap();
-        service
+        assert_eq!(inserted.item.id, "track-2");
+        assert_eq!(inserted.position, 0);
+
+        let reordered = service
             .reorder_tracks(
                 &identity(),
                 &playlist.id,
@@ -312,6 +340,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(reordered.id, playlist.id);
 
         let page = service
             .list_tracks(
@@ -324,7 +353,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(page.items[0].id, "track-1");
+        assert_eq!(page.items[0].item.id, "track-1");
+        assert_eq!(page.items[0].position, 0);
+        assert!(page.items[0].added_at_epoch_ms > 0);
         assert_eq!(page.total_count, 2);
 
         service

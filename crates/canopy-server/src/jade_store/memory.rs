@@ -7,10 +7,12 @@ use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CanopyError, CanopyResult,
     CatalogRepository, DiscoveryRepository, IngestStatus, InstanceSettingsRepository, LibraryItem,
-    LibraryRepository, LikeRepository, MediaItem, MediaPage, MediaVisibility, Page, PlayableAsset,
-    PlayableAssetRepository, PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage,
-    PlaybackHistoryRepository, Playlist, PlaylistPage, PlaylistRepository, PreferencesRepository,
-    ProfilePreferences, ProfileRepository, StreamAudience, TrackLike, UserProfile,
+    LibraryRepository, LikeRepository, LikedTrackItem, LikedTrackPage, MediaItem, MediaPage,
+    MediaVisibility, Page, PlayableAsset, PlayableAssetRepository, PlaybackHistoryEntry,
+    PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository, Playlist, PlaylistPage,
+    PlaylistRepository, PlaylistTrack, PlaylistTrackItem, PlaylistTrackPage, PreferencesRepository,
+    ProfilePreferences, ProfileRepository, SavedTrackItem, SavedTrackPage, StreamAudience,
+    TrackLike, UserProfile,
 };
 
 /// Catalog item together with its mandatory access policy.
@@ -517,7 +519,7 @@ impl LibraryRepository for InMemoryLibraryStore {
         Ok(())
     }
 
-    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<SavedTrackPage> {
         let mut items: Vec<LibraryItem> = self
             .items
             .lock()
@@ -530,15 +532,18 @@ impl LibraryRepository for InMemoryLibraryStore {
         let total_count = items.len() as i32;
         let start = (page.offset as usize).min(items.len());
         let end = (start + page.limit as usize).min(items.len());
-        let media_items = items[start..end]
+        let saved_items = items[start..end]
             .iter()
-            .map(|item| MediaItem {
-                id: item.track_id.clone(),
-                ..MediaItem::default()
+            .map(|item| SavedTrackItem {
+                item: MediaItem {
+                    id: item.track_id.clone(),
+                    ..MediaItem::default()
+                },
+                saved_at_epoch_ms: item.added_at_epoch_ms,
             })
             .collect();
-        Ok(MediaPage {
-            items: media_items,
+        Ok(SavedTrackPage {
+            items: saved_items,
             total_count,
             has_more: end < items.len(),
         })
@@ -581,7 +586,11 @@ impl LikeRepository for InMemoryLikeStore {
         Ok(())
     }
 
-    async fn list_liked_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+    async fn list_liked_tracks(
+        &self,
+        profile_id: &str,
+        page: Page,
+    ) -> CanopyResult<LikedTrackPage> {
         let mut likes: Vec<TrackLike> = self
             .likes
             .lock()
@@ -594,15 +603,18 @@ impl LikeRepository for InMemoryLikeStore {
         let total_count = likes.len() as i32;
         let start = (page.offset as usize).min(likes.len());
         let end = (start + page.limit as usize).min(likes.len());
-        let media_items = likes[start..end]
+        let liked_items = likes[start..end]
             .iter()
-            .map(|like| MediaItem {
-                id: like.track_id.clone(),
-                ..MediaItem::default()
+            .map(|like| LikedTrackItem {
+                item: MediaItem {
+                    id: like.track_id.clone(),
+                    ..MediaItem::default()
+                },
+                liked_at_epoch_ms: like.liked_at_epoch_ms,
             })
             .collect();
-        Ok(MediaPage {
-            items: media_items,
+        Ok(LikedTrackPage {
+            items: liked_items,
             total_count,
             has_more: end < likes.len(),
         })
@@ -659,8 +671,11 @@ fn playlist_not_found(playlist_id: &str) -> CanopyError {
     CanopyError::not_found("playlist", playlist_id)
 }
 
-fn playlist_tracks_match(existing: &[String], requested: &[String]) -> bool {
-    let mut existing_sorted = existing.to_vec();
+fn playlist_tracks_match(existing: &[PlaylistTrack], requested: &[String]) -> bool {
+    let mut existing_sorted: Vec<String> = existing
+        .iter()
+        .map(|track| track.track_id.clone())
+        .collect();
     existing_sorted.sort();
     let mut requested_sorted = requested.to_vec();
     requested_sorted.sort();
@@ -671,7 +686,7 @@ fn playlist_tracks_match(existing: &[String], requested: &[String]) -> bool {
 #[derive(Default)]
 pub struct InMemoryPlaylistStore {
     playlists: Mutex<HashMap<String, Playlist>>,
-    tracks: Mutex<HashMap<String, Vec<String>>>,
+    tracks: Mutex<HashMap<String, Vec<PlaylistTrack>>>,
 }
 
 impl InMemoryPlaylistStore {
@@ -716,6 +731,18 @@ impl PlaylistRepository for InMemoryPlaylistStore {
             .unwrap()
             .insert(playlist.id.clone(), Vec::new());
         Ok(playlist)
+    }
+
+    async fn get_playlist(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+    ) -> CanopyResult<Option<Playlist>> {
+        match self.get_owned_playlist(profile_id, playlist_id) {
+            Ok(playlist) => Ok(Some(playlist)),
+            Err(CanopyError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     async fn update_playlist(
@@ -771,7 +798,7 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         playlist_id: &str,
         track_id: &str,
         position: Option<i32>,
-    ) -> CanopyResult<()> {
+    ) -> CanopyResult<PlaylistTrackItem> {
         self.get_owned_playlist(profile_id, playlist_id)?;
         if let Some(position) = position
             && position < 0
@@ -782,15 +809,45 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         }
         let mut tracks = self.tracks.lock().unwrap();
         let entry = tracks.entry(playlist_id.to_string()).or_default();
-        if let Some(existing) = entry.iter().position(|id| id == track_id) {
+        let added_at_epoch_ms = entry
+            .iter()
+            .find(|track| track.track_id == track_id)
+            .map(|track| track.added_at_epoch_ms)
+            .unwrap_or_else(current_epoch_ms);
+        if let Some(existing) = entry.iter().position(|track| track.track_id == track_id) {
             entry.remove(existing);
         }
         let index = position
             .map(|value| value as usize)
             .unwrap_or(entry.len())
             .min(entry.len());
-        entry.insert(index, track_id.to_string());
-        Ok(())
+        entry.insert(
+            index,
+            PlaylistTrack {
+                playlist_id: playlist_id.to_string(),
+                track_id: track_id.to_string(),
+                position: 0,
+                added_at_epoch_ms,
+            },
+        );
+        for (position, track) in entry.iter_mut().enumerate() {
+            track.position = i32::try_from(position)
+                .map_err(|_| CanopyError::InvalidArgument("playlist is too large".into()))?;
+        }
+        let track = entry[index].clone();
+        drop(tracks);
+        if let Some(playlist) = self.playlists.lock().unwrap().get_mut(playlist_id) {
+            playlist.updated_at_epoch_ms = current_epoch_ms();
+        }
+        Ok(PlaylistTrackItem {
+            playlist_id: track.playlist_id,
+            item: MediaItem {
+                id: track.track_id,
+                ..MediaItem::default()
+            },
+            position: track.position,
+            added_at_epoch_ms: track.added_at_epoch_ms,
+        })
     }
 
     async fn remove_track(
@@ -801,7 +858,10 @@ impl PlaylistRepository for InMemoryPlaylistStore {
     ) -> CanopyResult<()> {
         self.get_owned_playlist(profile_id, playlist_id)?;
         if let Some(tracks) = self.tracks.lock().unwrap().get_mut(playlist_id) {
-            tracks.retain(|id| id != track_id);
+            tracks.retain(|track| track.track_id != track_id);
+        }
+        if let Some(playlist) = self.playlists.lock().unwrap().get_mut(playlist_id) {
+            playlist.updated_at_epoch_ms = current_epoch_ms();
         }
         Ok(())
     }
@@ -811,7 +871,7 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         profile_id: &str,
         playlist_id: &str,
         track_ids: &[String],
-    ) -> CanopyResult<()> {
+    ) -> CanopyResult<Playlist> {
         self.get_owned_playlist(profile_id, playlist_id)?;
         let mut seen = std::collections::HashSet::new();
         if !track_ids
@@ -829,8 +889,28 @@ impl PlaylistRepository for InMemoryPlaylistStore {
                 "reorder must include exactly the playlist track_ids".into(),
             ));
         }
-        *entry = track_ids.to_vec();
-        Ok(())
+        let mut reordered = Vec::with_capacity(entry.len());
+        for (position, track_id) in track_ids.iter().enumerate() {
+            let mut track = entry
+                .iter()
+                .find(|track| track.track_id == *track_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CanopyError::InvalidArgument("unknown track_id in reorder".into())
+                })?;
+            track.position = i32::try_from(position)
+                .map_err(|_| CanopyError::InvalidArgument("playlist is too large".into()))?;
+            reordered.push(track);
+        }
+        *entry = reordered;
+        drop(tracks);
+
+        let mut playlists = self.playlists.lock().unwrap();
+        let playlist = playlists
+            .get_mut(playlist_id)
+            .ok_or_else(|| playlist_not_found(playlist_id))?;
+        playlist.updated_at_epoch_ms = current_epoch_ms();
+        Ok(playlist.clone())
     }
 
     async fn list_tracks(
@@ -838,7 +918,7 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         profile_id: &str,
         playlist_id: &str,
         page: Page,
-    ) -> CanopyResult<MediaPage> {
+    ) -> CanopyResult<PlaylistTrackPage> {
         self.get_owned_playlist(profile_id, playlist_id)?;
         let tracks = self
             .tracks
@@ -852,12 +932,17 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         let end = (start + page.limit as usize).min(tracks.len());
         let items = tracks[start..end]
             .iter()
-            .map(|track_id| MediaItem {
-                id: track_id.clone(),
-                ..MediaItem::default()
+            .map(|track| PlaylistTrackItem {
+                playlist_id: track.playlist_id.clone(),
+                item: MediaItem {
+                    id: track.track_id.clone(),
+                    ..MediaItem::default()
+                },
+                position: track.position,
+                added_at_epoch_ms: track.added_at_epoch_ms,
             })
             .collect();
-        Ok(MediaPage {
+        Ok(PlaylistTrackPage {
             items,
             total_count,
             has_more: end < tracks.len(),

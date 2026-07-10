@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use canopy_core::{
     AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
     CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
-    CreatePasswordResetChallenge, CreateSessionRecord, IdentityRepository, RegisterPasswordRecord,
-    RotateRefreshTokenRecord,
+    CreatePasswordResetChallenge, CreateSessionRecord, IdentityRepository, RateLimitBucket,
+    RegisterPasswordRecord, RotateRefreshTokenRecord,
 };
 
 use super::{
@@ -16,6 +16,10 @@ use super::{
 const PASSWORD_POLICY_VERSION: u32 = 1;
 const VERIFICATION_TOKEN_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+const RATE_LIMIT_WINDOW_MS: u64 = 15 * 60 * 1000;
+const LOGIN_FAILURE_LIMIT: u32 = 5;
+const REGISTER_REQUEST_LIMIT: u32 = 5;
+const GENERIC_EMAIL_REQUEST_LIMIT: u32 = 3;
 
 pub trait Clock: Send + Sync {
     fn now_epoch_ms(&self) -> u64;
@@ -124,8 +128,51 @@ impl IdentityService {
         }
     }
 
+    fn rate_limit_bucket(
+        &self,
+        operation: &'static str,
+        subject: &str,
+        now_epoch_ms: u64,
+        max_attempts: u32,
+    ) -> RateLimitBucket {
+        let window_start_epoch_ms = now_epoch_ms - (now_epoch_ms % RATE_LIMIT_WINDOW_MS);
+        RateLimitBucket {
+            operation,
+            subject_hash: *TokenDigest::from_secret(&format!("{operation}:{subject}")).as_bytes(),
+            window_start_epoch_ms,
+            window_end_epoch_ms: window_start_epoch_ms + RATE_LIMIT_WINDOW_MS,
+            max_attempts,
+        }
+    }
+
+    async fn ensure_not_rate_limited(&self, bucket: &RateLimitBucket) -> CanopyResult<()> {
+        let state = self.repository.rate_limit_state(bucket.clone()).await?;
+        if state.limited {
+            Err(CanopyError::RateLimited(
+                "too many authentication attempts; try again later".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn record_rate_limit_hit(&self, bucket: RateLimitBucket) -> CanopyResult<()> {
+        self.repository.record_rate_limit_hit(bucket).await?;
+        Ok(())
+    }
+
     pub async fn register_password(&self, command: RegisterPasswordCommand) -> CanopyResult<()> {
         let normalized_email = normalize_email(&command.email)?;
+        let now = self.clock.now_epoch_ms();
+        let bucket = self.rate_limit_bucket(
+            "register_password",
+            &normalized_email,
+            now,
+            REGISTER_REQUEST_LIMIT,
+        );
+        self.ensure_not_rate_limited(&bucket).await?;
+        self.record_rate_limit_hit(bucket).await?;
+
         let password_hasher = self.password_hasher.clone();
         let password = command.password;
         let password_hash_phc =
@@ -137,7 +184,6 @@ impl IdentityService {
 
         let verification_token = OpaqueToken::generate();
         let verification_token_hash = *TokenDigest::from_token(&verification_token).as_bytes();
-        let now = self.clock.now_epoch_ms();
         let verification_expires_at_epoch_ms = now + VERIFICATION_TOKEN_TTL_MS;
         let outbox = verification_outbox(
             normalized_email.clone(),
@@ -164,9 +210,25 @@ impl IdentityService {
         command: ResendVerificationCommand,
     ) -> CanopyResult<()> {
         let normalized_email = normalize_email(&command.email)?;
+        let now = self.clock.now_epoch_ms();
+        let bucket = self.rate_limit_bucket(
+            "resend_verification",
+            &normalized_email,
+            now,
+            GENERIC_EMAIL_REQUEST_LIMIT,
+        );
+        if self
+            .repository
+            .rate_limit_state(bucket.clone())
+            .await?
+            .limited
+        {
+            return Ok(());
+        }
+        self.record_rate_limit_hit(bucket).await?;
+
         let verification_token = OpaqueToken::generate();
         let verification_token_hash = *TokenDigest::from_token(&verification_token).as_bytes();
-        let now = self.clock.now_epoch_ms();
         let expires_at_epoch_ms = now + VERIFICATION_TOKEN_TTL_MS;
         let outbox = verification_outbox(
             normalized_email.clone(),
@@ -193,9 +255,25 @@ impl IdentityService {
         let Ok(normalized_email) = normalize_email(&command.email) else {
             return Ok(());
         };
+        let now = self.clock.now_epoch_ms();
+        let bucket = self.rate_limit_bucket(
+            "password_reset_request",
+            &normalized_email,
+            now,
+            GENERIC_EMAIL_REQUEST_LIMIT,
+        );
+        if self
+            .repository
+            .rate_limit_state(bucket.clone())
+            .await?
+            .limited
+        {
+            return Ok(());
+        }
+        self.record_rate_limit_hit(bucket).await?;
+
         let reset_token = OpaqueToken::generate();
         let token_hash = *TokenDigest::from_token(&reset_token).as_bytes();
-        let now = self.clock.now_epoch_ms();
         let expires_at_epoch_ms = now + VERIFICATION_TOKEN_TTL_MS;
         let outbox = password_reset_outbox(
             normalized_email.clone(),
@@ -285,15 +363,26 @@ impl IdentityService {
         command: LoginPasswordCommand,
     ) -> CanopyResult<SessionEnvelope> {
         let normalized_email = normalize_email(&command.email)?;
+        let now = self.clock.now_epoch_ms();
+        let bucket = self.rate_limit_bucket(
+            "login_password_failure",
+            &normalized_email,
+            now,
+            LOGIN_FAILURE_LIMIT,
+        );
+        self.ensure_not_rate_limited(&bucket).await?;
+
         let Some(login) = self
             .repository
             .password_login_record(&normalized_email)
             .await?
         else {
+            self.record_rate_limit_hit(bucket).await?;
             return Err(CanopyError::unauthenticated("invalid email or password"));
         };
 
         if login.account.status != AccountStatus::Active {
+            self.record_rate_limit_hit(bucket).await?;
             return Err(CanopyError::unauthenticated("invalid email or password"));
         }
 
@@ -308,6 +397,7 @@ impl IdentityService {
         .map_err(|error| CanopyError::Internal(format!("password task failed: {error}")))??;
 
         if !verification.valid {
+            self.record_rate_limit_hit(bucket).await?;
             return Err(CanopyError::unauthenticated("invalid email or password"));
         }
 
@@ -329,7 +419,6 @@ impl IdentityService {
         }
 
         let refresh_token = OpaqueToken::generate();
-        let now = self.clock.now_epoch_ms();
         let stored = self
             .repository
             .create_session(CreateSessionRecord {

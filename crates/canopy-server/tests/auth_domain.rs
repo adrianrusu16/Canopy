@@ -2,11 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use canopy_core::{
-    AccountRecord, AccountStatus, AuthSession, CanopyResult, ChangePasswordRecord,
+    AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
     CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
     CreatePasswordResetChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
-    PasswordCredentialRecord, PasswordLoginRecord, RegisterPasswordRecord,
-    RotateRefreshTokenRecord, StoredAuthenticatedSession,
+    PasswordCredentialRecord, PasswordLoginRecord, RateLimitBucket, RateLimitState,
+    RegisterPasswordRecord, RotateRefreshTokenRecord, StoredAuthenticatedSession,
 };
 use canopy_proto::auth_service_server::AuthService;
 use canopy_proto::{
@@ -35,6 +35,9 @@ struct FakeIdentityRepository {
     changed_password: Mutex<Option<ChangePasswordRecord>>,
     account_lookup: Mutex<Option<AccountRecord>>,
     deleted_accounts: Mutex<Vec<String>>,
+    rate_limit_state: Mutex<RateLimitState>,
+    rate_limit_checks: Mutex<Vec<RateLimitBucket>>,
+    rate_limit_hits: Mutex<Vec<RateLimitBucket>>,
     activation: Mutex<Option<StoredAuthenticatedSession>>,
     consumed_challenge: Mutex<Option<ConsumeChallenge>>,
     created_session: Mutex<Option<CreateSessionRecord>>,
@@ -113,6 +116,13 @@ impl FakeIdentityRepository {
             ..Self::default()
         }
     }
+
+    fn with_rate_limit_state(state: RateLimitState) -> Self {
+        Self {
+            rate_limit_state: Mutex::new(state),
+            ..Self::default()
+        }
+    }
     fn with_activation_and_sessions(
         session: StoredAuthenticatedSession,
         listed_sessions: Vec<AuthSession>,
@@ -166,6 +176,15 @@ impl FakeIdentityRepository {
     fn deleted_accounts(&self) -> Vec<String> {
         self.deleted_accounts.lock().unwrap().clone()
     }
+
+    fn rate_limit_checks(&self) -> Vec<RateLimitBucket> {
+        self.rate_limit_checks.lock().unwrap().clone()
+    }
+
+    fn recorded_rate_limits(&self) -> Vec<RateLimitBucket> {
+        self.rate_limit_hits.lock().unwrap().clone()
+    }
+
     fn revoked_sessions(&self) -> Vec<(String, String)> {
         self.revoked_sessions.lock().unwrap().clone()
     }
@@ -173,6 +192,16 @@ impl FakeIdentityRepository {
 
 #[async_trait]
 impl IdentityRepository for FakeIdentityRepository {
+    async fn rate_limit_state(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState> {
+        self.rate_limit_checks.lock().unwrap().push(bucket);
+        Ok(self.rate_limit_state.lock().unwrap().clone())
+    }
+
+    async fn record_rate_limit_hit(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState> {
+        self.rate_limit_hits.lock().unwrap().push(bucket);
+        Ok(self.rate_limit_state.lock().unwrap().clone())
+    }
+
     async fn register_password(&self, record: RegisterPasswordRecord) -> CanopyResult<()> {
         *self.registered.lock().unwrap() = Some(CapturedRegistration {
             normalized_email: record.normalized_email,
@@ -572,6 +601,63 @@ async fn password_login_verifies_password_and_issues_device_session() {
     assert_eq!(created.account_id, "account-1");
     assert_eq!(created.device_label, "PandaWave Android");
     assert_ne!(created.refresh_token_hash, [0; 32]);
+}
+
+#[tokio::test]
+async fn password_login_records_failed_attempts_and_blocks_limited_bucket() {
+    let hasher = Argon2PasswordHasher::default();
+    let account = active_account();
+    let session = active_session("login-session-1");
+    let repo = Arc::new(FakeIdentityRepository::with_password_login(
+        PasswordLoginRecord {
+            account: account.clone(),
+            password_hash_phc: hasher.hash(PASSPHRASE).unwrap(),
+            policy_version: 1,
+        },
+        StoredAuthenticatedSession { account, session },
+    ));
+    let service = service(repo.clone());
+
+    let error = service
+        .login_password(LoginPasswordCommand {
+            email: "ADA@example.test".into(),
+            password: "wrong horse battery staple".into(),
+            device_label: "PandaWave Android".into(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, CanopyError::Unauthenticated(_)));
+    assert_eq!(repo.rate_limit_checks().len(), 1);
+    let hits = repo.recorded_rate_limits();
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert_eq!(hit.operation, "login_password_failure");
+    assert_ne!(hit.subject_hash, [0; 32]);
+    assert_eq!(hit.window_start_epoch_ms, NOW_MS - (NOW_MS % 900_000));
+    assert_eq!(hit.window_end_epoch_ms, hit.window_start_epoch_ms + 900_000);
+    assert_eq!(hit.max_attempts, 5);
+
+    let limited_repo = Arc::new(FakeIdentityRepository::with_rate_limit_state(
+        RateLimitState {
+            request_count: 5,
+            limited: true,
+        },
+    ));
+    let service = service(limited_repo.clone());
+
+    let error = service
+        .login_password(LoginPasswordCommand {
+            email: "ADA@example.test".into(),
+            password: PASSPHRASE.into(),
+            device_label: "PandaWave Android".into(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, CanopyError::RateLimited(_)));
+    assert_eq!(limited_repo.rate_limit_checks().len(), 1);
+    assert!(limited_repo.recorded_rate_limits().is_empty());
 }
 
 #[tokio::test]

@@ -71,6 +71,7 @@ async fn authorize_stream(
             | CanopyError::InvalidArgument(_)
             | CanopyError::FailedPrecondition(_)
             | CanopyError::Aborted(_)
+            | CanopyError::RateLimited(_)
             | CanopyError::NotFound { .. },
         ) => forbidden(),
         Err(CanopyError::Storage(_) | CanopyError::Internal(_)) => unavailable(),

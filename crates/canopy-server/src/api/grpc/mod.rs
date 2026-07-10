@@ -183,8 +183,12 @@ fn extract_bearer_token(metadata: &tonic::metadata::MetadataMap) -> CanopyResult
         .map_err(|_| CanopyError::unauthenticated("invalid authorization metadata"))?;
     let token = value
         .strip_prefix("Bearer ")
-        .ok_or_else(|| CanopyError::unauthenticated("authorization must use Bearer token"))?;
-    Ok(token.trim())
+        .ok_or_else(|| CanopyError::unauthenticated("authorization must use Bearer token"))?
+        .trim();
+    if token.is_empty() {
+        return Err(CanopyError::unauthenticated("authorization token is empty"));
+    }
+    Ok(token)
 }
 
 pub(crate) fn extract_metadata_identity(
@@ -308,6 +312,20 @@ mod tests {
 
         assert!(matches!(
             extract_optional_metadata_identity(request.metadata(), &auth),
+            Err(CanopyError::Unauthenticated(_))
+        ));
+    }
+
+    #[test]
+    fn bearer_token_rejects_blank_token() {
+        let mut request = tonic::Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            tonic::metadata::MetadataValue::from_static("Bearer "),
+        );
+
+        assert!(matches!(
+            extract_bearer_token(request.metadata()),
             Err(CanopyError::Unauthenticated(_))
         ));
     }

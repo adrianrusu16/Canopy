@@ -26,10 +26,11 @@ use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogIngest, CatalogRepository,
     DiscoveryRepository, IngestBatchResult, InstanceSettingsRepository, LibraryItem,
-    LibraryRepository, LikeRepository, MediaItem, MediaPage, Page, PlaybackHistoryEntry,
-    PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository, Playlist, PlaylistPage,
-    PlaylistRepository, PreferencesRepository, ProfilePreferences, ProfileRepository,
-    ProviderTrack, TrackLike, UserProfile,
+    LibraryRepository, LikeRepository, LikedTrackItem, LikedTrackPage, MediaItem, MediaPage, Page,
+    PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository,
+    Playlist, PlaylistPage, PlaylistRepository, PlaylistTrackItem, PlaylistTrackPage,
+    PreferencesRepository, ProfilePreferences, ProfileRepository, ProviderTrack, SavedTrackItem,
+    SavedTrackPage, TrackLike, UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
 
@@ -1245,7 +1246,7 @@ impl LibraryRepository for PgLibraryRepository {
         Ok(())
     }
 
-    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<SavedTrackPage> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let sql = format!(
             r#"
@@ -1258,7 +1259,8 @@ impl LibraryRepository for PgLibraryRepository {
                 t.is_explicit    AS track_explicit,
                 COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
                 aa.content_type  AS asset_content_type,
-                aa.size_bytes    AS asset_size_bytes
+                aa.size_bytes    AS asset_size_bytes,
+                (EXTRACT(EPOCH FROM pli.added_at) * 1000)::bigint AS saved_at_epoch_ms
             FROM profile_library_items pli
             JOIN tracks t      ON pli.track_id = t.id
             JOIN artists a     ON t.artist_id = a.id
@@ -1282,8 +1284,14 @@ impl LibraryRepository for PgLibraryRepository {
                 .fetch_one(self.pool.as_ref())
                 .await
                 .map_err(db_err)?;
-        Ok(MediaPage {
-            items: rows.iter().map(media_item_from_row).collect(),
+        Ok(SavedTrackPage {
+            items: rows
+                .iter()
+                .map(|row| SavedTrackItem {
+                    item: media_item_from_row(row),
+                    saved_at_epoch_ms: epoch_ms_i64(row, "saved_at_epoch_ms"),
+                })
+                .collect(),
             total_count: total_count as i32,
             has_more: (page.offset + page.limit) < total_count as u32,
         })
@@ -1364,7 +1372,11 @@ impl LikeRepository for PgLikeRepository {
         Ok(())
     }
 
-    async fn list_liked_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
+    async fn list_liked_tracks(
+        &self,
+        profile_id: &str,
+        page: Page,
+    ) -> CanopyResult<LikedTrackPage> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let sql = format!(
             r#"
@@ -1377,7 +1389,8 @@ impl LikeRepository for PgLikeRepository {
                 t.is_explicit    AS track_explicit,
                 COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
                 aa.content_type  AS asset_content_type,
-                aa.size_bytes    AS asset_size_bytes
+                aa.size_bytes    AS asset_size_bytes,
+                (EXTRACT(EPOCH FROM ptl.liked_at) * 1000)::bigint AS liked_at_epoch_ms
             FROM profile_track_likes ptl
             JOIN tracks t      ON ptl.track_id = t.id
             JOIN artists a     ON t.artist_id = a.id
@@ -1401,8 +1414,14 @@ impl LikeRepository for PgLikeRepository {
                 .fetch_one(self.pool.as_ref())
                 .await
                 .map_err(db_err)?;
-        Ok(MediaPage {
-            items: rows.iter().map(media_item_from_row).collect(),
+        Ok(LikedTrackPage {
+            items: rows
+                .iter()
+                .map(|row| LikedTrackItem {
+                    item: media_item_from_row(row),
+                    liked_at_epoch_ms: epoch_ms_i64(row, "liked_at_epoch_ms"),
+                })
+                .collect(),
             total_count: total_count as i32,
             has_more: (page.offset + page.limit) < total_count as u32,
         })
@@ -1475,6 +1494,15 @@ fn playlist_from_row(row: &sqlx::postgres::PgRow) -> Playlist {
     }
 }
 
+fn playlist_track_item_from_row(row: &sqlx::postgres::PgRow) -> PlaylistTrackItem {
+    PlaylistTrackItem {
+        playlist_id: row.try_get("playlist_id").unwrap_or_default(),
+        item: media_item_from_row(row),
+        position: row.try_get("position").unwrap_or_default(),
+        added_at_epoch_ms: epoch_ms_i64(row, "added_at_epoch_ms"),
+    }
+}
+
 #[async_trait]
 impl PlaylistRepository for PgPlaylistRepository {
     async fn create_playlist(
@@ -1505,6 +1533,35 @@ impl PlaylistRepository for PgPlaylistRepository {
         .map_err(db_err)?;
 
         Ok(playlist_from_row(&row))
+    }
+
+    async fn get_playlist(
+        &self,
+        profile_id: &str,
+        playlist_id: &str,
+    ) -> CanopyResult<Option<Playlist>> {
+        let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    id::text,
+                    profile_id::text,
+                    name,
+                    description,
+                    (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms,
+                    (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_at_epoch_ms
+                FROM profile_playlists
+                WHERE id = $1 AND profile_id = $2
+            "#,
+        )
+        .bind(playlist_uuid)
+        .bind(profile_uuid)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(row.as_ref().map(playlist_from_row))
     }
 
     async fn update_playlist(
@@ -1606,7 +1663,7 @@ impl PlaylistRepository for PgPlaylistRepository {
         playlist_id: &str,
         track_id: &str,
         position: Option<i32>,
-    ) -> CanopyResult<()> {
+    ) -> CanopyResult<PlaylistTrackItem> {
         if let Some(position) = position
             && position < 0
         {
@@ -1655,7 +1712,37 @@ impl PlaylistRepository for PgPlaylistRepository {
             .await
             .map_err(db_err)?;
 
-        Ok(())
+        let sql = format!(
+            r#"
+            SELECT
+                ppt.playlist_id::text AS playlist_id,
+                ppt.position          AS position,
+                (EXTRACT(EPOCH FROM ppt.added_at) * 1000)::bigint AS added_at_epoch_ms,
+                t.id                  AS track_id,
+                t.title               AS track_title,
+                a.name                AS artist_name,
+                al.title              AS album_title,
+                t.duration_ms         AS track_duration_ms,
+                t.is_explicit         AS track_explicit,
+                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                aa.content_type       AS asset_content_type,
+                aa.size_bytes         AS asset_size_bytes
+            FROM profile_playlist_tracks ppt
+            JOIN tracks t      ON ppt.track_id = t.id
+            JOIN artists a     ON t.artist_id = a.id
+            JOIN albums al     ON t.album_id = al.id
+            {REPRESENTATIVE_ASSET_JOIN}
+            WHERE ppt.playlist_id = $1 AND ppt.track_id = $2
+            "#
+        );
+        let row = sqlx::query(AssertSqlSafe(sql))
+            .bind(playlist_uuid)
+            .bind(track_uuid)
+            .fetch_one(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+
+        Ok(playlist_track_item_from_row(&row))
     }
 
     async fn remove_track(
@@ -1691,7 +1778,7 @@ impl PlaylistRepository for PgPlaylistRepository {
         profile_id: &str,
         playlist_id: &str,
         track_ids: &[String],
-    ) -> CanopyResult<()> {
+    ) -> CanopyResult<Playlist> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
         let mut requested = Vec::with_capacity(track_ids.len());
@@ -1750,14 +1837,28 @@ impl PlaylistRepository for PgPlaylistRepository {
             .map_err(db_err)?;
         }
 
-        sqlx::query("UPDATE profile_playlists SET updated_at = NOW() WHERE id = $1")
-            .bind(playlist_uuid)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
+        let playlist_row = sqlx::query(
+            r#"
+                UPDATE profile_playlists
+                SET updated_at = NOW()
+                WHERE id = $1
+                RETURNING
+                    id::text,
+                    profile_id::text,
+                    name,
+                    description,
+                    (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms,
+                    (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_at_epoch_ms
+            "#,
+        )
+        .bind(playlist_uuid)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let playlist = playlist_from_row(&playlist_row);
 
         tx.commit().await.map_err(db_err)?;
-        Ok(())
+        Ok(playlist)
     }
 
     async fn list_tracks(
@@ -1765,7 +1866,7 @@ impl PlaylistRepository for PgPlaylistRepository {
         profile_id: &str,
         playlist_id: &str,
         page: Page,
-    ) -> CanopyResult<MediaPage> {
+    ) -> CanopyResult<PlaylistTrackPage> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
         self.ensure_owned_playlist(profile_uuid, playlist_uuid, playlist_id)
@@ -1774,6 +1875,9 @@ impl PlaylistRepository for PgPlaylistRepository {
         let sql = format!(
             r#"
             SELECT
+                ppt.playlist_id::text AS playlist_id,
+                ppt.position          AS position,
+                (EXTRACT(EPOCH FROM ppt.added_at) * 1000)::bigint AS added_at_epoch_ms,
                 t.id             AS track_id,
                 t.title          AS track_title,
                 a.name           AS artist_name,
@@ -1809,8 +1913,8 @@ impl PlaylistRepository for PgPlaylistRepository {
         .await
         .map_err(db_err)?;
 
-        Ok(MediaPage {
-            items: rows.iter().map(media_item_from_row).collect(),
+        Ok(PlaylistTrackPage {
+            items: rows.iter().map(playlist_track_item_from_row).collect(),
             total_count: total_count as i32,
             has_more: (page.offset + page.limit) < total_count as u32,
         })

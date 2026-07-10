@@ -36,6 +36,10 @@ pub enum CanopyError {
     #[error("aborted: {0}")]
     Aborted(String),
 
+    /// The caller exceeded an abuse-control limit and may retry later.
+    #[error("rate limited: {0}")]
+    RateLimited(String),
+
     /// A persistence or managed-media dependency failed.
     #[error("storage error: {0}")]
     Storage(String),
