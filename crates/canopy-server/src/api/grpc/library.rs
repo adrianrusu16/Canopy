@@ -10,7 +10,7 @@ use canopy_proto::{
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
-use super::{GrpcServices, extract_metadata_identity, not_implemented, to_track_summary};
+use super::{GrpcServices, extract_durable_principal, not_implemented, to_track_summary};
 use crate::api::to_status;
 
 pub struct LibraryGrpc(pub Arc<GrpcServices>);
@@ -23,7 +23,10 @@ impl LibraryService for LibraryGrpc {
     ) -> Result<Response<SavedTrack>, Status> {
         let metadata = request.metadata().clone();
         let track_id = request.into_inner().track_id;
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let saved = self
             .0
             .library
@@ -39,7 +42,10 @@ impl LibraryService for LibraryGrpc {
     ) -> Result<Response<()>, Status> {
         let metadata = request.metadata().clone();
         let track_id = request.into_inner().track_id;
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         self.0
             .library
             .remove_track(&identity, &track_id)
@@ -61,7 +67,10 @@ impl LibraryService for LibraryGrpc {
     ) -> Result<Response<LikedTrack>, Status> {
         let metadata = request.metadata().clone();
         let track_id = request.into_inner().track_id;
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let liked = self
             .0
             .likes
@@ -77,7 +86,10 @@ impl LibraryService for LibraryGrpc {
     ) -> Result<Response<()>, Status> {
         let metadata = request.metadata().clone();
         let track_id = request.into_inner().track_id;
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         self.0
             .likes
             .unlike_track(&identity, &track_id)

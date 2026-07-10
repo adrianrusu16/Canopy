@@ -2,12 +2,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use canopy_core::{
-    AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ConsumeChallenge,
-    CreateSessionRecord, IdentityRepository, RegisterPasswordRecord, RotateRefreshTokenRecord,
+    AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
+    CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
+    CreatePasswordResetChallenge, CreateSessionRecord, IdentityRepository, RegisterPasswordRecord,
+    RotateRefreshTokenRecord,
 };
 
 use super::{
-    AccessTokenClaims, Ed25519AccessTokenIssuer, OpaqueToken, PasswordHasher, TokenDigest,
+    AccessTokenClaims, Ed25519AccessTokenIssuer, EmailOutboxPayload, OpaqueToken, PasswordHasher,
+    TokenDigest,
 };
 
 const PASSWORD_POLICY_VERSION: u32 = 1;
@@ -52,6 +55,24 @@ pub struct RegisterPasswordCommand {
     pub password: String,
 }
 
+pub struct ResendVerificationCommand {
+    pub email: String,
+}
+
+pub struct RequestPasswordResetCommand {
+    pub email: String,
+}
+
+pub struct CompletePasswordResetCommand {
+    pub reset_token: String,
+    pub new_password: String,
+}
+
+pub struct ChangePasswordCommand {
+    pub principal: AuthenticatedPrincipal,
+    pub current_password: String,
+    pub new_password: String,
+}
 pub struct VerifyEmailCommand {
     pub verification_token: String,
     pub device_label: String,
@@ -117,6 +138,13 @@ impl IdentityService {
         let verification_token = OpaqueToken::generate();
         let verification_token_hash = *TokenDigest::from_token(&verification_token).as_bytes();
         let now = self.clock.now_epoch_ms();
+        let verification_expires_at_epoch_ms = now + VERIFICATION_TOKEN_TTL_MS;
+        let outbox = verification_outbox(
+            normalized_email.clone(),
+            verification_token.as_str(),
+            verification_expires_at_epoch_ms,
+        )?;
+        let outbox_key_id = outbox.key_id().to_owned();
 
         self.repository
             .register_password(RegisterPasswordRecord {
@@ -124,13 +152,134 @@ impl IdentityService {
                 password_hash_phc,
                 policy_version: PASSWORD_POLICY_VERSION,
                 verification_token_hash,
-                verification_expires_at_epoch_ms: now + VERIFICATION_TOKEN_TTL_MS,
-                encrypted_outbox_payload: vec![0; 32],
-                outbox_key_id: "pending-outbox-encryption".into(),
+                verification_expires_at_epoch_ms,
+                encrypted_outbox_payload: outbox.into_bytes(),
+                outbox_key_id,
             })
             .await
     }
 
+    pub async fn resend_verification(
+        &self,
+        command: ResendVerificationCommand,
+    ) -> CanopyResult<()> {
+        let normalized_email = normalize_email(&command.email)?;
+        let verification_token = OpaqueToken::generate();
+        let verification_token_hash = *TokenDigest::from_token(&verification_token).as_bytes();
+        let now = self.clock.now_epoch_ms();
+        let expires_at_epoch_ms = now + VERIFICATION_TOKEN_TTL_MS;
+        let outbox = verification_outbox(
+            normalized_email.clone(),
+            verification_token.as_str(),
+            expires_at_epoch_ms,
+        )?;
+        let outbox_key_id = outbox.key_id().to_owned();
+
+        self.repository
+            .create_email_verification_challenge(CreateEmailVerificationChallenge {
+                normalized_email,
+                token_hash: verification_token_hash,
+                expires_at_epoch_ms,
+                encrypted_outbox_payload: outbox.into_bytes(),
+                outbox_key_id,
+            })
+            .await
+    }
+
+    pub async fn request_password_reset(
+        &self,
+        command: RequestPasswordResetCommand,
+    ) -> CanopyResult<()> {
+        let Ok(normalized_email) = normalize_email(&command.email) else {
+            return Ok(());
+        };
+        let reset_token = OpaqueToken::generate();
+        let token_hash = *TokenDigest::from_token(&reset_token).as_bytes();
+        let now = self.clock.now_epoch_ms();
+        let expires_at_epoch_ms = now + VERIFICATION_TOKEN_TTL_MS;
+        let outbox = password_reset_outbox(
+            normalized_email.clone(),
+            reset_token.as_str(),
+            expires_at_epoch_ms,
+        )?;
+        let outbox_key_id = outbox.key_id().to_owned();
+
+        self.repository
+            .create_password_reset_challenge(CreatePasswordResetChallenge {
+                normalized_email,
+                token_hash,
+                expires_at_epoch_ms,
+                encrypted_outbox_payload: outbox.into_bytes(),
+                outbox_key_id,
+            })
+            .await
+    }
+
+    pub async fn complete_password_reset(
+        &self,
+        command: CompletePasswordResetCommand,
+    ) -> CanopyResult<()> {
+        let password_hasher = self.password_hasher.clone();
+        let new_password = command.new_password;
+        let password_hash_phc =
+            tokio::task::spawn_blocking(move || password_hasher.hash(&new_password))
+                .await
+                .map_err(|error| {
+                    CanopyError::Internal(format!("password task failed: {error}"))
+                })??;
+        let now = self.clock.now_epoch_ms();
+        self.repository
+            .complete_password_reset(CompletePasswordResetRecord {
+                token_hash: *TokenDigest::from_secret(&command.reset_token).as_bytes(),
+                password_hash_phc,
+                policy_version: PASSWORD_POLICY_VERSION,
+                now_epoch_ms: now,
+            })
+            .await
+    }
+
+    pub async fn change_password(&self, command: ChangePasswordCommand) -> CanopyResult<()> {
+        let Some(credential) = self
+            .repository
+            .password_credential_for_account(&command.principal.account_id)
+            .await?
+        else {
+            return Err(CanopyError::unauthenticated("invalid current password"));
+        };
+        if credential.account.status != AccountStatus::Active {
+            return Err(CanopyError::unauthenticated("invalid current password"));
+        }
+
+        let password_hasher = self.password_hasher.clone();
+        let current_password = command.current_password;
+        let current_hash = credential.password_hash_phc.clone();
+        let verification = tokio::task::spawn_blocking(move || {
+            password_hasher.verify(&current_password, &current_hash)
+        })
+        .await
+        .map_err(|error| CanopyError::Internal(format!("password task failed: {error}")))??;
+        if !verification.valid {
+            return Err(CanopyError::unauthenticated("invalid current password"));
+        }
+
+        let password_hasher = self.password_hasher.clone();
+        let new_password = command.new_password;
+        let password_hash_phc =
+            tokio::task::spawn_blocking(move || password_hasher.hash(&new_password))
+                .await
+                .map_err(|error| {
+                    CanopyError::Internal(format!("password task failed: {error}"))
+                })??;
+
+        self.repository
+            .change_password(ChangePasswordRecord {
+                account_id: command.principal.account_id,
+                current_session_id: command.principal.session_id,
+                password_hash_phc,
+                policy_version: PASSWORD_POLICY_VERSION,
+            })
+            .await
+    }
     pub async fn login_password(
         &self,
         command: LoginPasswordCommand,
@@ -209,6 +358,19 @@ impl IdentityService {
         })
     }
 
+    pub async fn get_account(
+        &self,
+        principal: &AuthenticatedPrincipal,
+    ) -> CanopyResult<AccountRecord> {
+        self.repository
+            .account_by_id(&principal.account_id)
+            .await?
+            .ok_or_else(|| CanopyError::unauthenticated("account is not active"))
+    }
+
+    pub async fn delete_account(&self, principal: &AuthenticatedPrincipal) -> CanopyResult<()> {
+        self.repository.delete_account(&principal.account_id).await
+    }
     pub async fn logout(&self, principal: &AuthenticatedPrincipal) -> CanopyResult<()> {
         self.repository
             .revoke_session(&principal.account_id, &principal.session_id)
@@ -309,6 +471,26 @@ impl IdentityService {
     }
 }
 
+fn verification_outbox(
+    normalized_email: String,
+    verification_token: &str,
+    expires_at_epoch_ms: u64,
+) -> CanopyResult<super::SealedOutboxPayload> {
+    EmailOutboxPayload::email_verification(
+        normalized_email,
+        verification_token,
+        expires_at_epoch_ms,
+    )
+    .seal()
+}
+
+fn password_reset_outbox(
+    normalized_email: String,
+    reset_token: &str,
+    expires_at_epoch_ms: u64,
+) -> CanopyResult<super::SealedOutboxPayload> {
+    EmailOutboxPayload::password_reset(normalized_email, reset_token, expires_at_epoch_ms).seal()
+}
 fn normalize_email(email: &str) -> CanopyResult<String> {
     let normalized = email.trim().to_ascii_lowercase();
     if normalized.is_empty() || !normalized.contains('@') {

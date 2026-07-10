@@ -28,6 +28,68 @@ pub struct PasswordLoginRecord {
     pub policy_version: u32,
 }
 
+/// Password material for authenticated password-change verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PasswordCredentialRecord {
+    /// Account being authenticated.
+    pub account: AccountRecord,
+    /// Canonical Argon2 PHC string.
+    pub password_hash_phc: String,
+    /// Password policy used to create the hash.
+    pub policy_version: u32,
+}
+
+/// Request to create a generic password-reset challenge for an active account.
+pub struct CreatePasswordResetChallenge {
+    /// Normalized primary email to target.
+    pub normalized_email: String,
+    /// Digest of the password-reset token.
+    pub token_hash: [u8; 32],
+    /// Expiry of the reset challenge.
+    pub expires_at_epoch_ms: u64,
+    /// Authenticated ciphertext for post-commit email delivery.
+    pub encrypted_outbox_payload: Vec<u8>,
+    /// Encryption key identifier used by the outbox worker.
+    pub outbox_key_id: String,
+}
+
+/// Atomic password reset input.
+pub struct CompletePasswordResetRecord {
+    /// Digest of the presented reset token.
+    pub token_hash: [u8; 32],
+    /// Replacement password hash.
+    pub password_hash_phc: String,
+    /// Password-policy version used to create the hash.
+    pub policy_version: u32,
+    /// Current time used for challenge expiry.
+    pub now_epoch_ms: u64,
+}
+
+/// Atomic authenticated password-change input.
+pub struct ChangePasswordRecord {
+    /// Account changing its password.
+    pub account_id: String,
+    /// Current session to keep active after the password change.
+    pub current_session_id: String,
+    /// Replacement password hash.
+    pub password_hash_phc: String,
+    /// Password-policy version used to create the hash.
+    pub policy_version: u32,
+}
+
+/// Request to rotate an email-verification challenge for a pending account.
+pub struct CreateEmailVerificationChallenge {
+    /// Normalized primary email to target.
+    pub normalized_email: String,
+    /// Digest of the replacement email-verification token.
+    pub token_hash: [u8; 32],
+    /// Expiry of the replacement verification challenge.
+    pub expires_at_epoch_ms: u64,
+    /// Authenticated ciphertext for post-commit email delivery.
+    pub encrypted_outbox_payload: Vec<u8>,
+    /// Encryption key identifier used by the outbox worker.
+    pub outbox_key_id: String,
+}
 /// Hashed and encrypted values persisted during native registration.
 pub struct RegisterPasswordRecord {
     /// Normalized primary email.
@@ -106,6 +168,40 @@ pub trait IdentityRepository: Send + Sync {
     /// Registers a pending native account and queues its verification email.
     async fn register_password(&self, record: RegisterPasswordRecord) -> CanopyResult<()>;
 
+    /// Creates a password-reset challenge for an active native account.
+    ///
+    /// Implementations must return `Ok(())` for missing or non-active accounts
+    /// so public reset responses do not reveal account state.
+    async fn create_password_reset_challenge(
+        &self,
+        record: CreatePasswordResetChallenge,
+    ) -> CanopyResult<()>;
+
+    /// Loads password material by account for authenticated password changes.
+    async fn password_credential_for_account(
+        &self,
+        account_id: &str,
+    ) -> CanopyResult<Option<PasswordCredentialRecord>>;
+
+    /// Atomically consumes a password-reset challenge, changes the password,
+    /// and revokes all sessions for the account.
+    async fn complete_password_reset(
+        &self,
+        record: CompletePasswordResetRecord,
+    ) -> CanopyResult<()>;
+
+    /// Atomically changes a password and revokes all other sessions.
+    async fn change_password(&self, record: ChangePasswordRecord) -> CanopyResult<()>;
+
+    /// Creates a replacement email-verification challenge for a pending account.
+    ///
+    /// Implementations must return `Ok(())` for missing, active, disabled, or
+    /// deleted accounts so public resend responses do not reveal account state.
+    async fn create_email_verification_challenge(
+        &self,
+        record: CreateEmailVerificationChallenge,
+    ) -> CanopyResult<()>;
+
     /// Loads password verification material by normalized email.
     async fn password_login_record(
         &self,
@@ -147,6 +243,9 @@ pub trait IdentityRepository: Send + Sync {
         session_id: &str,
         now_epoch_ms: u64,
     ) -> CanopyResult<()>;
+
+    /// Loads an account by stable account id.
+    async fn account_by_id(&self, account_id: &str) -> CanopyResult<Option<AccountRecord>>;
 
     /// Idempotently revokes one account-owned session.
     async fn revoke_session(&self, account_id: &str, session_id: &str) -> CanopyResult<()>;

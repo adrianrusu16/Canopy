@@ -15,8 +15,10 @@ use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::api::to_status;
 use crate::identity::{
-    AuthenticatedPrincipal, IdentityService, LoginPasswordCommand, RefreshSessionCommand,
-    RegisterPasswordCommand, SessionEnvelope as DomainSessionEnvelope, VerifyEmailCommand,
+    AuthenticatedPrincipal, ChangePasswordCommand, CompletePasswordResetCommand, IdentityService,
+    LoginPasswordCommand, RefreshSessionCommand, RegisterPasswordCommand,
+    RequestPasswordResetCommand, ResendVerificationCommand,
+    SessionEnvelope as DomainSessionEnvelope, VerifyEmailCommand,
 };
 
 pub struct AuthGrpc(pub Arc<IdentityService>);
@@ -53,9 +55,16 @@ impl AuthService for AuthGrpc {
 
     async fn resend_verification(
         &self,
-        _request: Request<ResendVerificationRequest>,
+        request: Request<ResendVerificationRequest>,
     ) -> Result<Response<GenericAuthResponse>, Status> {
-        Err(super::not_implemented("AuthService.ResendVerification"))
+        let request = request.into_inner();
+        self.0
+            .resend_verification(ResendVerificationCommand {
+                email: request.email,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GenericAuthResponse { accepted: true }))
     }
 
     async fn verify_email(
@@ -93,23 +102,48 @@ impl AuthService for AuthGrpc {
 
     async fn request_password_reset(
         &self,
-        _request: Request<RequestPasswordResetRequest>,
+        request: Request<RequestPasswordResetRequest>,
     ) -> Result<Response<GenericAuthResponse>, Status> {
-        Err(super::not_implemented("AuthService.RequestPasswordReset"))
+        let request = request.into_inner();
+        self.0
+            .request_password_reset(RequestPasswordResetCommand {
+                email: request.email,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GenericAuthResponse { accepted: true }))
     }
 
     async fn complete_password_reset(
         &self,
-        _request: Request<CompletePasswordResetRequest>,
+        request: Request<CompletePasswordResetRequest>,
     ) -> Result<Response<GenericAuthResponse>, Status> {
-        Err(super::not_implemented("AuthService.CompletePasswordReset"))
+        let request = request.into_inner();
+        self.0
+            .complete_password_reset(CompletePasswordResetCommand {
+                reset_token: request.reset_token,
+                new_password: request.new_password,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GenericAuthResponse { accepted: true }))
     }
 
     async fn change_password(
         &self,
-        _request: Request<ChangePasswordRequest>,
+        request: Request<ChangePasswordRequest>,
     ) -> Result<Response<GenericAuthResponse>, Status> {
-        Err(super::not_implemented("AuthService.ChangePassword"))
+        let principal = self.authenticate(&request).await?;
+        let request = request.into_inner();
+        self.0
+            .change_password(ChangePasswordCommand {
+                principal,
+                current_password: request.current_password,
+                new_password: request.new_password,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GenericAuthResponse { accepted: true }))
     }
 
     async fn begin_google_login(
@@ -208,16 +242,22 @@ impl AuthService for AuthGrpc {
 
     async fn get_account(
         &self,
-        _request: Request<GetAccountRequest>,
+        request: Request<GetAccountRequest>,
     ) -> Result<Response<GetAccountResponse>, Status> {
-        Err(super::not_implemented("AuthService.GetAccount"))
+        let principal = self.authenticate(&request).await?;
+        let account = self.0.get_account(&principal).await.map_err(to_status)?;
+        Ok(Response::new(GetAccountResponse {
+            account: Some(to_proto_account(account)),
+        }))
     }
 
     async fn delete_account(
         &self,
-        _request: Request<DeleteAccountRequest>,
+        request: Request<DeleteAccountRequest>,
     ) -> Result<Response<GenericAuthResponse>, Status> {
-        Err(super::not_implemented("AuthService.DeleteAccount"))
+        let principal = self.authenticate(&request).await?;
+        self.0.delete_account(&principal).await.map_err(to_status)?;
+        Ok(Response::new(GenericAuthResponse { accepted: true }))
     }
 }
 

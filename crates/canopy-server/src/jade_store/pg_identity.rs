@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use canopy_core::{
-    AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ConsumeChallenge,
-    CreateSessionRecord, ExternalIdentityRecord, IdentityRepository, PasswordLoginRecord,
-    RegisterPasswordRecord, RotateRefreshTokenRecord, StoredAuthenticatedSession,
+    AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
+    CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
+    CreatePasswordResetChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
+    PasswordCredentialRecord, PasswordLoginRecord, RegisterPasswordRecord,
+    RotateRefreshTokenRecord, StoredAuthenticatedSession,
 };
 use sqlx::Row;
 
@@ -153,6 +155,371 @@ impl IdentityRepository for PgIdentityRepository {
         )
         .bind(record.encrypted_outbox_payload)
         .bind(record.outbox_key_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn create_email_verification_challenge(
+        &self,
+        record: CreateEmailVerificationChallenge,
+    ) -> CanopyResult<()> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    a.id AS account_id,
+                    ae.id AS email_id,
+                    a.status::text AS account_status
+                FROM account_emails ae
+                JOIN accounts a ON a.id = ae.account_id
+                WHERE ae.normalized_email = $1
+                  AND ae.deleted_at IS NULL
+                  AND ae.is_primary
+                FOR UPDATE OF a, ae
+            "#,
+        )
+        .bind(&record.normalized_email)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let Some(row) = row else {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(());
+        };
+        if account_status(&row.try_get::<String, _>("account_status").map_err(db_err)?)?
+            != AccountStatus::PendingEmailVerification
+        {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(());
+        }
+
+        let account_id: uuid::Uuid = row.try_get("account_id").map_err(db_err)?;
+        let email_id: uuid::Uuid = row.try_get("email_id").map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_challenges
+                SET consumed_at = COALESCE(consumed_at, NOW()),
+                    attempts = max_attempts
+                WHERE account_id = $1
+                  AND email_id = $2
+                  AND challenge_type = 'email_verification'::auth_challenge_type
+                  AND consumed_at IS NULL
+            "#,
+        )
+        .bind(account_id)
+        .bind(email_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO auth_challenges (
+                    account_id, email_id, challenge_type, token_hash, expires_at
+                )
+                VALUES ($1, $2, 'email_verification'::auth_challenge_type, $3, to_timestamp($4))
+            "#,
+        )
+        .bind(account_id)
+        .bind(email_id)
+        .bind(record.token_hash.as_slice())
+        .bind(timestamp_expr(record.expires_at_epoch_ms))
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO auth_outbox (kind, encrypted_payload, key_id)
+                VALUES ('email_verification', $1, $2)
+            "#,
+        )
+        .bind(record.encrypted_outbox_payload)
+        .bind(record.outbox_key_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn create_password_reset_challenge(
+        &self,
+        record: CreatePasswordResetChallenge,
+    ) -> CanopyResult<()> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    a.id AS account_id,
+                    a.status::text AS account_status
+                FROM account_emails ae
+                JOIN accounts a ON a.id = ae.account_id
+                JOIN password_credentials pc ON pc.account_id = a.id
+                WHERE ae.normalized_email = $1
+                  AND ae.deleted_at IS NULL
+                  AND ae.is_primary
+                FOR UPDATE OF a
+            "#,
+        )
+        .bind(&record.normalized_email)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let Some(row) = row else {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(());
+        };
+        if account_status(&row.try_get::<String, _>("account_status").map_err(db_err)?)?
+            != AccountStatus::Active
+        {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(());
+        }
+
+        let account_id: uuid::Uuid = row.try_get("account_id").map_err(db_err)?;
+        sqlx::query(
+            r#"
+                UPDATE auth_challenges
+                SET consumed_at = COALESCE(consumed_at, NOW()),
+                    attempts = max_attempts
+                WHERE account_id = $1
+                  AND challenge_type = 'password_reset'::auth_challenge_type
+                  AND consumed_at IS NULL
+            "#,
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO auth_challenges (
+                    account_id, challenge_type, token_hash, expires_at
+                )
+                VALUES ($1, 'password_reset'::auth_challenge_type, $2, to_timestamp($3))
+            "#,
+        )
+        .bind(account_id)
+        .bind(record.token_hash.as_slice())
+        .bind(timestamp_expr(record.expires_at_epoch_ms))
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO auth_outbox (kind, encrypted_payload, key_id)
+                VALUES ('password_reset', $1, $2)
+            "#,
+        )
+        .bind(record.encrypted_outbox_payload)
+        .bind(record.outbox_key_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn password_credential_for_account(
+        &self,
+        account_id: &str,
+    ) -> CanopyResult<Option<PasswordCredentialRecord>> {
+        let account_id = parse_uuid(account_id, "account_id")?;
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    a.id AS account_id,
+                    a.status::text AS account_status,
+                    ae.normalized_email AS primary_email,
+                    floor(extract(epoch from a.created_at) * 1000)::bigint AS created_at_epoch_ms,
+                    pc.password_hash_phc,
+                    pc.policy_version
+                FROM accounts a
+                JOIN password_credentials pc ON pc.account_id = a.id
+                LEFT JOIN account_emails ae ON ae.account_id = a.id AND ae.is_primary AND ae.deleted_at IS NULL
+                WHERE a.id = $1
+            "#,
+        )
+        .bind(account_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        row.map(|row| {
+            Ok(PasswordCredentialRecord {
+                account: account_from_row(&row)?,
+                password_hash_phc: row.try_get("password_hash_phc").map_err(db_err)?,
+                policy_version: row.try_get::<i32, _>("policy_version").map_err(db_err)? as u32,
+            })
+        })
+        .transpose()
+    }
+
+    async fn complete_password_reset(
+        &self,
+        record: CompletePasswordResetRecord,
+    ) -> CanopyResult<()> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let now = timestamp_expr(record.now_epoch_ms);
+        let row = sqlx::query(
+            r#"
+                UPDATE auth_challenges
+                SET consumed_at = to_timestamp($1), attempts = attempts + 1
+                WHERE token_hash = $2
+                  AND challenge_type = 'password_reset'::auth_challenge_type
+                  AND consumed_at IS NULL
+                  AND expires_at > to_timestamp($1)
+                  AND attempts < max_attempts
+                RETURNING account_id
+            "#,
+        )
+        .bind(now)
+        .bind(record.token_hash.as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let Some(row) = row else {
+            return Err(CanopyError::unauthenticated(
+                "invalid or consumed challenge",
+            ));
+        };
+        let account_id = row
+            .try_get::<Option<uuid::Uuid>, _>("account_id")
+            .map_err(db_err)?
+            .ok_or_else(|| {
+                CanopyError::FailedPrecondition("challenge is not account-scoped".into())
+            })?;
+
+        sqlx::query(
+            r#"
+                UPDATE password_credentials
+                SET password_hash_phc = $2,
+                    policy_version = $3,
+                    updated_at = to_timestamp($4),
+                    password_changed_at = to_timestamp($4)
+                WHERE account_id = $1
+            "#,
+        )
+        .bind(account_id)
+        .bind(record.password_hash_phc)
+        .bind(record.policy_version as i32)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_sessions
+                SET revoked_at = COALESCE(revoked_at, to_timestamp($2)),
+                    revocation_reason = COALESCE(revocation_reason, 'password_reset')
+                WHERE account_id = $1
+            "#,
+        )
+        .bind(account_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_session_tokens
+                SET consumed_at = COALESCE(consumed_at, to_timestamp($2))
+                WHERE session_id IN (SELECT id FROM auth_sessions WHERE account_id = $1)
+            "#,
+        )
+        .bind(account_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn change_password(&self, record: ChangePasswordRecord) -> CanopyResult<()> {
+        let account_id = parse_uuid(&record.account_id, "account_id")?;
+        let current_session_id = parse_uuid(&record.current_session_id, "session_id")?;
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        let active: bool = sqlx::query_scalar(
+            r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM auth_sessions s
+                    JOIN accounts a ON a.id = s.account_id
+                    WHERE s.id = $2
+                      AND s.account_id = $1
+                      AND a.status = 'active'::account_status
+                      AND s.revoked_at IS NULL
+                      AND s.expires_at > NOW()
+                )
+            "#,
+        )
+        .bind(account_id)
+        .bind(current_session_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if !active {
+            return Err(CanopyError::unauthenticated("session is not active"));
+        }
+
+        sqlx::query(
+            r#"
+                UPDATE password_credentials
+                SET password_hash_phc = $2,
+                    policy_version = $3,
+                    updated_at = NOW(),
+                    password_changed_at = NOW()
+                WHERE account_id = $1
+            "#,
+        )
+        .bind(account_id)
+        .bind(record.password_hash_phc)
+        .bind(record.policy_version as i32)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_sessions
+                SET revoked_at = COALESCE(revoked_at, NOW()),
+                    revocation_reason = COALESCE(revocation_reason, 'password_change')
+                WHERE account_id = $1 AND id <> $2
+            "#,
+        )
+        .bind(account_id)
+        .bind(current_session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_session_tokens
+                SET consumed_at = COALESCE(consumed_at, NOW())
+                WHERE session_id IN (
+                    SELECT id FROM auth_sessions WHERE account_id = $1 AND id <> $2
+                )
+            "#,
+        )
+        .bind(account_id)
+        .bind(current_session_id)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -630,6 +997,28 @@ impl IdentityRepository for PgIdentityRepository {
         }
     }
 
+    async fn account_by_id(&self, account_id: &str) -> CanopyResult<Option<AccountRecord>> {
+        let account_id = parse_uuid(account_id, "account_id")?;
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    a.id AS account_id,
+                    a.status::text AS account_status,
+                    ae.normalized_email AS primary_email,
+                    floor(extract(epoch from a.created_at) * 1000)::bigint AS created_at_epoch_ms
+                FROM accounts a
+                LEFT JOIN account_emails ae ON ae.account_id = a.id AND ae.is_primary AND ae.deleted_at IS NULL
+                WHERE a.id = $1
+            "#,
+        )
+        .bind(account_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        row.map(|row| account_from_row(&row)).transpose()
+    }
+
     async fn revoke_session(&self, account_id: &str, session_id: &str) -> CanopyResult<()> {
         let account_id = parse_uuid(account_id, "account_id")?;
         let session_id = parse_uuid(session_id, "session_id")?;
@@ -746,7 +1135,86 @@ impl IdentityRepository for PgIdentityRepository {
     }
 
     async fn delete_account(&self, account_id: &str) -> CanopyResult<()> {
-        let _ = parse_uuid(account_id, "account_id")?;
-        Err(unsupported("delete_account"))
+        let account_id = parse_uuid(account_id, "account_id")?;
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        let exists: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT id FROM accounts WHERE id = $1 FOR UPDATE")
+                .bind(account_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        if exists.is_none() {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(());
+        }
+
+        sqlx::query(
+            r#"
+                UPDATE accounts
+                SET status = 'deleted'::account_status,
+                    deleted_at = COALESCE(deleted_at, NOW())
+                WHERE id = $1
+                  AND status <> 'deleted'::account_status
+            "#,
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE account_emails
+                SET deleted_at = COALESCE(deleted_at, NOW()),
+                    is_primary = FALSE
+                WHERE account_id = $1
+            "#,
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_sessions
+                SET revoked_at = COALESCE(revoked_at, NOW()),
+                    revocation_reason = COALESCE(revocation_reason, 'account_deleted')
+                WHERE account_id = $1
+            "#,
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_session_tokens
+                SET consumed_at = COALESCE(consumed_at, NOW())
+                WHERE session_id IN (SELECT id FROM auth_sessions WHERE account_id = $1)
+            "#,
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                UPDATE auth_challenges
+                SET consumed_at = COALESCE(consumed_at, NOW()),
+                    attempts = max_attempts
+                WHERE account_id = $1
+                  AND consumed_at IS NULL
+            "#,
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)
     }
 }

@@ -325,6 +325,16 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         resolver,
         discovery,
         auth,
+        identity: {
+            #[cfg(feature = "pg")]
+            {
+                Some(identity_service.clone())
+            }
+            #[cfg(not(feature = "pg"))]
+            {
+                None
+            }
+        },
         principal,
         page_tokens,
     });

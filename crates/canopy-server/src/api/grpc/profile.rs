@@ -10,7 +10,7 @@ use canopy_proto::{
 use prost_types::{FieldMask, Struct, Value, value::Kind};
 use tonic::{Request, Response, Status};
 
-use super::{GrpcServices, extract_metadata_identity};
+use super::{GrpcServices, extract_durable_principal};
 use crate::api::to_status;
 
 pub struct ProfileGrpc(pub Arc<GrpcServices>);
@@ -23,7 +23,10 @@ impl ProfileService for ProfileGrpc {
     ) -> Result<Response<Profile>, Status> {
         let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let profile = self
             .0
             .profile
@@ -37,8 +40,10 @@ impl ProfileService for ProfileGrpc {
         &self,
         request: Request<GetProfileRequest>,
     ) -> Result<Response<Profile>, Status> {
-        let identity =
-            extract_metadata_identity(request.metadata(), &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(request.metadata(), &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let profile = self
             .0
             .profile
@@ -54,7 +59,10 @@ impl ProfileService for ProfileGrpc {
     ) -> Result<Response<Profile>, Status> {
         let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let profile = request
             .profile
             .ok_or_else(|| Status::invalid_argument("profile is required"))?;
@@ -75,8 +83,10 @@ impl ProfileService for ProfileGrpc {
         &self,
         request: Request<DeleteProfileRequest>,
     ) -> Result<Response<()>, Status> {
-        let identity =
-            extract_metadata_identity(request.metadata(), &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(request.metadata(), &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         self.0
             .profile
             .delete_profile(&identity)
@@ -89,8 +99,10 @@ impl ProfileService for ProfileGrpc {
         &self,
         request: Request<GetPreferencesRequest>,
     ) -> Result<Response<Preferences>, Status> {
-        let identity =
-            extract_metadata_identity(request.metadata(), &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(request.metadata(), &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let preferences = self
             .0
             .preferences
@@ -108,7 +120,10 @@ impl ProfileService for ProfileGrpc {
     ) -> Result<Response<Preferences>, Status> {
         let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let values = request
             .preferences
             .and_then(|preferences| preferences.values)

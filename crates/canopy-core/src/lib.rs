@@ -14,9 +14,10 @@ pub mod repository;
 pub use error::{CanopyError, CanopyResult};
 pub use identity::{AccountStatus, AuthSession};
 pub use identity_repository::{
-    AccountRecord, ConsumeChallenge, CreateSessionRecord, ExternalIdentityRecord,
-    IdentityRepository, PasswordLoginRecord, RegisterPasswordRecord, RotateRefreshTokenRecord,
-    StoredAuthenticatedSession,
+    AccountRecord, ChangePasswordRecord, CompletePasswordResetRecord, ConsumeChallenge,
+    CreateEmailVerificationChallenge, CreatePasswordResetChallenge, CreateSessionRecord,
+    ExternalIdentityRecord, IdentityRepository, PasswordCredentialRecord, PasswordLoginRecord,
+    RegisterPasswordRecord, RotateRefreshTokenRecord, StoredAuthenticatedSession,
 };
 pub use model::{
     AudioAsset, AuthorizedStreamAsset, IngestStatus, LibraryItem, MediaItem, MediaPage,

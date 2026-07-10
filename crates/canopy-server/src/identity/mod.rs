@@ -1,13 +1,16 @@
 //! Authentication and account-management application services.
 
+mod outbox;
 mod password;
 mod service;
 mod tokens;
 
+pub use outbox::{EmailOutboxPayload, SealedOutboxPayload};
 pub use password::{Argon2PasswordHasher, PasswordHasher, PasswordPolicy, PasswordVerification};
 pub use service::{
-    AuthenticatedPrincipal, Clock, FixedClock, IdentityService, LoginPasswordCommand,
-    RefreshSessionCommand, RegisterPasswordCommand, SessionEnvelope, SystemClock,
+    AuthenticatedPrincipal, ChangePasswordCommand, Clock, CompletePasswordResetCommand, FixedClock,
+    IdentityService, LoginPasswordCommand, RefreshSessionCommand, RegisterPasswordCommand,
+    RequestPasswordResetCommand, ResendVerificationCommand, SessionEnvelope, SystemClock,
     VerifyEmailCommand,
 };
 pub use tokens::{

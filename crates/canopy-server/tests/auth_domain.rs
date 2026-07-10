@@ -2,20 +2,24 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use canopy_core::{
-    AccountRecord, AccountStatus, AuthSession, CanopyResult, ConsumeChallenge, CreateSessionRecord,
-    ExternalIdentityRecord, IdentityRepository, PasswordLoginRecord, RegisterPasswordRecord,
+    AccountRecord, AccountStatus, AuthSession, CanopyResult, ChangePasswordRecord,
+    CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
+    CreatePasswordResetChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
+    PasswordCredentialRecord, PasswordLoginRecord, RegisterPasswordRecord,
     RotateRefreshTokenRecord, StoredAuthenticatedSession,
 };
 use canopy_proto::auth_service_server::AuthService;
 use canopy_proto::{
-    ListSessionsRequest, PageRequest, RegisterPasswordRequest, RevokeSessionRequest,
-    VerifyEmailRequest,
+    DeleteAccountRequest, GetAccountRequest, ListSessionsRequest, PageRequest,
+    RegisterPasswordRequest, ResendVerificationRequest, RevokeSessionRequest, VerifyEmailRequest,
 };
 use canopy_server::api::grpc::AuthGrpc;
 use canopy_server::identity::{
-    AccessTokenConfig, Argon2PasswordHasher, Ed25519AccessTokenIssuer, FixedClock, IdentityService,
-    LoginPasswordCommand, PasswordHasher, RefreshSessionCommand, RegisterPasswordCommand,
-    TokenDigest, VerifyEmailCommand,
+    AccessTokenConfig, Argon2PasswordHasher, AuthenticatedPrincipal, ChangePasswordCommand,
+    CompletePasswordResetCommand, Ed25519AccessTokenIssuer, EmailOutboxPayload, FixedClock,
+    IdentityService, LoginPasswordCommand, PasswordHasher, RefreshSessionCommand,
+    RegisterPasswordCommand, RequestPasswordResetCommand, ResendVerificationCommand, TokenDigest,
+    VerifyEmailCommand,
 };
 
 const NOW_MS: u64 = 1_780_000_000_000;
@@ -24,6 +28,13 @@ const PASSPHRASE: &str = "correct horse battery staple";
 #[derive(Default)]
 struct FakeIdentityRepository {
     registered: Mutex<Option<CapturedRegistration>>,
+    verification_challenge: Mutex<Option<CapturedVerificationChallenge>>,
+    password_reset_challenge: Mutex<Option<CapturedPasswordResetChallenge>>,
+    password_credential: Mutex<Option<PasswordCredentialRecord>>,
+    completed_reset: Mutex<Option<CompletePasswordResetRecord>>,
+    changed_password: Mutex<Option<ChangePasswordRecord>>,
+    account_lookup: Mutex<Option<AccountRecord>>,
+    deleted_accounts: Mutex<Vec<String>>,
     activation: Mutex<Option<StoredAuthenticatedSession>>,
     consumed_challenge: Mutex<Option<ConsumeChallenge>>,
     created_session: Mutex<Option<CreateSessionRecord>>,
@@ -38,12 +49,29 @@ struct FakeIdentityRepository {
 }
 
 #[derive(Debug)]
+struct CapturedVerificationChallenge {
+    normalized_email: String,
+    token_hash: [u8; 32],
+    expires_at_epoch_ms: u64,
+    encrypted_outbox_payload: Vec<u8>,
+    outbox_key_id: String,
+}
+
+#[derive(Debug)]
+struct CapturedPasswordResetChallenge {
+    normalized_email: String,
+    token_hash: [u8; 32],
+    expires_at_epoch_ms: u64,
+    encrypted_outbox_payload: Vec<u8>,
+    outbox_key_id: String,
+}
 struct CapturedRegistration {
     normalized_email: String,
     password_hash_phc: String,
     verification_token_hash: [u8; 32],
     verification_expires_at_epoch_ms: u64,
-    encrypted_outbox_payload_len: usize,
+    encrypted_outbox_payload: Vec<u8>,
+    outbox_key_id: String,
 }
 
 impl FakeIdentityRepository {
@@ -65,6 +93,12 @@ impl FakeIdentityRepository {
         }
     }
 
+    fn with_password_credential(credential: PasswordCredentialRecord) -> Self {
+        Self {
+            password_credential: Mutex::new(Some(credential)),
+            ..Self::default()
+        }
+    }
     fn with_refresh(session: StoredAuthenticatedSession) -> Self {
         Self {
             rotation_result: Mutex::new(Some(session)),
@@ -72,6 +106,13 @@ impl FakeIdentityRepository {
         }
     }
 
+    fn with_account_lookup(account: AccountRecord, session: StoredAuthenticatedSession) -> Self {
+        Self {
+            account_lookup: Mutex::new(Some(account)),
+            activation: Mutex::new(Some(session)),
+            ..Self::default()
+        }
+    }
     fn with_activation_and_sessions(
         session: StoredAuthenticatedSession,
         listed_sessions: Vec<AuthSession>,
@@ -87,6 +128,25 @@ impl FakeIdentityRepository {
         self.registered.lock().unwrap().take().unwrap()
     }
 
+    fn verification_challenge(&self) -> CapturedVerificationChallenge {
+        self.verification_challenge.lock().unwrap().take().unwrap()
+    }
+
+    fn password_reset_challenge(&self) -> CapturedPasswordResetChallenge {
+        self.password_reset_challenge
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+    }
+
+    fn completed_reset(&self) -> CompletePasswordResetRecord {
+        self.completed_reset.lock().unwrap().take().unwrap()
+    }
+
+    fn changed_password(&self) -> ChangePasswordRecord {
+        self.changed_password.lock().unwrap().take().unwrap()
+    }
     fn consumed_challenge(&self) -> ConsumeChallenge {
         self.consumed_challenge.lock().unwrap().take().unwrap()
     }
@@ -103,6 +163,9 @@ impl FakeIdentityRepository {
         self.validated_sessions.lock().unwrap().clone()
     }
 
+    fn deleted_accounts(&self) -> Vec<String> {
+        self.deleted_accounts.lock().unwrap().clone()
+    }
     fn revoked_sessions(&self) -> Vec<(String, String)> {
         self.revoked_sessions.lock().unwrap().clone()
     }
@@ -116,11 +179,58 @@ impl IdentityRepository for FakeIdentityRepository {
             password_hash_phc: record.password_hash_phc,
             verification_token_hash: record.verification_token_hash,
             verification_expires_at_epoch_ms: record.verification_expires_at_epoch_ms,
-            encrypted_outbox_payload_len: record.encrypted_outbox_payload.len(),
+            encrypted_outbox_payload: record.encrypted_outbox_payload,
+            outbox_key_id: record.outbox_key_id,
         });
         Ok(())
     }
 
+    async fn create_password_reset_challenge(
+        &self,
+        record: CreatePasswordResetChallenge,
+    ) -> CanopyResult<()> {
+        *self.password_reset_challenge.lock().unwrap() = Some(CapturedPasswordResetChallenge {
+            normalized_email: record.normalized_email,
+            token_hash: record.token_hash,
+            expires_at_epoch_ms: record.expires_at_epoch_ms,
+            encrypted_outbox_payload: record.encrypted_outbox_payload,
+            outbox_key_id: record.outbox_key_id,
+        });
+        Ok(())
+    }
+
+    async fn password_credential_for_account(
+        &self,
+        _account_id: &str,
+    ) -> CanopyResult<Option<PasswordCredentialRecord>> {
+        Ok(self.password_credential.lock().unwrap().clone())
+    }
+
+    async fn complete_password_reset(
+        &self,
+        record: CompletePasswordResetRecord,
+    ) -> CanopyResult<()> {
+        *self.completed_reset.lock().unwrap() = Some(record);
+        Ok(())
+    }
+
+    async fn change_password(&self, record: ChangePasswordRecord) -> CanopyResult<()> {
+        *self.changed_password.lock().unwrap() = Some(record);
+        Ok(())
+    }
+    async fn create_email_verification_challenge(
+        &self,
+        record: CreateEmailVerificationChallenge,
+    ) -> CanopyResult<()> {
+        *self.verification_challenge.lock().unwrap() = Some(CapturedVerificationChallenge {
+            normalized_email: record.normalized_email,
+            token_hash: record.token_hash,
+            expires_at_epoch_ms: record.expires_at_epoch_ms,
+            encrypted_outbox_payload: record.encrypted_outbox_payload,
+            outbox_key_id: record.outbox_key_id,
+        });
+        Ok(())
+    }
     async fn activate_email_and_create_session(
         &self,
         challenge: ConsumeChallenge,
@@ -178,6 +288,9 @@ impl IdentityRepository for FakeIdentityRepository {
         Ok(())
     }
 
+    async fn account_by_id(&self, _account_id: &str) -> CanopyResult<Option<AccountRecord>> {
+        Ok(self.account_lookup.lock().unwrap().clone())
+    }
     async fn revoke_session(&self, account_id: &str, session_id: &str) -> CanopyResult<()> {
         self.revoked_sessions
             .lock()
@@ -205,8 +318,12 @@ impl IdentityRepository for FakeIdentityRepository {
         unimplemented!()
     }
 
-    async fn delete_account(&self, _account_id: &str) -> CanopyResult<()> {
-        unimplemented!()
+    async fn delete_account(&self, account_id: &str) -> CanopyResult<()> {
+        self.deleted_accounts
+            .lock()
+            .unwrap()
+            .push(account_id.to_string());
+        Ok(())
     }
 }
 
@@ -242,9 +359,49 @@ async fn native_registration_is_pending_and_stores_only_verification_digest() {
     assert!(registered.password_hash_phc.starts_with("$argon2id$"));
     assert_ne!(registered.verification_token_hash, [0; 32]);
     assert!(registered.verification_expires_at_epoch_ms > NOW_MS);
-    assert!(registered.encrypted_outbox_payload_len >= 16);
+    assert!(!registered.outbox_key_id.is_empty());
+    let payload: EmailOutboxPayload =
+        serde_json::from_slice(&registered.encrypted_outbox_payload).unwrap();
+    assert_eq!(payload.email, "ada@example.test");
+    assert_eq!(payload.purpose, "email_verification");
+    assert_eq!(
+        payload.expires_at_epoch_ms,
+        registered.verification_expires_at_epoch_ms
+    );
+    assert!(
+        payload
+            .template_variables
+            .contains_key("verification_token")
+    );
 }
 
+#[tokio::test]
+async fn resend_verification_rotates_challenge_for_pending_account_only() {
+    let repo = Arc::new(FakeIdentityRepository::default());
+    let service = service(repo.clone());
+
+    service
+        .resend_verification(ResendVerificationCommand {
+            email: "  ADA@Example.TEST  ".into(),
+        })
+        .await
+        .unwrap();
+
+    let challenge = repo.verification_challenge();
+    assert_eq!(challenge.normalized_email, "ada@example.test");
+    assert_ne!(challenge.token_hash, [0; 32]);
+    assert!(challenge.expires_at_epoch_ms > NOW_MS);
+    assert!(!challenge.outbox_key_id.is_empty());
+    let payload: EmailOutboxPayload =
+        serde_json::from_slice(&challenge.encrypted_outbox_payload).unwrap();
+    assert_eq!(payload.email, "ada@example.test");
+    assert_eq!(payload.purpose, "email_verification");
+    assert!(
+        payload
+            .template_variables
+            .contains_key("verification_token")
+    );
+}
 #[tokio::test]
 async fn email_verification_consumes_challenge_and_issues_device_session() {
     let account = AccountRecord {
@@ -308,6 +465,81 @@ fn active_session(id: &str) -> AuthSession {
     }
 }
 
+#[tokio::test]
+async fn request_password_reset_queues_generic_reset_payload() {
+    let repo = Arc::new(FakeIdentityRepository::default());
+    let service = service(repo.clone());
+
+    service
+        .request_password_reset(RequestPasswordResetCommand {
+            email: "ADA@example.test".into(),
+        })
+        .await
+        .unwrap();
+
+    let challenge = repo.password_reset_challenge();
+    assert_eq!(challenge.normalized_email, "ada@example.test");
+    assert_ne!(challenge.token_hash, [0; 32]);
+    assert!(challenge.expires_at_epoch_ms > NOW_MS);
+    assert!(!challenge.outbox_key_id.is_empty());
+    let payload: EmailOutboxPayload =
+        serde_json::from_slice(&challenge.encrypted_outbox_payload).unwrap();
+    assert_eq!(payload.purpose, "password_reset");
+    assert!(payload.template_variables.contains_key("reset_token"));
+}
+
+#[tokio::test]
+async fn complete_password_reset_consumes_token_and_writes_new_hash() {
+    let repo = Arc::new(FakeIdentityRepository::default());
+    let service = service(repo.clone());
+
+    service
+        .complete_password_reset(CompletePasswordResetCommand {
+            reset_token: "reset-token".into(),
+            new_password: "new correct horse battery staple".into(),
+        })
+        .await
+        .unwrap();
+
+    let reset = repo.completed_reset();
+    assert_eq!(
+        reset.token_hash,
+        *TokenDigest::from_secret("reset-token").as_bytes()
+    );
+    assert!(reset.password_hash_phc.starts_with("$argon2id$"));
+    assert_eq!(reset.policy_version, 1);
+    assert_eq!(reset.now_epoch_ms, NOW_MS);
+}
+
+#[tokio::test]
+async fn change_password_verifies_current_password_and_writes_new_hash() {
+    let hasher = Argon2PasswordHasher::default();
+    let repo = Arc::new(FakeIdentityRepository::with_password_credential(
+        PasswordCredentialRecord {
+            account: active_account(),
+            password_hash_phc: hasher.hash(PASSPHRASE).unwrap(),
+            policy_version: 1,
+        },
+    ));
+    let service = service(repo.clone());
+
+    service
+        .change_password(ChangePasswordCommand {
+            principal: AuthenticatedPrincipal {
+                account_id: "account-1".into(),
+                session_id: "session-1".into(),
+            },
+            current_password: PASSPHRASE.into(),
+            new_password: "new correct horse battery staple".into(),
+        })
+        .await
+        .unwrap();
+
+    let changed = repo.changed_password();
+    assert_eq!(changed.account_id, "account-1");
+    assert_eq!(changed.current_session_id, "session-1");
+    assert!(changed.password_hash_phc.starts_with("$argon2id$"));
+}
 #[tokio::test]
 async fn password_login_verifies_password_and_issues_device_session() {
     let hasher = Argon2PasswordHasher::default();
@@ -415,6 +647,91 @@ async fn auth_grpc_maps_register_password_to_generic_acceptance() {
     assert!(response.accepted);
 }
 
+#[tokio::test]
+async fn auth_grpc_maps_resend_verification_to_generic_acceptance() {
+    let repo = Arc::new(FakeIdentityRepository::default());
+    let service = Arc::new(service(repo.clone()));
+    let grpc = AuthGrpc(service);
+
+    let response = grpc
+        .resend_verification(tonic::Request::new(ResendVerificationRequest {
+            email: "ada@example.test".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(response.accepted);
+    assert_eq!(
+        repo.verification_challenge().normalized_email,
+        "ada@example.test"
+    );
+}
+
+#[tokio::test]
+async fn auth_grpc_get_account_returns_authenticated_account() {
+    let account = active_account();
+    let session = active_session("account-session-1");
+    let repo = Arc::new(FakeIdentityRepository::with_account_lookup(
+        account.clone(),
+        StoredAuthenticatedSession { account, session },
+    ));
+    let service = Arc::new(service(repo));
+    let grpc = AuthGrpc(service);
+
+    let envelope = grpc
+        .verify_email(tonic::Request::new(VerifyEmailRequest {
+            verification_token: "presented-email-token".into(),
+            device_label: "PandaWave Android".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut request = tonic::Request::new(GetAccountRequest {});
+    request.metadata_mut().insert(
+        "authorization",
+        tonic::metadata::MetadataValue::try_from(format!("Bearer {}", envelope.access_token))
+            .unwrap(),
+    );
+
+    let response = grpc.get_account(request).await.unwrap().into_inner();
+    let account = response.account.unwrap();
+    assert_eq!(account.id, "account-1");
+    assert_eq!(account.primary_email, "ada@example.test");
+}
+
+#[tokio::test]
+async fn auth_grpc_delete_account_is_accepted_for_authenticated_account() {
+    let account = active_account();
+    let session = active_session("delete-session-1");
+    let repo = Arc::new(FakeIdentityRepository::with_account_lookup(
+        account.clone(),
+        StoredAuthenticatedSession { account, session },
+    ));
+    let service = Arc::new(service(repo.clone()));
+    let grpc = AuthGrpc(service);
+
+    let envelope = grpc
+        .verify_email(tonic::Request::new(VerifyEmailRequest {
+            verification_token: "presented-email-token".into(),
+            device_label: "PandaWave Android".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut request = tonic::Request::new(DeleteAccountRequest {});
+    request.metadata_mut().insert(
+        "authorization",
+        tonic::metadata::MetadataValue::try_from(format!("Bearer {}", envelope.access_token))
+            .unwrap(),
+    );
+
+    let response = grpc.delete_account(request).await.unwrap().into_inner();
+    assert!(response.accepted);
+    assert_eq!(repo.deleted_accounts(), vec!["account-1".to_string()]);
+}
 #[tokio::test]
 async fn auth_grpc_session_management_requires_valid_access_token() {
     let account = active_account();

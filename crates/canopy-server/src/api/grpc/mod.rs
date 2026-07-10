@@ -12,6 +12,7 @@ use crate::catalog::CatalogService;
 use crate::discovery::DiscoveryService;
 use crate::health::HealthService;
 use crate::history::HistoryService;
+use crate::identity::IdentityService;
 use crate::library::LibraryService;
 use crate::likes::LikeService;
 use crate::playback::ResolverService;
@@ -55,8 +56,48 @@ pub struct GrpcServices {
     pub resolver: ResolverService,
     pub discovery: DiscoveryService,
     pub auth: AuthService,
+    pub identity: Option<Arc<IdentityService>>,
     pub principal: PrincipalService,
     pub page_tokens: Arc<PageTokenCodec>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DurablePrincipal {
+    pub account_id: String,
+    pub session_id: String,
+    pub profile_id: String,
+}
+
+impl DurablePrincipal {
+    pub(crate) fn user_identity(&self) -> UserIdentity {
+        UserIdentity {
+            user_id: self.account_id.clone(),
+        }
+    }
+}
+
+pub(crate) async fn extract_durable_principal(
+    metadata: &tonic::metadata::MetadataMap,
+    services: &GrpcServices,
+) -> CanopyResult<DurablePrincipal> {
+    let access_token = extract_bearer_token(metadata)?;
+    let identity_service = services
+        .identity
+        .as_ref()
+        .ok_or_else(|| CanopyError::unauthenticated("native identity is not configured"))?;
+    let principal = identity_service
+        .authenticate_access_token(access_token)
+        .await?;
+    let identity = UserIdentity {
+        user_id: principal.account_id.clone(),
+    };
+    let profile = services.profile.get_profile(&identity).await?;
+    Ok(DurablePrincipal {
+        account_id: principal.account_id,
+        session_id: principal.session_id,
+        profile_id: profile.id,
+    })
 }
 
 pub(crate) fn not_implemented(operation: &'static str) -> tonic::Status {
@@ -133,18 +174,25 @@ pub(crate) fn page_info(
     Ok(PageInfo { next_page_token })
 }
 
+fn extract_bearer_token(metadata: &tonic::metadata::MetadataMap) -> CanopyResult<&str> {
+    let raw = metadata
+        .get("authorization")
+        .ok_or_else(|| CanopyError::unauthenticated("missing authorization metadata"))?;
+    let value = raw
+        .to_str()
+        .map_err(|_| CanopyError::unauthenticated("invalid authorization metadata"))?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| CanopyError::unauthenticated("authorization must use Bearer token"))?;
+    Ok(token.trim())
+}
+
 pub(crate) fn extract_metadata_identity(
     metadata: &tonic::metadata::MetadataMap,
     auth: &AuthService,
 ) -> CanopyResult<UserIdentity> {
-    if let Some(raw) = metadata.get("authorization") {
-        let value = raw
-            .to_str()
-            .map_err(|_| CanopyError::unauthenticated("invalid authorization metadata"))?;
-        let token = value
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| CanopyError::unauthenticated("authorization must use Bearer token"))?;
-        return auth.verify(token.trim());
+    if metadata.get("authorization").is_some() {
+        return auth.verify(extract_bearer_token(metadata)?);
     }
 
     if let Some(raw) = metadata.get("x-canopy-auth-token") {

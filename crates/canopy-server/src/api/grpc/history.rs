@@ -12,7 +12,7 @@ use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use super::{
-    GrpcServices, extract_metadata_identity, page_from_request, page_info, to_track_summary,
+    GrpcServices, extract_durable_principal, page_from_request, page_info, to_track_summary,
 };
 use crate::api::to_status;
 
@@ -24,8 +24,10 @@ impl HistoryService for HistoryGrpc {
         &self,
         request: Request<GetHistorySettingsRequest>,
     ) -> Result<Response<HistorySettings>, Status> {
-        let identity =
-            extract_metadata_identity(request.metadata(), &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(request.metadata(), &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let profile = self
             .0
             .profile
@@ -43,7 +45,10 @@ impl HistoryService for HistoryGrpc {
     ) -> Result<Response<UpdateHistorySettingsResponse>, Status> {
         let metadata = request.metadata().clone();
         let enabled = request.into_inner().enabled;
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let (profile, deleted_count) = self
             .0
             .profile
@@ -64,7 +69,10 @@ impl HistoryService for HistoryGrpc {
     ) -> Result<Response<RecordPlaybackResponse>, Status> {
         let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let duration_ms = i64::try_from(request.duration_ms)
             .map_err(|_| Status::invalid_argument("duration_ms exceeds supported range"))?;
         let recorded = self
@@ -87,7 +95,10 @@ impl HistoryService for HistoryGrpc {
     ) -> Result<Response<ListHistoryResponse>, Status> {
         let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let page = page_from_request(request.page, &self.0.page_tokens).map_err(to_status)?;
         let result = self
             .0
@@ -120,7 +131,10 @@ impl HistoryService for HistoryGrpc {
     ) -> Result<Response<()>, Status> {
         let metadata = request.metadata().clone();
         let history_id = request.into_inner().history_id;
-        let identity = extract_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(&metadata, &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         self.0
             .history
             .delete_entry(&identity, &history_id)
@@ -133,8 +147,10 @@ impl HistoryService for HistoryGrpc {
         &self,
         request: Request<ClearHistoryRequest>,
     ) -> Result<Response<ClearHistoryResponse>, Status> {
-        let identity =
-            extract_metadata_identity(request.metadata(), &self.0.auth).map_err(to_status)?;
+        let identity = extract_durable_principal(request.metadata(), &self.0)
+            .await
+            .map_err(to_status)?
+            .user_identity();
         let deleted_count = self
             .0
             .history
