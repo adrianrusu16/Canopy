@@ -3,22 +3,24 @@ use std::sync::Arc;
 use canopy_core::{AccountRecord, AccountStatus, AuthSession};
 use canopy_proto::auth_service_server::AuthService;
 use canopy_proto::{
-    AccountSummary, BeginGoogleLoginRequest, BeginGoogleLoginResponse, ChangePasswordRequest,
-    CompleteGoogleLoginRequest, CompletePasswordResetRequest, DeleteAccountRequest,
-    GenericAuthResponse, GetAccountRequest, GetAccountResponse, GoogleLoginResponse,
-    LinkGoogleRequest, ListSessionsRequest, ListSessionsResponse, LoginPasswordRequest,
-    LogoutAllRequest, LogoutRequest, PageInfo, RefreshSessionRequest, RegisterPasswordRequest,
-    RequestPasswordResetRequest, ResendVerificationRequest, RevokeSessionRequest, SessionEnvelope,
-    SessionSummary, UnlinkGoogleRequest, VerifyEmailRequest,
+    AccountLinkRequired, AccountSummary, BeginGoogleLoginRequest, BeginGoogleLoginResponse,
+    ChangePasswordRequest, CompleteGoogleLoginRequest, CompletePasswordResetRequest,
+    DeleteAccountRequest, GenericAuthResponse, GetAccountRequest, GetAccountResponse,
+    GoogleLoginResponse, LinkGoogleRequest, ListSessionsRequest, ListSessionsResponse,
+    LoginPasswordRequest, LogoutAllRequest, LogoutRequest, PageInfo, RefreshSessionRequest,
+    RegisterPasswordRequest, RequestPasswordResetRequest, ResendVerificationRequest,
+    RevokeSessionRequest, SessionEnvelope, SessionSummary, UnlinkGoogleRequest, VerifyEmailRequest,
+    google_login_response,
 };
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::api::to_status;
 use crate::identity::{
-    AuthenticatedPrincipal, ChangePasswordCommand, CompletePasswordResetCommand, IdentityService,
-    LoginPasswordCommand, RefreshSessionCommand, RegisterPasswordCommand,
+    AuthenticatedPrincipal, BeginGoogleLoginCommand, ChangePasswordCommand,
+    CompleteGoogleLoginCommand, CompletePasswordResetCommand, GoogleLoginOutcome, IdentityService,
+    LinkGoogleCommand, LoginPasswordCommand, RefreshSessionCommand, RegisterPasswordCommand,
     RequestPasswordResetCommand, ResendVerificationCommand,
-    SessionEnvelope as DomainSessionEnvelope, VerifyEmailCommand,
+    SessionEnvelope as DomainSessionEnvelope, UnlinkGoogleCommand, VerifyEmailCommand,
 };
 
 pub struct AuthGrpc(pub Arc<IdentityService>);
@@ -150,28 +152,73 @@ impl AuthService for AuthGrpc {
         &self,
         _request: Request<BeginGoogleLoginRequest>,
     ) -> Result<Response<BeginGoogleLoginResponse>, Status> {
-        Err(super::not_implemented("AuthService.BeginGoogleLogin"))
+        let challenge = self
+            .0
+            .begin_google_login(BeginGoogleLoginCommand)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(BeginGoogleLoginResponse {
+            challenge_id: challenge.challenge_id,
+            nonce: challenge.nonce,
+            expires_at: Some(timestamp_from_epoch_ms(challenge.expires_at_epoch_ms)),
+        }))
     }
 
     async fn complete_google_login(
         &self,
-        _request: Request<CompleteGoogleLoginRequest>,
+        request: Request<CompleteGoogleLoginRequest>,
     ) -> Result<Response<GoogleLoginResponse>, Status> {
-        Err(super::not_implemented("AuthService.CompleteGoogleLogin"))
+        let request = request.into_inner();
+        let outcome = self
+            .0
+            .complete_google_login(CompleteGoogleLoginCommand {
+                challenge_id: request.challenge_id,
+                id_token: request.id_token,
+                device_label: request.device_label,
+            })
+            .await
+            .map_err(to_status)?;
+        let result = match outcome {
+            GoogleLoginOutcome::Session(envelope) => {
+                google_login_response::Result::Session(to_proto_session_envelope(envelope))
+            }
+            GoogleLoginOutcome::AccountLinkRequired { link_challenge_id } => {
+                google_login_response::Result::AccountLinkRequired(AccountLinkRequired {
+                    link_challenge_id,
+                })
+            }
+        };
+        Ok(Response::new(GoogleLoginResponse {
+            result: Some(result),
+        }))
     }
 
     async fn link_google(
         &self,
-        _request: Request<LinkGoogleRequest>,
+        request: Request<LinkGoogleRequest>,
     ) -> Result<Response<GenericAuthResponse>, Status> {
-        Err(super::not_implemented("AuthService.LinkGoogle"))
+        let principal = self.authenticate(&request).await?;
+        let request = request.into_inner();
+        self.0
+            .link_google(LinkGoogleCommand {
+                principal,
+                link_challenge_id: request.link_challenge_id,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GenericAuthResponse { accepted: true }))
     }
 
     async fn unlink_google(
         &self,
-        _request: Request<UnlinkGoogleRequest>,
+        request: Request<UnlinkGoogleRequest>,
     ) -> Result<Response<GenericAuthResponse>, Status> {
-        Err(super::not_implemented("AuthService.UnlinkGoogle"))
+        let principal = self.authenticate(&request).await?;
+        self.0
+            .unlink_google(UnlinkGoogleCommand { principal })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(GenericAuthResponse { accepted: true }))
     }
 
     async fn refresh_session(
@@ -258,6 +305,13 @@ impl AuthService for AuthGrpc {
         let principal = self.authenticate(&request).await?;
         self.0.delete_account(&principal).await.map_err(to_status)?;
         Ok(Response::new(GenericAuthResponse { accepted: true }))
+    }
+}
+
+fn timestamp_from_epoch_ms(epoch_ms: u64) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: (epoch_ms / 1000) as i64,
+        nanos: ((epoch_ms % 1000) * 1_000_000) as i32,
     }
 }
 

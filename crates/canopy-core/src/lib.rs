@@ -15,7 +15,8 @@ pub use error::{CanopyError, CanopyResult};
 pub use identity::{AccountStatus, AuthSession};
 pub use identity_repository::{
     AccountRecord, ChangePasswordRecord, CompletePasswordResetRecord, ConsumeChallenge,
-    CreateEmailVerificationChallenge, CreatePasswordResetChallenge, CreateSessionRecord,
+    ConsumedGoogleLoginChallenge, CreateEmailVerificationChallenge, CreateGoogleLinkChallenge,
+    CreateGoogleLoginChallenge, CreatePasswordResetChallenge, CreateSessionRecord,
     ExternalIdentityRecord, IdentityRepository, PasswordCredentialRecord, PasswordLoginRecord,
     RateLimitBucket, RateLimitState, RegisterPasswordRecord, RotateRefreshTokenRecord,
     StoredAuthenticatedSession,

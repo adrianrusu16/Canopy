@@ -9,7 +9,8 @@ Canopy consumes the published contract. Core native authentication and session-m
 - Authentication release: `v0.2.0` at `145678c1d73e45b7bbaebf7e16ee4d64`
 - Canopy Prost SDK: `0.5.0-00000000000000-145678c1d73e.2`
 - Canopy Tonic SDK: `0.5.0-00000000000000-145678c1d73e.4`
-- Implemented in Canopy: native password registration, email verification session issuance, password login, refresh rotation, logout, logout-all, list sessions, and revoke session.`n- Remaining in Canopy: verification resend, password reset/change, Google login/linking, account summary, account deletion, production email outbox delivery, and rolling native identity enforcement into the existing profile-scoped application RPCs. PandaEngine adoption is deferred.
+- Implemented or wired in Canopy: native password registration, email verification session issuance, password login, refresh rotation, verification resend, password reset/change, Google login/linking, account lookup/deletion, logout, logout-all, list sessions, revoke session, and native identity enforcement for durable user-state RPCs.
+- Remaining in Canopy: production email delivery outside the persisted outbox boundary, CI verification with Buf registry credentials, and full downstream PandaEngine adoption.
 
 ## Purpose
 

@@ -182,8 +182,38 @@ pub struct ExternalIdentityRecord {
     pub provider: String,
     /// Immutable provider subject (`sub`).
     pub provider_subject: String,
-    /// Verified email observed when the identity was linked.
-    pub provider_email_at_link_time: String,
+    /// Verified email observed when the identity was linked, when available.
+    pub provider_email_at_link_time: Option<String>,
+}
+
+/// Request to create a Google login nonce challenge.
+pub struct CreateGoogleLoginChallenge {
+    /// Digest of the nonce sent to the OIDC client.
+    pub nonce_hash: [u8; 32],
+    /// Expiry of the nonce challenge.
+    pub expires_at_epoch_ms: u64,
+    /// Authenticated ciphertext carrying verifier-only challenge context.
+    pub encrypted_payload: Vec<u8>,
+}
+
+/// Result returned after atomically consuming a Google login challenge.
+pub struct ConsumedGoogleLoginChallenge {
+    /// Authenticated ciphertext created with the challenge.
+    pub encrypted_payload: Vec<u8>,
+}
+
+/// Request to create a Google link challenge for an existing account.
+pub struct CreateGoogleLinkChallenge {
+    /// Existing account that must authenticate before linking.
+    pub account_id: String,
+    /// Digest of the explicit link challenge token.
+    pub token_hash: [u8; 32],
+    /// Proven external identity to link after challenge consumption.
+    pub identity: ExternalIdentityRecord,
+    /// Expiry of the explicit link challenge.
+    pub expires_at_epoch_ms: u64,
+    /// Authenticated ciphertext carrying verifier-only link context.
+    pub encrypted_payload: Vec<u8>,
 }
 
 /// Transaction-oriented persistence operations required by `IdentityService`.
@@ -197,6 +227,19 @@ pub trait IdentityRepository: Send + Sync {
 
     /// Registers a pending native account and queues its verification email.
     async fn register_password(&self, record: RegisterPasswordRecord) -> CanopyResult<()>;
+
+    /// Creates a Google OIDC nonce challenge and returns its public challenge id.
+    async fn create_google_login_challenge(
+        &self,
+        record: CreateGoogleLoginChallenge,
+    ) -> CanopyResult<String>;
+
+    /// Atomically consumes a Google OIDC nonce challenge by public challenge id.
+    async fn consume_google_login_challenge(
+        &self,
+        challenge_id: &str,
+        now_epoch_ms: u64,
+    ) -> CanopyResult<ConsumedGoogleLoginChallenge>;
 
     /// Creates a password-reset challenge for an active native account.
     ///
@@ -291,6 +334,36 @@ pub trait IdentityRepository: Send + Sync {
         &self,
         identity: &ExternalIdentityRecord,
     ) -> CanopyResult<Option<AccountRecord>>;
+
+    /// Finds an active account by verified primary email without exposing credentials.
+    async fn account_by_primary_email(
+        &self,
+        normalized_email: &str,
+    ) -> CanopyResult<Option<AccountRecord>>;
+
+    /// Creates a new active external-identity account and its initial session atomically.
+    async fn create_external_identity_session(
+        &self,
+        identity: ExternalIdentityRecord,
+        session: CreateSessionRecord,
+    ) -> CanopyResult<StoredAuthenticatedSession>;
+
+    /// Creates an explicit Google link challenge for an existing account.
+    async fn create_google_link_challenge(
+        &self,
+        record: CreateGoogleLinkChallenge,
+    ) -> CanopyResult<()>;
+
+    /// Atomically consumes a link challenge and attaches the external identity.
+    async fn link_external_identity(
+        &self,
+        account_id: &str,
+        link_challenge_id: &str,
+        now_epoch_ms: u64,
+    ) -> CanopyResult<()>;
+
+    /// Idempotently unlinks one external provider from an account.
+    async fn unlink_external_identity(&self, account_id: &str, provider: &str) -> CanopyResult<()>;
 
     /// Idempotently transitions an account into deletion and purges profile data.
     async fn delete_account(&self, account_id: &str) -> CanopyResult<()>;

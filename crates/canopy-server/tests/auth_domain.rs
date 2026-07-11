@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use canopy_core::{
     AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
-    CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
+    CompletePasswordResetRecord, ConsumeChallenge, ConsumedGoogleLoginChallenge,
+    CreateEmailVerificationChallenge, CreateGoogleLinkChallenge, CreateGoogleLoginChallenge,
     CreatePasswordResetChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
     PasswordCredentialRecord, PasswordLoginRecord, RateLimitBucket, RateLimitState,
     RegisterPasswordRecord, RotateRefreshTokenRecord, StoredAuthenticatedSession,
@@ -15,9 +16,10 @@ use canopy_proto::{
 };
 use canopy_server::api::grpc::AuthGrpc;
 use canopy_server::identity::{
-    AccessTokenConfig, Argon2PasswordHasher, AuthenticatedPrincipal, ChangePasswordCommand,
-    CompletePasswordResetCommand, Ed25519AccessTokenIssuer, EmailOutboxPayload, FixedClock,
-    IdentityService, LoginPasswordCommand, PasswordHasher, RefreshSessionCommand,
+    AccessTokenConfig, Argon2PasswordHasher, AuthenticatedPrincipal, BeginGoogleLoginCommand,
+    ChangePasswordCommand, CompleteGoogleLoginCommand, CompletePasswordResetCommand,
+    Ed25519AccessTokenIssuer, EmailOutboxPayload, FixedClock, GoogleIdentity, GoogleLoginOutcome,
+    IdentityService, LoginPasswordCommand, OidcVerifier, PasswordHasher, RefreshSessionCommand,
     RegisterPasswordCommand, RequestPasswordResetCommand, ResendVerificationCommand, TokenDigest,
     VerifyEmailCommand,
 };
@@ -49,6 +51,12 @@ struct FakeIdentityRepository {
     validated_sessions: Mutex<Vec<(String, String, u64)>>,
     revoked_sessions: Mutex<Vec<(String, String)>>,
     listed_sessions: Mutex<Vec<AuthSession>>,
+    google_login_challenge: Mutex<Option<CreateGoogleLoginChallenge>>,
+    external_account_lookup: Mutex<Option<AccountRecord>>,
+    primary_email_account_lookup: Mutex<Option<AccountRecord>>,
+    external_session_result: Mutex<Option<StoredAuthenticatedSession>>,
+    external_identity_session: Mutex<Option<ExternalIdentityRecord>>,
+    google_link_challenge: Mutex<Option<CreateGoogleLinkChallenge>>,
 }
 
 #[derive(Debug)]
@@ -68,6 +76,40 @@ struct CapturedPasswordResetChallenge {
     encrypted_outbox_payload: Vec<u8>,
     outbox_key_id: String,
 }
+#[derive(Default)]
+struct FakeOidcVerifier {
+    google_identity: Mutex<Option<GoogleIdentity>>,
+    seen: Mutex<Vec<(String, String)>>,
+}
+
+impl FakeOidcVerifier {
+    fn returning(identity: GoogleIdentity) -> Self {
+        Self {
+            google_identity: Mutex::new(Some(identity)),
+            ..Self::default()
+        }
+    }
+
+    fn seen(&self) -> Vec<(String, String)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl OidcVerifier for FakeOidcVerifier {
+    async fn verify_google_id_token(
+        &self,
+        id_token: &str,
+        nonce: &str,
+    ) -> CanopyResult<GoogleIdentity> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((id_token.to_string(), nonce.to_string()));
+        Ok(self.google_identity.lock().unwrap().clone().unwrap())
+    }
+}
+
 struct CapturedRegistration {
     normalized_email: String,
     password_hash_phc: String,
@@ -117,6 +159,28 @@ impl FakeIdentityRepository {
         }
     }
 
+    fn with_external_account(account: AccountRecord, session: StoredAuthenticatedSession) -> Self {
+        Self {
+            external_account_lookup: Mutex::new(Some(account)),
+            session_result: Mutex::new(Some(session)),
+            ..Self::default()
+        }
+    }
+
+    fn with_primary_email_account(account: AccountRecord) -> Self {
+        Self {
+            primary_email_account_lookup: Mutex::new(Some(account)),
+            ..Self::default()
+        }
+    }
+
+    fn with_external_session(session: StoredAuthenticatedSession) -> Self {
+        Self {
+            external_session_result: Mutex::new(Some(session)),
+            ..Self::default()
+        }
+    }
+
     fn with_rate_limit_state(state: RateLimitState) -> Self {
         Self {
             rate_limit_state: Mutex::new(state),
@@ -148,6 +212,14 @@ impl FakeIdentityRepository {
             .unwrap()
             .take()
             .unwrap()
+    }
+
+    fn has_verification_challenge(&self) -> bool {
+        self.verification_challenge.lock().unwrap().is_some()
+    }
+
+    fn has_password_reset_challenge(&self) -> bool {
+        self.password_reset_challenge.lock().unwrap().is_some()
     }
 
     fn completed_reset(&self) -> CompletePasswordResetRecord {
@@ -188,6 +260,22 @@ impl FakeIdentityRepository {
     fn revoked_sessions(&self) -> Vec<(String, String)> {
         self.revoked_sessions.lock().unwrap().clone()
     }
+
+    fn google_login_challenge(&self) -> CreateGoogleLoginChallenge {
+        self.google_login_challenge.lock().unwrap().take().unwrap()
+    }
+
+    fn external_identity_session(&self) -> ExternalIdentityRecord {
+        self.external_identity_session
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+    }
+
+    fn google_link_challenge(&self) -> CreateGoogleLinkChallenge {
+        self.google_link_challenge.lock().unwrap().take().unwrap()
+    }
 }
 
 #[async_trait]
@@ -200,6 +288,25 @@ impl IdentityRepository for FakeIdentityRepository {
     async fn record_rate_limit_hit(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState> {
         self.rate_limit_hits.lock().unwrap().push(bucket);
         Ok(self.rate_limit_state.lock().unwrap().clone())
+    }
+
+    async fn create_google_login_challenge(
+        &self,
+        record: CreateGoogleLoginChallenge,
+    ) -> CanopyResult<String> {
+        *self.google_login_challenge.lock().unwrap() = Some(record);
+        Ok("google-challenge-1".into())
+    }
+
+    async fn consume_google_login_challenge(
+        &self,
+        _challenge_id: &str,
+        _now_epoch_ms: u64,
+    ) -> CanopyResult<ConsumedGoogleLoginChallenge> {
+        let record = self.google_login_challenge.lock().unwrap().take().unwrap();
+        Ok(ConsumedGoogleLoginChallenge {
+            encrypted_payload: record.encrypted_payload,
+        })
     }
 
     async fn register_password(&self, record: RegisterPasswordRecord) -> CanopyResult<()> {
@@ -344,7 +451,53 @@ impl IdentityRepository for FakeIdentityRepository {
         &self,
         _identity: &ExternalIdentityRecord,
     ) -> CanopyResult<Option<AccountRecord>> {
-        unimplemented!()
+        Ok(self.external_account_lookup.lock().unwrap().clone())
+    }
+
+    async fn account_by_primary_email(
+        &self,
+        _normalized_email: &str,
+    ) -> CanopyResult<Option<AccountRecord>> {
+        Ok(self.primary_email_account_lookup.lock().unwrap().clone())
+    }
+
+    async fn create_external_identity_session(
+        &self,
+        identity: ExternalIdentityRecord,
+        _session: CreateSessionRecord,
+    ) -> CanopyResult<StoredAuthenticatedSession> {
+        *self.external_identity_session.lock().unwrap() = Some(identity);
+        Ok(self
+            .external_session_result
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap())
+    }
+
+    async fn create_google_link_challenge(
+        &self,
+        record: CreateGoogleLinkChallenge,
+    ) -> CanopyResult<()> {
+        *self.google_link_challenge.lock().unwrap() = Some(record);
+        Ok(())
+    }
+
+    async fn link_external_identity(
+        &self,
+        _account_id: &str,
+        _link_challenge_id: &str,
+        _now_epoch_ms: u64,
+    ) -> CanopyResult<()> {
+        Ok(())
+    }
+
+    async fn unlink_external_identity(
+        &self,
+        _account_id: &str,
+        _provider: &str,
+    ) -> CanopyResult<()> {
+        Ok(())
     }
 
     async fn delete_account(&self, account_id: &str) -> CanopyResult<()> {
@@ -518,6 +671,40 @@ async fn request_password_reset_queues_generic_reset_payload() {
 }
 
 #[tokio::test]
+async fn resend_and_reset_throttles_keep_generic_acceptance_without_work() {
+    let repo = Arc::new(FakeIdentityRepository::with_rate_limit_state(
+        RateLimitState {
+            request_count: 3,
+            limited: true,
+        },
+    ));
+    let service = service(repo.clone());
+
+    service
+        .resend_verification(ResendVerificationCommand {
+            email: "ADA@example.test".into(),
+        })
+        .await
+        .unwrap();
+    service
+        .request_password_reset(RequestPasswordResetCommand {
+            email: "ADA@example.test".into(),
+        })
+        .await
+        .unwrap();
+
+    let checks = repo.rate_limit_checks();
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[0].operation, "resend_verification");
+    assert_eq!(checks[0].max_attempts, 3);
+    assert_eq!(checks[1].operation, "password_reset_request");
+    assert_eq!(checks[1].max_attempts, 3);
+    assert!(repo.recorded_rate_limits().is_empty());
+    assert!(!repo.has_verification_challenge());
+    assert!(!repo.has_password_reset_challenge());
+}
+
+#[tokio::test]
 async fn complete_password_reset_consumes_token_and_writes_new_hash() {
     let repo = Arc::new(FakeIdentityRepository::default());
     let service = service(repo.clone());
@@ -658,6 +845,148 @@ async fn password_login_records_failed_attempts_and_blocks_limited_bucket() {
     assert!(matches!(error, CanopyError::RateLimited(_)));
     assert_eq!(limited_repo.rate_limit_checks().len(), 1);
     assert!(limited_repo.recorded_rate_limits().is_empty());
+}
+
+#[tokio::test]
+async fn begin_google_login_creates_nonce_challenge() {
+    let repo = Arc::new(FakeIdentityRepository::default());
+    let service = service(repo.clone());
+
+    let challenge = service
+        .begin_google_login(BeginGoogleLoginCommand)
+        .await
+        .unwrap();
+
+    assert_eq!(challenge.challenge_id, "google-challenge-1");
+    assert!(!challenge.nonce.is_empty());
+    assert!(challenge.expires_at_epoch_ms > NOW_MS);
+
+    let stored = repo.google_login_challenge();
+    assert_ne!(stored.nonce_hash, [0; 32]);
+    assert!(stored.expires_at_epoch_ms > NOW_MS);
+    assert!(!stored.encrypted_payload.is_empty());
+}
+
+#[tokio::test]
+async fn complete_google_login_known_sub_issues_session() {
+    let account = active_account();
+    let session = active_session("google-session-1");
+    let repo = Arc::new(FakeIdentityRepository::with_external_account(
+        account.clone(),
+        StoredAuthenticatedSession { account, session },
+    ));
+    let verifier = Arc::new(FakeOidcVerifier::returning(GoogleIdentity {
+        subject: "google-sub-1".into(),
+        email: Some("ADA@example.test".into()),
+        email_verified: true,
+    }));
+    let service = service(repo.clone()).with_oidc_verifier(verifier.clone());
+    let challenge = service
+        .begin_google_login(BeginGoogleLoginCommand)
+        .await
+        .unwrap();
+
+    let outcome = service
+        .complete_google_login(CompleteGoogleLoginCommand {
+            challenge_id: challenge.challenge_id,
+            id_token: "google-id-token".into(),
+            device_label: "PandaWave Android".into(),
+        })
+        .await
+        .unwrap();
+
+    let GoogleLoginOutcome::Session(envelope) = outcome else {
+        panic!("known google sub should create a session");
+    };
+    assert_eq!(envelope.session.id, "google-session-1");
+    assert!(!envelope.access_token.is_empty());
+    assert!(!envelope.refresh_token.is_empty());
+    assert_eq!(verifier.seen().len(), 1);
+
+    let created = repo.created_session();
+    assert_eq!(created.account_id, "account-1");
+    assert_eq!(created.device_label, "PandaWave Android");
+    assert_ne!(created.refresh_token_hash, [0; 32]);
+}
+
+#[tokio::test]
+async fn complete_google_login_unknown_sub_creates_external_account_session() {
+    let account = active_account();
+    let session = active_session("google-new-session-1");
+    let repo = Arc::new(FakeIdentityRepository::with_external_session(
+        StoredAuthenticatedSession { account, session },
+    ));
+    let verifier = Arc::new(FakeOidcVerifier::returning(GoogleIdentity {
+        subject: "google-sub-new".into(),
+        email: Some("new@example.test".into()),
+        email_verified: true,
+    }));
+    let service = service(repo.clone()).with_oidc_verifier(verifier);
+    let challenge = service
+        .begin_google_login(BeginGoogleLoginCommand)
+        .await
+        .unwrap();
+
+    let outcome = service
+        .complete_google_login(CompleteGoogleLoginCommand {
+            challenge_id: challenge.challenge_id,
+            id_token: "google-id-token".into(),
+            device_label: "PandaWave Android".into(),
+        })
+        .await
+        .unwrap();
+
+    let GoogleLoginOutcome::Session(envelope) = outcome else {
+        panic!("unknown google sub should create a new external account session");
+    };
+    assert_eq!(envelope.session.id, "google-new-session-1");
+    let identity = repo.external_identity_session();
+    assert_eq!(identity.provider, "google");
+    assert_eq!(identity.provider_subject, "google-sub-new");
+    assert_eq!(
+        identity.provider_email_at_link_time.as_deref(),
+        Some("new@example.test")
+    );
+}
+
+#[tokio::test]
+async fn complete_google_login_same_email_different_sub_requires_explicit_link() {
+    let repo = Arc::new(FakeIdentityRepository::with_primary_email_account(
+        active_account(),
+    ));
+    let verifier = Arc::new(FakeOidcVerifier::returning(GoogleIdentity {
+        subject: "google-sub-2".into(),
+        email: Some("ADA@example.test".into()),
+        email_verified: true,
+    }));
+    let service = service(repo.clone()).with_oidc_verifier(verifier);
+    let challenge = service
+        .begin_google_login(BeginGoogleLoginCommand)
+        .await
+        .unwrap();
+
+    let outcome = service
+        .complete_google_login(CompleteGoogleLoginCommand {
+            challenge_id: challenge.challenge_id,
+            id_token: "google-id-token".into(),
+            device_label: "PandaWave Android".into(),
+        })
+        .await
+        .unwrap();
+
+    let GoogleLoginOutcome::AccountLinkRequired { link_challenge_id } = outcome else {
+        panic!("same verified email with a different google sub should require explicit linking");
+    };
+    assert!(!link_challenge_id.is_empty());
+    let link = repo.google_link_challenge();
+    assert_eq!(link.account_id, "account-1");
+    assert_eq!(link.identity.provider, "google");
+    assert_ne!(link.token_hash, [0; 32]);
+    assert_eq!(link.identity.provider_subject, "google-sub-2");
+    assert_eq!(
+        link.identity.provider_email_at_link_time.as_deref(),
+        Some("ada@example.test")
+    );
 }
 
 #[tokio::test]

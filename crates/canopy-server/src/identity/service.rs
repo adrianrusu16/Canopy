@@ -1,21 +1,25 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 use canopy_core::{
     AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
     CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
-    CreatePasswordResetChallenge, CreateSessionRecord, IdentityRepository, RateLimitBucket,
+    CreateGoogleLinkChallenge, CreateGoogleLoginChallenge, CreatePasswordResetChallenge,
+    CreateSessionRecord, ExternalIdentityRecord, IdentityRepository, RateLimitBucket,
     RegisterPasswordRecord, RotateRefreshTokenRecord,
 };
 
 use super::{
-    AccessTokenClaims, Ed25519AccessTokenIssuer, EmailOutboxPayload, OpaqueToken, PasswordHasher,
-    TokenDigest,
+    AccessTokenClaims, Ed25519AccessTokenIssuer, EmailOutboxPayload, NoopOidcVerifier,
+    OidcVerifier, OpaqueToken, PasswordHasher, TokenDigest,
 };
 
 const PASSWORD_POLICY_VERSION: u32 = 1;
 const VERIFICATION_TOKEN_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+const GOOGLE_CHALLENGE_TTL_MS: u64 = 10 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS: u64 = 15 * 60 * 1000;
 const LOGIN_FAILURE_LIMIT: u32 = 5;
 const REGISTER_REQUEST_LIMIT: u32 = 5;
@@ -77,6 +81,37 @@ pub struct ChangePasswordCommand {
     pub current_password: String,
     pub new_password: String,
 }
+
+pub struct BeginGoogleLoginCommand;
+
+pub struct CompleteGoogleLoginCommand {
+    pub challenge_id: String,
+    pub id_token: String,
+    pub device_label: String,
+}
+
+pub struct LinkGoogleCommand {
+    pub principal: AuthenticatedPrincipal,
+    pub link_challenge_id: String,
+}
+
+pub struct UnlinkGoogleCommand {
+    pub principal: AuthenticatedPrincipal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoogleLoginChallenge {
+    pub challenge_id: String,
+    pub nonce: String,
+    pub expires_at_epoch_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GoogleLoginOutcome {
+    Session(SessionEnvelope),
+    AccountLinkRequired { link_challenge_id: String },
+}
+
 pub struct VerifyEmailCommand {
     pub verification_token: String,
     pub device_label: String,
@@ -111,6 +146,7 @@ pub struct IdentityService {
     password_hasher: Arc<dyn PasswordHasher>,
     access_tokens: Ed25519AccessTokenIssuer,
     clock: Arc<dyn Clock>,
+    oidc_verifier: Arc<dyn OidcVerifier>,
 }
 
 impl IdentityService {
@@ -125,7 +161,13 @@ impl IdentityService {
             password_hasher,
             access_tokens,
             clock,
+            oidc_verifier: Arc::new(NoopOidcVerifier),
         }
+    }
+
+    pub fn with_oidc_verifier(mut self, oidc_verifier: Arc<dyn OidcVerifier>) -> Self {
+        self.oidc_verifier = oidc_verifier;
+        self
     }
 
     fn rate_limit_bucket(
@@ -358,6 +400,135 @@ impl IdentityService {
             })
             .await
     }
+    pub async fn begin_google_login(
+        &self,
+        _command: BeginGoogleLoginCommand,
+    ) -> CanopyResult<GoogleLoginChallenge> {
+        let nonce = OpaqueToken::generate();
+        let now = self.clock.now_epoch_ms();
+        let expires_at_epoch_ms = now + GOOGLE_CHALLENGE_TTL_MS;
+        let payload = GoogleLoginChallengePayload {
+            nonce: nonce.as_str().into(),
+        }
+        .seal()?;
+        let challenge_id = self
+            .repository
+            .create_google_login_challenge(CreateGoogleLoginChallenge {
+                nonce_hash: *TokenDigest::from_token(&nonce).as_bytes(),
+                expires_at_epoch_ms,
+                encrypted_payload: payload,
+            })
+            .await?;
+
+        Ok(GoogleLoginChallenge {
+            challenge_id,
+            nonce: nonce.into_string(),
+            expires_at_epoch_ms,
+        })
+    }
+
+    pub async fn complete_google_login(
+        &self,
+        command: CompleteGoogleLoginCommand,
+    ) -> CanopyResult<GoogleLoginOutcome> {
+        let now = self.clock.now_epoch_ms();
+        let consumed = self
+            .repository
+            .consume_google_login_challenge(&command.challenge_id, now)
+            .await?;
+        let challenge = GoogleLoginChallengePayload::open(&consumed.encrypted_payload)?;
+        let google = self
+            .oidc_verifier
+            .verify_google_id_token(&command.id_token, &challenge.nonce)
+            .await?;
+        let verified_email = if google.email_verified {
+            google.email.as_deref().map(normalize_email).transpose()?
+        } else {
+            None
+        };
+        let identity = ExternalIdentityRecord {
+            provider: "google".into(),
+            provider_subject: google.subject,
+            provider_email_at_link_time: verified_email.clone(),
+        };
+
+        if let Some(account) = self
+            .repository
+            .account_by_external_identity(&identity)
+            .await?
+        {
+            let refresh_token = OpaqueToken::generate();
+            let stored = self
+                .repository
+                .create_session(CreateSessionRecord {
+                    account_id: account.id,
+                    device_label: command.device_label,
+                    refresh_token_hash: *TokenDigest::from_token(&refresh_token).as_bytes(),
+                    expires_at_epoch_ms: now + REFRESH_TOKEN_TTL_MS,
+                })
+                .await?;
+            return Ok(GoogleLoginOutcome::Session(self.session_envelope(
+                stored,
+                refresh_token,
+                now,
+            )?));
+        }
+
+        if let Some(email) = verified_email.as_deref() {
+            if let Some(account) = self.repository.account_by_primary_email(email).await? {
+                let link_payload = GoogleLinkChallengePayload::from_identity(&identity).seal()?;
+                let link_token = OpaqueToken::generate();
+                self.repository
+                    .create_google_link_challenge(CreateGoogleLinkChallenge {
+                        account_id: account.id,
+                        token_hash: *TokenDigest::from_token(&link_token).as_bytes(),
+                        identity,
+                        expires_at_epoch_ms: now + GOOGLE_CHALLENGE_TTL_MS,
+                        encrypted_payload: link_payload,
+                    })
+                    .await?;
+                return Ok(GoogleLoginOutcome::AccountLinkRequired {
+                    link_challenge_id: link_token.into_string(),
+                });
+            }
+        }
+
+        let refresh_token = OpaqueToken::generate();
+        let stored = self
+            .repository
+            .create_external_identity_session(
+                identity,
+                CreateSessionRecord {
+                    account_id: String::new(),
+                    device_label: command.device_label,
+                    refresh_token_hash: *TokenDigest::from_token(&refresh_token).as_bytes(),
+                    expires_at_epoch_ms: now + REFRESH_TOKEN_TTL_MS,
+                },
+            )
+            .await?;
+        Ok(GoogleLoginOutcome::Session(self.session_envelope(
+            stored,
+            refresh_token,
+            now,
+        )?))
+    }
+
+    pub async fn link_google(&self, command: LinkGoogleCommand) -> CanopyResult<()> {
+        let now = self.clock.now_epoch_ms();
+        self.repository
+            .link_external_identity(
+                &command.principal.account_id,
+                &command.link_challenge_id,
+                now,
+            )
+            .await
+    }
+
+    pub async fn unlink_google(&self, command: UnlinkGoogleCommand) -> CanopyResult<()> {
+        self.repository
+            .unlink_external_identity(&command.principal.account_id, "google")
+            .await
+    }
     pub async fn login_password(
         &self,
         command: LoginPasswordCommand,
@@ -580,6 +751,49 @@ fn password_reset_outbox(
 ) -> CanopyResult<super::SealedOutboxPayload> {
     EmailOutboxPayload::password_reset(normalized_email, reset_token, expires_at_epoch_ms).seal()
 }
+
+#[derive(Deserialize, Serialize)]
+struct GoogleLoginChallengePayload {
+    nonce: String,
+}
+
+impl GoogleLoginChallengePayload {
+    fn seal(&self) -> CanopyResult<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|error| {
+            CanopyError::Internal(format!("failed to encode google login challenge: {error}"))
+        })
+    }
+
+    fn open(payload: &[u8]) -> CanopyResult<Self> {
+        serde_json::from_slice(payload).map_err(|error| {
+            CanopyError::Internal(format!("failed to decode google login challenge: {error}"))
+        })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct GoogleLinkChallengePayload {
+    provider: String,
+    provider_subject: String,
+    provider_email_at_link_time: Option<String>,
+}
+
+impl GoogleLinkChallengePayload {
+    fn from_identity(identity: &ExternalIdentityRecord) -> Self {
+        Self {
+            provider: identity.provider.clone(),
+            provider_subject: identity.provider_subject.clone(),
+            provider_email_at_link_time: identity.provider_email_at_link_time.clone(),
+        }
+    }
+
+    fn seal(&self) -> CanopyResult<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|error| {
+            CanopyError::Internal(format!("failed to encode google link challenge: {error}"))
+        })
+    }
+}
+
 fn normalize_email(email: &str) -> CanopyResult<String> {
     let normalized = email.trim().to_ascii_lowercase();
     if normalized.is_empty() || !normalized.contains('@') {

@@ -2,7 +2,8 @@
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CatalogIngest, CatalogRepository, ConsumeChallenge,
-    CreateSessionRecord, IdentityRepository, InstanceSettingsRepository, LibraryRepository,
+    CreateGoogleLinkChallenge, CreateGoogleLoginChallenge, CreateSessionRecord,
+    ExternalIdentityRecord, IdentityRepository, InstanceSettingsRepository, LibraryRepository,
     LikeRepository, MediaImportRepository, Page, PendingImportOutcome, PendingMediaImport,
     PlayableAssetRepository, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
     PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
@@ -48,6 +49,15 @@ fn identity_session(seed: u8, expires_at_epoch_ms: u64) -> CreateSessionRecord {
         refresh_token_hash: identity_digest(seed),
         expires_at_epoch_ms,
     }
+}
+
+fn google_link_payload(identity: &ExternalIdentityRecord) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "provider": identity.provider.clone(),
+        "provider_subject": identity.provider_subject.clone(),
+        "provider_email_at_link_time": identity.provider_email_at_link_time.clone(),
+    }))
+    .expect("google link payload should encode")
 }
 
 #[tokio::test]
@@ -483,6 +493,197 @@ async fn postgres_identity_refresh_rotation_reuse_revokes_session_family() {
     .await
     .expect("live token count should be queryable");
     assert_eq!(live_token_count, 0);
+
+    let reuse_signal_count: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COALESCE(SUM(request_count), 0)::bigint
+            FROM auth_rate_limits
+            WHERE operation = 'refresh_token_reuse'
+              AND subject_hash = $1
+        "#,
+    )
+    .bind(initial_refresh_hash.as_slice())
+    .fetch_one(&pool)
+    .await
+    .expect("refresh reuse signal should be queryable");
+    assert_eq!(reuse_signal_count, 1);
+}
+#[tokio::test]
+async fn postgres_identity_google_login_challenge_is_single_use() {
+    let pool = connect_test_pool().await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let identity = PgIdentityRepository::new(pool.clone());
+    let now = identity_epoch_ms(0);
+    let challenge_id = identity
+        .create_google_login_challenge(CreateGoogleLoginChallenge {
+            nonce_hash: identity_digest(91),
+            expires_at_epoch_ms: identity_epoch_ms(600_000),
+            encrypted_payload: b"{\"nonce\":\"nonce-for-google\"}".to_vec(),
+        })
+        .await
+        .expect("google login challenge should be created");
+
+    let first = identity
+        .consume_google_login_challenge(&challenge_id, now)
+        .await
+        .expect("first consume should return payload");
+    assert_eq!(
+        first.encrypted_payload.as_slice(),
+        b"{\"nonce\":\"nonce-for-google\"}"
+    );
+
+    let second = identity
+        .consume_google_login_challenge(&challenge_id, now)
+        .await;
+    assert!(second.is_err(), "google nonce challenge must be single-use");
+}
+
+#[tokio::test]
+async fn postgres_identity_google_external_account_and_link_flow_use_provider_subject() {
+    let pool = connect_test_pool().await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let identity = PgIdentityRepository::new(pool.clone());
+    let now = identity_epoch_ms(0);
+    let expires_at = identity_epoch_ms(3_600_000);
+    let google = ExternalIdentityRecord {
+        provider: "google".into(),
+        provider_subject: format!("google-sub-{}", uuid::Uuid::new_v4()),
+        provider_email_at_link_time: Some(format!("google-{}@example.test", uuid::Uuid::new_v4())),
+    };
+
+    let created = identity
+        .create_external_identity_session(
+            google.clone(),
+            CreateSessionRecord {
+                account_id: "ignored-for-google-account-create".into(),
+                device_label: "Google test device".into(),
+                refresh_token_hash: identity_digest(92),
+                expires_at_epoch_ms: expires_at,
+            },
+        )
+        .await
+        .expect("unknown google sub should create an active external account");
+    assert_eq!(created.account.status, canopy_core::AccountStatus::Active);
+    assert_eq!(
+        created.account.primary_email.as_deref(),
+        google.provider_email_at_link_time.as_deref()
+    );
+    assert_eq!(created.session.account_id, created.account.id);
+
+    let by_subject = identity
+        .account_by_external_identity(&google)
+        .await
+        .expect("external identity lookup should query successfully")
+        .expect("external account should be found by provider subject");
+    assert_eq!(by_subject.id, created.account.id);
+
+    let native_email = format!("native-{}@example.test", uuid::Uuid::new_v4());
+    let verification_hash = identity_digest(93);
+    identity
+        .register_password(RegisterPasswordRecord {
+            normalized_email: native_email.clone(),
+            password_hash_phc: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZmFrZS1oYXNo".into(),
+            policy_version: 1,
+            verification_token_hash: verification_hash,
+            verification_expires_at_epoch_ms: expires_at,
+            encrypted_outbox_payload: vec![55; 32],
+            outbox_key_id: "test-key".into(),
+        })
+        .await
+        .expect("pending native account should be registered");
+    let native = identity
+        .activate_email_and_create_session(
+            ConsumeChallenge {
+                token_hash: verification_hash,
+                challenge_type: "email_verification",
+                now_epoch_ms: now,
+            },
+            identity_session(94, expires_at),
+        )
+        .await
+        .expect("native account should activate");
+
+    let by_primary_email = identity
+        .account_by_primary_email(&native_email)
+        .await
+        .expect("primary email lookup should query successfully")
+        .expect("active verified account should be found by email");
+    assert_eq!(by_primary_email.id, native.account.id);
+
+    let wrong_link_token = format!("wrong-link-token-{}", uuid::Uuid::new_v4());
+    let wrong_link_identity = ExternalIdentityRecord {
+        provider: "google".into(),
+        provider_subject: format!("google-sub-{}", uuid::Uuid::new_v4()),
+        provider_email_at_link_time: Some(native_email.clone()),
+    };
+    identity
+        .create_google_link_challenge(CreateGoogleLinkChallenge {
+            account_id: native.account.id.clone(),
+            token_hash: identity_digest(95),
+            identity: wrong_link_identity.clone(),
+            expires_at_epoch_ms: expires_at,
+            encrypted_payload: google_link_payload(&wrong_link_identity),
+        })
+        .await
+        .expect("link challenge should be created");
+    assert!(
+        identity
+            .link_external_identity(&native.account.id, &wrong_link_token, now)
+            .await
+            .is_err(),
+        "unmatched presented token must not link"
+    );
+
+    let link_token = format!("link-token-{}", uuid::Uuid::new_v4());
+    let token_hash = canopy_server::identity::TokenDigest::from_secret(&link_token);
+    let link_identity = ExternalIdentityRecord {
+        provider: "google".into(),
+        provider_subject: format!("google-sub-{}", uuid::Uuid::new_v4()),
+        provider_email_at_link_time: Some(native_email),
+    };
+    identity
+        .create_google_link_challenge(CreateGoogleLinkChallenge {
+            account_id: native.account.id.clone(),
+            token_hash: *token_hash.as_bytes(),
+            identity: link_identity.clone(),
+            expires_at_epoch_ms: expires_at,
+            encrypted_payload: google_link_payload(&link_identity),
+        })
+        .await
+        .expect("second link challenge should be created");
+    identity
+        .link_external_identity(&native.account.id, &link_token, now)
+        .await
+        .expect("matching link challenge should attach google identity");
+
+    let linked = identity
+        .account_by_external_identity(&link_identity)
+        .await
+        .expect("linked external identity lookup should query successfully")
+        .expect("linked google identity should resolve");
+    assert_eq!(linked.id, native.account.id);
+
+    identity
+        .unlink_external_identity(&native.account.id, "google")
+        .await
+        .expect("unlink should be idempotent for google identities");
+    assert!(
+        identity
+            .account_by_external_identity(&link_identity)
+            .await
+            .expect("post-unlink lookup should query successfully")
+            .is_none()
+    );
 }
 #[tokio::test]
 async fn postgres_migrations_support_idempotent_provider_ingest() {

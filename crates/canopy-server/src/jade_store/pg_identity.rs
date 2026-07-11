@@ -2,10 +2,14 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
+use crate::identity::TokenDigest;
 use async_trait::async_trait;
 use canopy_core::{
     AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
-    CompletePasswordResetRecord, ConsumeChallenge, CreateEmailVerificationChallenge,
+    CompletePasswordResetRecord, ConsumeChallenge, ConsumedGoogleLoginChallenge,
+    CreateEmailVerificationChallenge, CreateGoogleLinkChallenge, CreateGoogleLoginChallenge,
     CreatePasswordResetChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
     PasswordCredentialRecord, PasswordLoginRecord, RateLimitBucket, RateLimitState,
     RegisterPasswordRecord, RotateRefreshTokenRecord, StoredAuthenticatedSession,
@@ -29,12 +33,6 @@ impl PgIdentityRepository {
 
 fn db_err(error: sqlx::Error) -> CanopyError {
     CanopyError::Storage(error.to_string())
-}
-
-fn unsupported(operation: &str) -> CanopyError {
-    CanopyError::Internal(format!(
-        "identity repository operation not implemented yet: {operation}"
-    ))
 }
 
 fn parse_uuid(value: &str, field: &str) -> CanopyResult<uuid::Uuid> {
@@ -122,6 +120,37 @@ fn session_from_row(row: &sqlx::postgres::PgRow) -> CanopyResult<AuthSession> {
     })
 }
 
+fn validate_google_identity(identity: &ExternalIdentityRecord) -> CanopyResult<()> {
+    if identity.provider != "google" {
+        return Err(CanopyError::InvalidArgument(
+            "only google external identities are supported".into(),
+        ));
+    }
+    if identity.provider_subject.trim().is_empty() {
+        return Err(CanopyError::InvalidArgument(
+            "external identity subject is required".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredExternalIdentityPayload {
+    provider: String,
+    provider_subject: String,
+    provider_email_at_link_time: Option<String>,
+}
+
+impl StoredExternalIdentityPayload {
+    fn into_record(self) -> ExternalIdentityRecord {
+        ExternalIdentityRecord {
+            provider: self.provider,
+            provider_subject: self.provider_subject,
+            provider_email_at_link_time: self.provider_email_at_link_time,
+        }
+    }
+}
+
 #[async_trait]
 impl IdentityRepository for PgIdentityRepository {
     async fn rate_limit_state(&self, bucket: RateLimitBucket) -> CanopyResult<RateLimitState> {
@@ -172,6 +201,68 @@ impl IdentityRepository for PgIdentityRepository {
         .map_err(db_err)?;
 
         Ok(rate_limit_state(count.max(0) as u32, bucket.max_attempts))
+    }
+
+    async fn create_google_login_challenge(
+        &self,
+        record: CreateGoogleLoginChallenge,
+    ) -> CanopyResult<String> {
+        let challenge_id: uuid::Uuid = sqlx::query_scalar(
+            r#"
+                INSERT INTO auth_challenges (
+                    challenge_type, token_hash, encrypted_payload, expires_at
+                )
+                VALUES ('google_login_nonce'::auth_challenge_type, $1, $2, to_timestamp($3))
+                RETURNING id
+            "#,
+        )
+        .bind(record.nonce_hash.as_slice())
+        .bind(record.encrypted_payload)
+        .bind(timestamp_expr(record.expires_at_epoch_ms))
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(challenge_id.to_string())
+    }
+
+    async fn consume_google_login_challenge(
+        &self,
+        challenge_id: &str,
+        now_epoch_ms: u64,
+    ) -> CanopyResult<ConsumedGoogleLoginChallenge> {
+        let challenge_id = parse_uuid(challenge_id, "challenge_id")?;
+        let row = sqlx::query(
+            r#"
+                UPDATE auth_challenges
+                SET consumed_at = to_timestamp($2), attempts = attempts + 1
+                WHERE id = $1
+                  AND challenge_type = 'google_login_nonce'::auth_challenge_type
+                  AND consumed_at IS NULL
+                  AND expires_at > to_timestamp($2)
+                  AND attempts < max_attempts
+                RETURNING encrypted_payload
+            "#,
+        )
+        .bind(challenge_id)
+        .bind(timestamp_expr(now_epoch_ms))
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        let Some(row) = row else {
+            return Err(CanopyError::unauthenticated(
+                "invalid or consumed google login challenge",
+            ));
+        };
+        Ok(ConsumedGoogleLoginChallenge {
+            encrypted_payload: row
+                .try_get::<Option<Vec<u8>>, _>("encrypted_payload")
+                .map_err(db_err)?
+                .ok_or_else(|| {
+                    CanopyError::Storage("google challenge payload is missing".into())
+                })?,
+        })
     }
 
     async fn register_password(&self, record: RegisterPasswordRecord) -> CanopyResult<()> {
@@ -1230,9 +1321,309 @@ impl IdentityRepository for PgIdentityRepository {
 
     async fn account_by_external_identity(
         &self,
-        _identity: &ExternalIdentityRecord,
+        identity: &ExternalIdentityRecord,
     ) -> CanopyResult<Option<AccountRecord>> {
-        Err(unsupported("account_by_external_identity"))
+        validate_google_identity(identity)?;
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    a.id AS account_id,
+                    a.status::text AS account_status,
+                    ae.normalized_email AS primary_email,
+                    floor(extract(epoch from a.created_at) * 1000)::bigint AS created_at_epoch_ms
+                FROM external_identities ei
+                JOIN accounts a ON a.id = ei.account_id
+                LEFT JOIN account_emails ae ON ae.account_id = a.id AND ae.is_primary AND ae.deleted_at IS NULL
+                WHERE ei.provider = $1::auth_provider
+                  AND ei.provider_subject = $2
+                  AND a.status = 'active'::account_status
+            "#,
+        )
+        .bind(&identity.provider)
+        .bind(&identity.provider_subject)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        row.map(|row| account_from_row(&row)).transpose()
+    }
+
+    async fn account_by_primary_email(
+        &self,
+        normalized_email: &str,
+    ) -> CanopyResult<Option<AccountRecord>> {
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    a.id AS account_id,
+                    a.status::text AS account_status,
+                    ae.normalized_email AS primary_email,
+                    floor(extract(epoch from a.created_at) * 1000)::bigint AS created_at_epoch_ms
+                FROM account_emails ae
+                JOIN accounts a ON a.id = ae.account_id
+                WHERE ae.normalized_email = $1
+                  AND ae.deleted_at IS NULL
+                  AND ae.is_primary
+                  AND ae.verified_at IS NOT NULL
+                  AND a.status = 'active'::account_status
+            "#,
+        )
+        .bind(normalized_email)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        row.map(|row| account_from_row(&row)).transpose()
+    }
+
+    async fn create_external_identity_session(
+        &self,
+        identity: ExternalIdentityRecord,
+        session: CreateSessionRecord,
+    ) -> CanopyResult<StoredAuthenticatedSession> {
+        validate_google_identity(&identity)?;
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        let account_id: uuid::Uuid = sqlx::query_scalar(
+            r#"
+                INSERT INTO accounts (status, activated_at)
+                VALUES ('active'::account_status, NOW())
+                RETURNING id
+            "#,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        if let Some(email) = identity.provider_email_at_link_time.as_deref() {
+            sqlx::query(
+                r#"
+                    INSERT INTO account_emails (
+                        account_id, normalized_email, is_primary, verified_at
+                    )
+                    VALUES ($1, $2, TRUE, NOW())
+                "#,
+            )
+            .bind(account_id)
+            .bind(email)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+
+        sqlx::query(
+            r#"
+                INSERT INTO external_identities (
+                    account_id, provider, provider_subject, provider_email_at_link_time
+                )
+                VALUES ($1, $2::auth_provider, $3, $4)
+            "#,
+        )
+        .bind(account_id)
+        .bind(&identity.provider)
+        .bind(&identity.provider_subject)
+        .bind(&identity.provider_email_at_link_time)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO profiles (external_user_id, history_enabled, account_id)
+                VALUES ($1, FALSE, $2)
+                ON CONFLICT (account_id) DO NOTHING
+            "#,
+        )
+        .bind(account_id.to_string())
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let session_id: uuid::Uuid = sqlx::query_scalar(
+            r#"
+                INSERT INTO auth_sessions (account_id, device_label, expires_at)
+                VALUES ($1, $2, to_timestamp($3))
+                RETURNING id
+            "#,
+        )
+        .bind(account_id)
+        .bind(&session.device_label)
+        .bind(timestamp_expr(session.expires_at_epoch_ms))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO auth_session_tokens (session_id, token_hash, expires_at)
+                VALUES ($1, $2, to_timestamp($3))
+            "#,
+        )
+        .bind(session_id)
+        .bind(session.refresh_token_hash.as_slice())
+        .bind(timestamp_expr(session.expires_at_epoch_ms))
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let row = sqlx::query(
+            r#"
+                SELECT
+                    a.id AS account_id,
+                    a.status::text AS account_status,
+                    ae.normalized_email AS primary_email,
+                    floor(extract(epoch from a.created_at) * 1000)::bigint AS created_at_epoch_ms,
+                    s.id AS session_id,
+                    s.account_id AS session_account_id,
+                    s.device_label,
+                    floor(extract(epoch from s.expires_at) * 1000)::bigint AS expires_at_epoch_ms,
+                    CASE
+                        WHEN s.revoked_at IS NULL THEN NULL
+                        ELSE floor(extract(epoch from s.revoked_at) * 1000)::bigint
+                    END AS revoked_at_epoch_ms
+                FROM auth_sessions s
+                JOIN accounts a ON a.id = s.account_id
+                LEFT JOIN account_emails ae ON ae.account_id = a.id AND ae.is_primary AND ae.deleted_at IS NULL
+                WHERE s.id = $1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let account = account_from_row(&row)?;
+        let session = session_from_row(&row)?;
+        tx.commit().await.map_err(db_err)?;
+
+        Ok(StoredAuthenticatedSession { account, session })
+    }
+
+    async fn create_google_link_challenge(
+        &self,
+        record: CreateGoogleLinkChallenge,
+    ) -> CanopyResult<()> {
+        validate_google_identity(&record.identity)?;
+        let account_id = parse_uuid(&record.account_id, "account_id")?;
+        sqlx::query(
+            r#"
+                INSERT INTO auth_challenges (
+                    account_id, challenge_type, token_hash, encrypted_payload, expires_at
+                )
+                VALUES ($1, 'google_link'::auth_challenge_type, $2, $3, to_timestamp($4))
+            "#,
+        )
+        .bind(account_id)
+        .bind(record.token_hash.as_slice())
+        .bind(record.encrypted_payload)
+        .bind(timestamp_expr(record.expires_at_epoch_ms))
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(())
+    }
+
+    async fn link_external_identity(
+        &self,
+        account_id: &str,
+        link_challenge_id: &str,
+        now_epoch_ms: u64,
+    ) -> CanopyResult<()> {
+        let account_id = parse_uuid(account_id, "account_id")?;
+        let token_hash = *TokenDigest::from_secret(link_challenge_id).as_bytes();
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let row = sqlx::query(
+            r#"
+                UPDATE auth_challenges
+                SET consumed_at = to_timestamp($3), attempts = attempts + 1
+                WHERE token_hash = $1
+                  AND account_id = $2
+                  AND challenge_type = 'google_link'::auth_challenge_type
+                  AND consumed_at IS NULL
+                  AND expires_at > to_timestamp($3)
+                  AND attempts < max_attempts
+                RETURNING encrypted_payload
+            "#,
+        )
+        .bind(token_hash.as_slice())
+        .bind(account_id)
+        .bind(timestamp_expr(now_epoch_ms))
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let Some(row) = row else {
+            return Err(CanopyError::unauthenticated(
+                "invalid or consumed google link challenge",
+            ));
+        };
+        let payload = row
+            .try_get::<Option<Vec<u8>>, _>("encrypted_payload")
+            .map_err(db_err)?
+            .ok_or_else(|| CanopyError::Storage("google link payload is missing".into()))?;
+        let identity: StoredExternalIdentityPayload =
+            serde_json::from_slice(&payload).map_err(|error| {
+                CanopyError::Storage(format!("invalid google link payload: {error}"))
+            })?;
+        let identity = identity.into_record();
+        validate_google_identity(&identity)?;
+
+        sqlx::query(
+            r#"
+                INSERT INTO external_identities (
+                    account_id, provider, provider_subject, provider_email_at_link_time
+                )
+                VALUES ($1, $2::auth_provider, $3, $4)
+                ON CONFLICT (provider, provider_subject) DO NOTHING
+            "#,
+        )
+        .bind(account_id)
+        .bind(&identity.provider)
+        .bind(&identity.provider_subject)
+        .bind(&identity.provider_email_at_link_time)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let linked_account_id: uuid::Uuid = sqlx::query_scalar(
+            r#"
+                SELECT account_id
+                FROM external_identities
+                WHERE provider = $1::auth_provider AND provider_subject = $2
+            "#,
+        )
+        .bind(&identity.provider)
+        .bind(&identity.provider_subject)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if linked_account_id != account_id {
+            return Err(CanopyError::FailedPrecondition(
+                "google identity is linked to another account".into(),
+            ));
+        }
+
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn unlink_external_identity(&self, account_id: &str, provider: &str) -> CanopyResult<()> {
+        if provider != "google" {
+            return Err(CanopyError::InvalidArgument(
+                "only google external identities are supported".into(),
+            ));
+        }
+        let account_id = parse_uuid(account_id, "account_id")?;
+        sqlx::query(
+            "DELETE FROM external_identities WHERE account_id = $1 AND provider = $2::auth_provider",
+        )
+        .bind(account_id)
+        .bind(provider)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+        Ok(())
     }
 
     async fn delete_account(&self, account_id: &str) -> CanopyResult<()> {

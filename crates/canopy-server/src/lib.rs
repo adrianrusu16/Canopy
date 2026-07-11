@@ -54,7 +54,7 @@ pub mod providers;
 pub mod search;
 pub mod stream;
 
-pub use config::{Config, IdentityTokenConfig, StreamConfig};
+pub use config::{Config, GoogleOidcConfig, IdentityTokenConfig, StreamConfig};
 
 #[cfg(feature = "pg")]
 use api::grpc::AuthGrpc;
@@ -248,12 +248,21 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                         "identity access-token signing key is required".into(),
                     )));
                 };
-                identity_service = Arc::new(identity::IdentityService::new(
+                let mut service = identity::IdentityService::new(
                     Arc::new(jade_store::PgIdentityRepository::new((*pool).clone())),
                     Arc::new(identity::Argon2PasswordHasher::default()),
                     access_tokens,
                     Arc::new(identity::SystemClock),
-                ));
+                );
+                if let Some(google_oidc) = config.google_oidc.clone() {
+                    service = service.with_oidc_verifier(Arc::new(
+                        identity::GoogleTokenInfoOidcVerifier::new(
+                            google_oidc.client_ids,
+                            google_oidc.tokeninfo_url,
+                        )?,
+                    ));
+                }
+                identity_service = Arc::new(service);
                 health = HealthService::with_db(pool).with_media_root(config.media_root.clone());
             }
             Err(error) => return Err(Box::new(error)),

@@ -34,6 +34,54 @@ pub struct IdentityTokenConfig {
     pub allow_ephemeral_dev_key: bool,
 }
 
+/// Configuration for Google OIDC ID-token verification.
+#[derive(Clone)]
+pub struct GoogleOidcConfig {
+    /// Accepted Google OAuth client IDs from ID-token `aud` claims.
+    pub client_ids: Vec<String>,
+    /// Google tokeninfo endpoint used to validate ID tokens.
+    pub tokeninfo_url: reqwest::Url,
+}
+
+impl GoogleOidcConfig {
+    const DEFAULT_TOKENINFO_URL: &'static str = "https://oauth2.googleapis.com/tokeninfo";
+
+    /// Builds optional Google OIDC configuration through an injected environment lookup.
+    pub fn from_lookup(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> canopy_core::CanopyResult<Option<Self>> {
+        use canopy_core::CanopyError;
+
+        let client_ids: Vec<_> = lookup("CANOPY_GOOGLE_OIDC_CLIENT_IDS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|client_id| client_id.trim().to_owned())
+            .filter(|client_id| !client_id.is_empty())
+            .collect();
+        if client_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let tokeninfo_url = lookup("CANOPY_GOOGLE_OIDC_TOKENINFO_URL")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Self::DEFAULT_TOKENINFO_URL.into());
+        let tokeninfo_url = reqwest::Url::parse(&tokeninfo_url).map_err(|error| {
+            CanopyError::InvalidArgument(format!(
+                "invalid CANOPY_GOOGLE_OIDC_TOKENINFO_URL: {error}"
+            ))
+        })?;
+        if tokeninfo_url.scheme() != "https" {
+            return Err(CanopyError::InvalidArgument(
+                "CANOPY_GOOGLE_OIDC_TOKENINFO_URL must use HTTPS".into(),
+            ));
+        }
+
+        Ok(Some(Self {
+            client_ids,
+            tokeninfo_url,
+        }))
+    }
+}
 impl IdentityTokenConfig {
     const DEFAULT_ISSUER: &'static str = "canopy";
     const DEFAULT_AUDIENCE: &'static str = "pandawave";
@@ -210,6 +258,8 @@ pub struct Config {
     pub stream: StreamConfig,
     /// Native identity access-token signing and validation configuration.
     pub identity_tokens: IdentityTokenConfig,
+    /// Optional Google OIDC ID-token verifier configuration.
+    pub google_oidc: Option<GoogleOidcConfig>,
     /// Root containing Canopy's managed `library/` directory.
     pub media_root: PathBuf,
 }
@@ -266,6 +316,7 @@ impl Config {
             .filter(|v| !v.trim().is_empty());
         let stream = StreamConfig::from_lookup(|key| env::var(key).ok())?;
         let identity_tokens = IdentityTokenConfig::from_lookup(|key| env::var(key).ok())?;
+        let google_oidc = GoogleOidcConfig::from_lookup(|key| env::var(key).ok())?;
         let media_root = env::var("CANOPY_MEDIA_ROOT")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -282,6 +333,7 @@ impl Config {
             provider_fixture_path,
             stream,
             identity_tokens,
+            google_oidc,
             media_root,
         })
     }
@@ -293,7 +345,7 @@ mod tests {
 
     use canopy_core::CanopyError;
 
-    use super::StreamConfig;
+    use super::{GoogleOidcConfig, StreamConfig};
 
     fn parse(values: &[(&str, &str)]) -> canopy_core::CanopyResult<StreamConfig> {
         let values: HashMap<_, _> = values
@@ -380,6 +432,67 @@ mod tests {
             values.push(("CANOPY_STREAM_TOKEN_TTL_SECS", ttl));
             assert!(matches!(
                 parse(&values),
+                Err(CanopyError::InvalidArgument(_))
+            ));
+        }
+    }
+    mod google_oidc {
+        use std::collections::HashMap;
+
+        use canopy_core::CanopyError;
+
+        use super::super::GoogleOidcConfig;
+
+        fn parse(values: &[(&str, &str)]) -> canopy_core::CanopyResult<Option<GoogleOidcConfig>> {
+            let values: HashMap<_, _> = values
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            GoogleOidcConfig::from_lookup(|key| values.get(key).cloned())
+        }
+
+        #[test]
+        fn remains_disabled_without_client_ids() {
+            assert!(parse(&[]).unwrap().is_none());
+            assert!(
+                parse(&[("CANOPY_GOOGLE_OIDC_CLIENT_IDS", "  ,  ")])
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn accepts_comma_separated_client_ids_with_default_endpoint() {
+            let config = parse(&[(
+                "CANOPY_GOOGLE_OIDC_CLIENT_IDS",
+                "client-1.apps.googleusercontent.com, client-2.apps.googleusercontent.com",
+            )])
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(
+                config.client_ids,
+                vec![
+                    "client-1.apps.googleusercontent.com".to_owned(),
+                    "client-2.apps.googleusercontent.com".to_owned()
+                ]
+            );
+            assert_eq!(
+                config.tokeninfo_url.as_str(),
+                "https://oauth2.googleapis.com/tokeninfo"
+            );
+        }
+
+        #[test]
+        fn rejects_non_https_tokeninfo_endpoint() {
+            assert!(matches!(
+                parse(&[
+                    ("CANOPY_GOOGLE_OIDC_CLIENT_IDS", "client-1"),
+                    (
+                        "CANOPY_GOOGLE_OIDC_TOKENINFO_URL",
+                        "http://example.test/tokeninfo"
+                    ),
+                ]),
                 Err(CanopyError::InvalidArgument(_))
             ));
         }
