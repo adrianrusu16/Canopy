@@ -542,8 +542,11 @@ async fn native_registration_is_pending_and_stores_only_verification_digest() {
     assert_ne!(registered.verification_token_hash, [0; 32]);
     assert!(registered.verification_expires_at_epoch_ms > NOW_MS);
     assert!(!registered.outbox_key_id.is_empty());
-    let payload: EmailOutboxPayload =
-        serde_json::from_slice(&registered.encrypted_outbox_payload).unwrap();
+    let sealed_payload = String::from_utf8_lossy(&registered.encrypted_outbox_payload);
+    assert!(!sealed_payload.contains("ada@example.test"));
+    assert!(!sealed_payload.contains("verification_token"));
+    let payload =
+        EmailOutboxPayload::decode_for_test(&registered.encrypted_outbox_payload).unwrap();
     assert_eq!(payload.email, "ada@example.test");
     assert_eq!(payload.purpose, "email_verification");
     assert_eq!(
@@ -574,8 +577,10 @@ async fn resend_verification_rotates_challenge_for_pending_account_only() {
     assert_ne!(challenge.token_hash, [0; 32]);
     assert!(challenge.expires_at_epoch_ms > NOW_MS);
     assert!(!challenge.outbox_key_id.is_empty());
-    let payload: EmailOutboxPayload =
-        serde_json::from_slice(&challenge.encrypted_outbox_payload).unwrap();
+    let sealed_payload = String::from_utf8_lossy(&challenge.encrypted_outbox_payload);
+    assert!(!sealed_payload.contains("ada@example.test"));
+    assert!(!sealed_payload.contains("verification_token"));
+    let payload = EmailOutboxPayload::decode_for_test(&challenge.encrypted_outbox_payload).unwrap();
     assert_eq!(payload.email, "ada@example.test");
     assert_eq!(payload.purpose, "email_verification");
     assert!(
@@ -664,8 +669,10 @@ async fn request_password_reset_queues_generic_reset_payload() {
     assert_ne!(challenge.token_hash, [0; 32]);
     assert!(challenge.expires_at_epoch_ms > NOW_MS);
     assert!(!challenge.outbox_key_id.is_empty());
-    let payload: EmailOutboxPayload =
-        serde_json::from_slice(&challenge.encrypted_outbox_payload).unwrap();
+    let sealed_payload = String::from_utf8_lossy(&challenge.encrypted_outbox_payload);
+    assert!(!sealed_payload.contains("ada@example.test"));
+    assert!(!sealed_payload.contains("reset_token"));
+    let payload = EmailOutboxPayload::decode_for_test(&challenge.encrypted_outbox_payload).unwrap();
     assert_eq!(payload.purpose, "password_reset");
     assert!(payload.template_variables.contains_key("reset_token"));
 }
