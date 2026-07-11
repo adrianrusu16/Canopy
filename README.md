@@ -697,6 +697,7 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_STREAM_TOKEN_TTL_SECS` | `600` | Positive public capability lifetime in seconds |
 | `CANOPY_STREAM_AUTH_ADDR` | `127.0.0.1:8081` | Private HTTP listener used only by Nginx `auth_request` |
 | `CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64` | unset | Required 32-byte Ed25519 signing key seed for native identity access tokens in PostgreSQL mode |
+| `CANOPY_AUTH_OUTBOX_SEALING_KEY` | dev fallback | Base64-encoded 32-byte AES-GCM key for persisted auth email outbox payloads; configure in non-development deployments |
 | `CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY` | `false` | Explicit local-development escape hatch for generated native identity access-token keys |
 | `CANOPY_IDENTITY_ACCESS_TOKEN_ISSUER` | `canopy` | Issuer claim for native identity access tokens |
 | `CANOPY_IDENTITY_ACCESS_TOKEN_AUDIENCE` | `pandawave` | Audience claim for native identity access tokens |
