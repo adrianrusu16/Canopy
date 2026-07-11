@@ -100,10 +100,6 @@ pub(crate) async fn extract_durable_principal(
     })
 }
 
-pub(crate) fn not_implemented(operation: &'static str) -> tonic::Status {
-    tonic::Status::unimplemented(format!("{operation} adapter migration is in progress"))
-}
-
 const DEFAULT_PAGE_SIZE: u32 = 20;
 const MAX_PAGE_SIZE: u32 = 100;
 

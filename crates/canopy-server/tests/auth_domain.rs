@@ -803,9 +803,9 @@ async fn password_login_records_failed_attempts_and_blocks_limited_bucket() {
         },
         StoredAuthenticatedSession { account, session },
     ));
-    let service = service(repo.clone());
+    let auth_service = service(repo.clone());
 
-    let error = service
+    let error = auth_service
         .login_password(LoginPasswordCommand {
             email: "ADA@example.test".into(),
             password: "wrong horse battery staple".into(),

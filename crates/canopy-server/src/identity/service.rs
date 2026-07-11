@@ -474,23 +474,23 @@ impl IdentityService {
             )?));
         }
 
-        if let Some(email) = verified_email.as_deref() {
-            if let Some(account) = self.repository.account_by_primary_email(email).await? {
-                let link_payload = GoogleLinkChallengePayload::from_identity(&identity).seal()?;
-                let link_token = OpaqueToken::generate();
-                self.repository
-                    .create_google_link_challenge(CreateGoogleLinkChallenge {
-                        account_id: account.id,
-                        token_hash: *TokenDigest::from_token(&link_token).as_bytes(),
-                        identity,
-                        expires_at_epoch_ms: now + GOOGLE_CHALLENGE_TTL_MS,
-                        encrypted_payload: link_payload,
-                    })
-                    .await?;
-                return Ok(GoogleLoginOutcome::AccountLinkRequired {
-                    link_challenge_id: link_token.into_string(),
-                });
-            }
+        if let Some(email) = verified_email.as_deref()
+            && let Some(account) = self.repository.account_by_primary_email(email).await?
+        {
+            let link_payload = GoogleLinkChallengePayload::from_identity(&identity).seal()?;
+            let link_token = OpaqueToken::generate();
+            self.repository
+                .create_google_link_challenge(CreateGoogleLinkChallenge {
+                    account_id: account.id,
+                    token_hash: *TokenDigest::from_token(&link_token).as_bytes(),
+                    identity,
+                    expires_at_epoch_ms: now + GOOGLE_CHALLENGE_TTL_MS,
+                    encrypted_payload: link_payload,
+                })
+                .await?;
+            return Ok(GoogleLoginOutcome::AccountLinkRequired {
+                link_challenge_id: link_token.into_string(),
+            });
         }
 
         let refresh_token = OpaqueToken::generate();

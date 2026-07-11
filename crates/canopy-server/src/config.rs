@@ -345,7 +345,7 @@ mod tests {
 
     use canopy_core::CanopyError;
 
-    use super::{GoogleOidcConfig, StreamConfig};
+    use super::StreamConfig;
 
     fn parse(values: &[(&str, &str)]) -> canopy_core::CanopyResult<StreamConfig> {
         let values: HashMap<_, _> = values
