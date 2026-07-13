@@ -103,6 +103,15 @@ impl EmailOutboxPayload {
         })
     }
 
+    /// Opens a persisted payload only when its stored key identifier is supported.
+    pub fn open_with_key_id(key_id: &str, bytes: &[u8]) -> CanopyResult<Self> {
+        if key_id != OUTBOX_KEY_ID {
+            return Err(CanopyError::InvalidArgument(
+                "unsupported auth outbox key id".into(),
+            ));
+        }
+        Self::open(bytes)
+    }
     pub fn open(bytes: &[u8]) -> CanopyResult<Self> {
         let (version, rest) = bytes
             .split_first()
@@ -190,5 +199,16 @@ mod tests {
             opened.template_variables["verification_token"],
             "secret-token"
         );
+    }
+    #[test]
+    fn opening_payload_rejects_unknown_key_id() {
+        let sealed =
+            EmailOutboxPayload::email_verification("ada@example.test".into(), "secret-token", 42)
+                .seal()
+                .unwrap();
+
+        let error = EmailOutboxPayload::open_with_key_id("unknown-key", sealed.bytes())
+            .expect_err("unknown key id should fail");
+        assert!(matches!(error, CanopyError::InvalidArgument(_)));
     }
 }

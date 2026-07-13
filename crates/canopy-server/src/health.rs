@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::identity::{EmailDeliveryReadiness, EmailDeliveryState};
+
 #[cfg(feature = "pg")]
 use std::sync::Arc;
 
@@ -59,6 +61,7 @@ pub struct HealthService {
     #[cfg(feature = "pg")]
     db_pool: Option<Arc<sqlx::PgPool>>,
     media_root: Option<PathBuf>,
+    email_delivery: Option<EmailDeliveryReadiness>,
 }
 
 impl HealthService {
@@ -68,21 +71,28 @@ impl HealthService {
             #[cfg(feature = "pg")]
             db_pool: None,
             media_root: None,
+            email_delivery: None,
         }
     }
 
-    /// Adds the managed media root whose `library/` directory must be readable.
+    /// Adds the managed media root whose library directory must be readable.
     pub fn with_media_root(mut self, media_root: PathBuf) -> Self {
         self.media_root = Some(media_root);
         self
     }
 
+    /// Adds authentication email delivery readiness.
+    pub fn with_email_delivery(mut self, readiness: EmailDeliveryReadiness) -> Self {
+        self.email_delivery = Some(readiness);
+        self
+    }
     #[cfg(feature = "pg")]
     /// Creates a new health service that checks PostgreSQL connectivity.
     pub fn with_db(pool: Arc<sqlx::PgPool>) -> Self {
         Self {
             db_pool: Some(pool),
             media_root: None,
+            email_delivery: None,
         }
     }
 
@@ -99,6 +109,10 @@ impl HealthService {
             dependencies.push(check_media_library(media_root).await);
         }
 
+        if let Some(readiness) = &self.email_delivery {
+            dependencies.push(check_email_delivery(readiness));
+        }
+
         let status = aggregate(&dependencies);
 
         HealthStatus {
@@ -110,6 +124,19 @@ impl HealthService {
     }
 }
 
+fn check_email_delivery(readiness: &EmailDeliveryReadiness) -> DependencyStatus {
+    let snapshot = readiness.snapshot();
+    let status = match snapshot.state {
+        EmailDeliveryState::Healthy => HealthState::Healthy,
+        EmailDeliveryState::Degraded => HealthState::Degraded,
+        EmailDeliveryState::Unhealthy => HealthState::Unhealthy,
+    };
+    DependencyStatus {
+        name: "auth_email_delivery".into(),
+        status,
+        message: snapshot.message.into(),
+    }
+}
 async fn check_media_library(media_root: &Path) -> DependencyStatus {
     let library = media_root.join("library");
     let result = async {
@@ -199,5 +226,22 @@ mod tests {
             message: "down".to_string(),
         }]);
         assert_eq!(status, HealthState::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn disabled_email_delivery_is_degraded() {
+        let health = HealthService::new()
+            .with_email_delivery(crate::identity::EmailDeliveryReadiness::disabled());
+        let status = health.check().await;
+        assert_eq!(status.status, HealthState::Degraded);
+        assert_eq!(status.dependencies[0].name, "auth_email_delivery");
+    }
+
+    #[tokio::test]
+    async fn smtp_failure_is_unhealthy() {
+        let readiness = crate::identity::EmailDeliveryReadiness::configured();
+        readiness.mark_unhealthy("SMTP connectivity failed");
+        let status = HealthService::new().with_email_delivery(readiness);
+        assert_eq!(status.check().await.status, HealthState::Unhealthy);
     }
 }

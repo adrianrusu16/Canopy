@@ -30,3 +30,33 @@ fn identity_migration_defines_lifecycle_and_secret_storage_constraints() {
         assert!(sql.contains(required), "migration is missing {required}");
     }
 }
+#[test]
+fn auth_outbox_delivery_migration_supports_leased_delivery() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/20260711000001_auth_outbox_delivery.sql"
+    );
+    let sql = std::fs::read_to_string(path).expect("auth outbox delivery migration should exist");
+
+    for required in [
+        "ALTER TABLE auth_outbox",
+        "ALTER COLUMN encrypted_payload DROP NOT NULL",
+        "lease_token UUID",
+        "lease_expires_at TIMESTAMPTZ",
+        "failed_at TIMESTAMPTZ",
+        "last_error_kind VARCHAR(64)",
+        "auth_outbox_payload_lifecycle_ck",
+        "delivered_at IS NOT NULL",
+        "encrypted_payload IS NULL",
+        "auth_outbox_lease_ck",
+        "auth_outbox_terminal_ck",
+        "auth_outbox_error_kind_ck",
+        "DROP INDEX auth_outbox_pending_idx",
+        "WHERE delivered_at IS NULL AND failed_at IS NULL",
+    ] {
+        assert!(
+            sql.contains(required),
+            "auth outbox delivery migration is missing {required}"
+        );
+    }
+}

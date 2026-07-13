@@ -9,6 +9,8 @@ mod memory;
 #[cfg(feature = "pg")]
 mod pg;
 #[cfg(feature = "pg")]
+mod pg_auth_outbox;
+#[cfg(feature = "pg")]
 mod pg_identity;
 #[cfg(feature = "pg")]
 mod pg_media_import;
@@ -28,6 +30,8 @@ pub use pg::{
     PgLikeRepository, PgPlaybackHistoryRepository, PgPlaylistRepository, PgPreferencesRepository,
     PgProfileRepository,
 };
+#[cfg(feature = "pg")]
+pub use pg_auth_outbox::PgAuthOutboxRepository;
 #[cfg(feature = "pg")]
 pub use pg_identity::PgIdentityRepository;
 #[cfg(feature = "pg")]

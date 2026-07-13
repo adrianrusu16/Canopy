@@ -10,7 +10,7 @@ This document describes the current Canopy architecture and identifies the remai
 | ------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
 | Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (BSR SDK facade), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (bounded gRPC adapters + `jade_store`). |
 | gRPC server (`tonic`)     | 🟡 Partial     | Eight bounded `canopy.v1` services share one listener. Catalog, playback-source resolution, discovery, system, profile, history, and collection mutations use the audited BSR contract; remaining collection list/playlist resource work is explicit below. |
-| Configuration             | ✅ Implemented | Env-driven configuration validates the public stream URL, 32-byte capability secret, private authorization bind, PostgreSQL URL, and managed media root before listeners start. |
+| Configuration             | ✅ Implemented | Env-driven configuration validates streaming, identity keys, TLS-only SMTP delivery, PostgreSQL, and managed media before listeners start. |
 | API contract / BSR        | ✅ Canopy migrated | Private module uf.build/pandawave/canopy-api commit 8e44e0fa997a4160bfefd5d68599de1b; canopy-proto pins immutable Prost/Tonic SDK versions. PandaEngine migration and the 0.1.0 release label remain. |
 | Catalog service           | Partial | Public repository paths are explicit; PostgreSQL and in-memory adapters isolate `release_safe` media from owner-scoped personal media. |
 | Player/session handling   | ✅ Engine-owned | Canopy owns playback-source authorization only. Play/pause/seek/speed/queue/session state belongs to PandaEngine and no backend session repository or control RPC remains. |
@@ -22,7 +22,7 @@ This document describes the current Canopy architecture and identifies the remai
 | Persistence (PostgreSQL)  | Partial | Typed adapters cover ownership, media policy, local-import transactions, checksum deduplication, and fail-closed promotion. |
 | Music storage             | ✅ Implemented | MP3 and artwork import into content-addressed local storage; bundled Nginx authorizes through Canopy and serves byte ranges from an internal read-only location. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
-| Health checks             | ✅ Implemented | Readiness checks PostgreSQL and the managed `library/` directory. Nginx has a separate token-free container health endpoint. |
+| Health checks             | ✅ Implemented | Readiness checks PostgreSQL, the managed library directory, and authentication email delivery. SMTP outages affect readiness but not liveness or unrelated RPCs. |
 | CI / Verification         | ✅ Implemented | GitHub Actions gates `master` with fmt, all-feature Clippy, default tests, a fail-closed disposable PostgreSQL integration harness, and a release build. Proto compatibility gates are still planned. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
@@ -304,6 +304,8 @@ This proto is the single source of truth for the wire contract between PandaEngi
 Canopy is designed to let anonymous users browse, search, and play music without logging in. Anonymous `session_id` values are operational playback state only; they are not users and must not own durable backend history, libraries, likes, preferences, or playlists. The client is responsible for any anonymous local cache.
 
 Native identity is now separate from profile/app state. `AuthService.RegisterPassword` creates a pending account and stores only hashed credentials and hashed challenge tokens. `VerifyEmail` atomically consumes the single-use email-verification challenge, activates the account, creates the profile row, and issues the first access/refresh token pair. `LoginPassword` issues later device sessions for active accounts, and `RefreshSession` transactionally rotates refresh tokens; reuse of a consumed refresh token revokes the session family.
+
+Registration, verification resend, and password-reset requests transactionally enqueue authenticated-encrypted email payloads. A supervised PostgreSQL worker leases committed rows and delivers them through TLS-only SMTP with at-least-once semantics. Deterministic message IDs reduce duplicate presentation, challenges remain single-use, and successful delivery clears ciphertext. SMTP outages make email readiness unhealthy without affecting liveness or unrelated RPCs; the development-only undelivered-email escape hatch reports degraded readiness.
 
 Identity access tokens are sent to implemented AuthService protected calls as `authorization: Bearer <access-token>`. `Logout`, `LogoutAll`, `ListSessions`, `RevokeSession`, `ChangePassword`, `LinkGoogle`, `UnlinkGoogle`, `GetAccount`, and `DeleteAccount` verify the Ed25519 access token and recheck the referenced session in PostgreSQL before reading or mutating account/session state. Revocation is idempotent, account-scoped, consumes outstanding refresh tokens, and is checked on refresh and protected AuthService calls. Google login verifies ID tokens when `CANOPY_GOOGLE_OIDC_CLIENT_IDS` is configured; otherwise it fails closed.
 
@@ -697,7 +699,23 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_STREAM_TOKEN_TTL_SECS` | `600` | Positive public capability lifetime in seconds |
 | `CANOPY_STREAM_AUTH_ADDR` | `127.0.0.1:8081` | Private HTTP listener used only by Nginx `auth_request` |
 | `CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64` | unset | Required 32-byte Ed25519 signing key seed for native identity access tokens in PostgreSQL mode |
-| `CANOPY_AUTH_OUTBOX_SEALING_KEY` | dev fallback | Base64-encoded 32-byte AES-GCM key for persisted auth email outbox payloads; configure in non-development deployments |
+| `CANOPY_AUTH_OUTBOX_SEALING_KEY` | unset | Required with SMTP: base64-encoded 32-byte AES-GCM key for persisted authentication email payloads |
+| `CANOPY_SMTP_HOST` | unset | SMTP relay host; required unless the development-only undelivered-email escape hatch is enabled |
+| `CANOPY_SMTP_PORT` | `465` or `587` | Relay port; defaults to 465 for implicit TLS and 587 for STARTTLS |
+| `CANOPY_SMTP_TLS_MODE` | `implicit` | `implicit` or required `starttls`; plaintext SMTP is rejected |
+| `CANOPY_SMTP_USERNAME` | unset | Required SMTP authentication username |
+| `CANOPY_SMTP_PASSWORD` | unset | Required SMTP authentication password |
+| `CANOPY_SMTP_FROM_ADDRESS` | unset | Required validated sender address |
+| `CANOPY_SMTP_FROM_NAME` | unset | Required sender display name |
+| `CANOPY_AUTH_PUBLIC_BASE_URL` | unset | Required base URL for verification/reset links; HTTPS except loopback development |
+| `CANOPY_SMTP_TIMEOUT_SECS` | `30` | Positive SMTP connection/send timeout |
+| `CANOPY_AUTH_EMAIL_POLL_INTERVAL_SECS` | `2` | Positive worker poll interval |
+| `CANOPY_AUTH_EMAIL_LEASE_SECS` | `60` | Positive row lease; must be at least the SMTP timeout |
+| `CANOPY_AUTH_EMAIL_BATCH_SIZE` | `20` | Maximum rows claimed per pass |
+| `CANOPY_AUTH_EMAIL_MAX_ATTEMPTS` | `8` | Maximum delivery attempts before terminal failure |
+| `CANOPY_AUTH_EMAIL_INITIAL_RETRY_SECS` | `5` | Initial deterministic-jitter retry delay |
+| `CANOPY_AUTH_EMAIL_MAX_RETRY_SECS` | `900` | Retry delay cap; must be at least the initial delay |
+| `CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL` | `false` | Development-only escape hatch that leaves messages queued and reports degraded readiness |
 | `CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY` | `false` | Explicit local-development escape hatch for generated native identity access-token keys |
 | `CANOPY_IDENTITY_ACCESS_TOKEN_ISSUER` | `canopy` | Issuer claim for native identity access tokens |
 | `CANOPY_IDENTITY_ACCESS_TOKEN_AUDIENCE` | `pandawave` | Audience claim for native identity access tokens |
@@ -744,6 +762,8 @@ cargo run -p canopy-server --bin canopy
 # Use CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64 for real deployments.
 export CANOPY_DATABASE_URL=postgres://canopy:canopy@localhost:5432/canopy
 export CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY=true
+# Development only: keep auth messages queued without SMTP.
+export CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL=true
 cargo run -p canopy-server --features pg --bin canopy
 ```
 

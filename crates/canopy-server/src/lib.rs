@@ -116,9 +116,10 @@ fn shutdown_channel() -> (
     tokio::sync::watch::Sender<bool>,
     tokio::sync::watch::Receiver<bool>,
     tokio::sync::watch::Receiver<bool>,
+    tokio::sync::watch::Receiver<bool>,
 ) {
     let (sender, receiver) = tokio::sync::watch::channel(false);
-    (sender, receiver.clone(), receiver)
+    (sender, receiver.clone(), receiver.clone(), receiver)
 }
 
 async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
@@ -182,6 +183,8 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let playlist_repo: Arc<dyn canopy_core::PlaylistRepository>;
     #[cfg(feature = "pg")]
     let identity_service: Arc<identity::IdentityService>;
+    #[cfg(feature = "pg")]
+    let email_worker: Option<identity::AuthEmailWorker>;
     let health: HealthService;
 
     #[cfg(feature = "pg")]
@@ -263,7 +266,31 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     ));
                 }
                 identity_service = Arc::new(service);
-                health = HealthService::with_db(pool).with_media_root(config.media_root.clone());
+                let (email_readiness, configured_email_worker) =
+                    if let Some(smtp) = config.auth_email.smtp.as_ref() {
+                        let readiness = identity::EmailDeliveryReadiness::configured();
+                        let renderer = identity::EmailRenderer::new(
+                            smtp.public_base_url.clone(),
+                            &smtp.from_address,
+                        )?;
+                        let sender = Arc::new(identity::SmtpEmailSender::new(smtp)?);
+                        let repository =
+                            Arc::new(jade_store::PgAuthOutboxRepository::new((*pool).clone()));
+                        let worker = identity::AuthEmailWorker::new(
+                            repository,
+                            sender,
+                            renderer,
+                            config.auth_email.worker.clone(),
+                            readiness.clone(),
+                        );
+                        (readiness, Some(worker))
+                    } else {
+                        (identity::EmailDeliveryReadiness::disabled(), None)
+                    };
+                email_worker = configured_email_worker;
+                health = HealthService::with_db(pool)
+                    .with_media_root(config.media_root.clone())
+                    .with_email_delivery(email_readiness);
             }
             Err(error) => return Err(Box::new(error)),
         }
@@ -283,7 +310,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         like_repo = Arc::new(InMemoryLikeStore::default());
         preferences_repo = Arc::new(InMemoryPreferencesStore::default());
         playlist_repo = Arc::new(InMemoryPlaylistStore::default());
-        health = HealthService::new().with_media_root(config.media_root.clone());
+        health = HealthService::new()
+            .with_media_root(config.media_root.clone())
+            .with_email_delivery(identity::EmailDeliveryReadiness::disabled());
     }
 
     // Domain services over the ports.
@@ -351,7 +380,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     info!(grpc_addr = %config.grpc_addr, "Public gRPC listener ready");
     info!(stream_auth_addr = %config.stream.auth_addr, "Private stream authorization listener ready");
 
-    let (shutdown_sender, grpc_shutdown, http_shutdown) = shutdown_channel();
+    let (shutdown_sender, grpc_shutdown, http_shutdown, email_shutdown) = shutdown_channel();
     let shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let signal_state = shutting_down.clone();
     tokio::spawn(async move {
@@ -392,7 +421,27 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         listener_result("stream authorization", &http_state, result)
     };
 
-    tokio::try_join!(grpc, http)?;
+    #[cfg(feature = "pg")]
+    let email = async move {
+        if let Some(worker) = email_worker {
+            match tokio::spawn(worker.run(email_shutdown)).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err(std::io::Error::other("auth email worker failed")),
+                Err(_) => Err(std::io::Error::other("auth email worker task failed")),
+            }
+        } else {
+            wait_for_shutdown(email_shutdown).await;
+            Ok(())
+        }
+    };
+
+    #[cfg(not(feature = "pg"))]
+    let email = async move {
+        wait_for_shutdown(email_shutdown).await;
+        Ok::<(), std::io::Error>(())
+    };
+
+    tokio::try_join!(grpc, http, email)?;
     Ok(())
 }
 
@@ -412,12 +461,16 @@ mod wiring_tests {
     }
 
     #[tokio::test]
-    async fn shutdown_notification_reaches_both_listeners() {
-        let (sender, grpc, http) = shutdown_channel();
+    async fn shutdown_notification_reaches_all_runtime_tasks() {
+        let (sender, grpc, http, email) = shutdown_channel();
         sender.send(true).unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            tokio::join!(wait_for_shutdown(grpc), wait_for_shutdown(http));
+            tokio::join!(
+                wait_for_shutdown(grpc),
+                wait_for_shutdown(http),
+                wait_for_shutdown(email)
+            );
         })
         .await
         .unwrap();

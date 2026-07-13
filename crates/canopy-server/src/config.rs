@@ -82,6 +82,255 @@ impl GoogleOidcConfig {
         }))
     }
 }
+/// TLS policy for the SMTP relay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmtpTlsMode {
+    /// SMTP over an implicit TLS connection.
+    Implicit,
+    /// Plain connection upgraded with required STARTTLS before authentication.
+    StartTls,
+}
+
+/// Validated SMTP connection and message-origin configuration.
+#[derive(Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub tls_mode: SmtpTlsMode,
+    pub username: String,
+    pub password: String,
+    pub from_address: String,
+    pub from_name: String,
+    pub public_base_url: reqwest::Url,
+    pub timeout: std::time::Duration,
+}
+
+/// Polling, leasing, and retry limits for authentication email delivery.
+#[derive(Clone, Debug)]
+pub struct AuthEmailWorkerConfig {
+    pub poll_interval: std::time::Duration,
+    pub lease_duration: std::time::Duration,
+    pub batch_size: u32,
+    pub max_attempts: u32,
+    pub initial_retry_delay: std::time::Duration,
+    pub max_retry_delay: std::time::Duration,
+}
+
+/// Fail-closed authentication email delivery configuration.
+#[derive(Clone)]
+pub struct AuthEmailConfig {
+    pub allow_undelivered_email: bool,
+    pub outbox_sealing_key_base64: Option<String>,
+    pub smtp: Option<SmtpConfig>,
+    pub worker: AuthEmailWorkerConfig,
+}
+
+impl AuthEmailConfig {
+    const DEFAULT_SMTP_TIMEOUT_SECS: u64 = 30;
+    const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
+    const DEFAULT_LEASE_SECS: u64 = 60;
+    const DEFAULT_BATCH_SIZE: u32 = 20;
+    const DEFAULT_MAX_ATTEMPTS: u32 = 8;
+    const DEFAULT_INITIAL_RETRY_SECS: u64 = 5;
+    const DEFAULT_MAX_RETRY_SECS: u64 = 15 * 60;
+    #[cfg(not(feature = "pg"))]
+    fn disabled_for_non_pg() -> Self {
+        Self {
+            allow_undelivered_email: true,
+            outbox_sealing_key_base64: None,
+            smtp: None,
+            worker: AuthEmailWorkerConfig {
+                poll_interval: std::time::Duration::from_secs(Self::DEFAULT_POLL_INTERVAL_SECS),
+                lease_duration: std::time::Duration::from_secs(Self::DEFAULT_LEASE_SECS),
+                batch_size: Self::DEFAULT_BATCH_SIZE,
+                max_attempts: Self::DEFAULT_MAX_ATTEMPTS,
+                initial_retry_delay: std::time::Duration::from_secs(
+                    Self::DEFAULT_INITIAL_RETRY_SECS,
+                ),
+                max_retry_delay: std::time::Duration::from_secs(Self::DEFAULT_MAX_RETRY_SECS),
+            },
+        }
+    }
+
+    /// Builds fail-closed SMTP and outbox-worker configuration.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> canopy_core::CanopyResult<Self> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use canopy_core::CanopyError;
+
+        let allow_undelivered_email = lookup("CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL")
+            .map(|value| parse_bool("CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL", &value))
+            .transpose()?
+            .unwrap_or(false);
+
+        let outbox_sealing_key_base64 = lookup("CANOPY_AUTH_OUTBOX_SEALING_KEY")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if let Some(encoded) = outbox_sealing_key_base64.as_deref() {
+            let decoded = STANDARD.decode(encoded).map_err(|_| {
+                CanopyError::InvalidArgument(
+                    "CANOPY_AUTH_OUTBOX_SEALING_KEY must be valid base64".into(),
+                )
+            })?;
+            if decoded.len() != 32 {
+                return Err(CanopyError::InvalidArgument(
+                    "CANOPY_AUTH_OUTBOX_SEALING_KEY must decode to 32 bytes".into(),
+                ));
+            }
+        }
+
+        let smtp_present = [
+            "CANOPY_SMTP_HOST",
+            "CANOPY_SMTP_PORT",
+            "CANOPY_SMTP_TLS_MODE",
+            "CANOPY_SMTP_USERNAME",
+            "CANOPY_SMTP_PASSWORD",
+            "CANOPY_SMTP_FROM_ADDRESS",
+            "CANOPY_SMTP_FROM_NAME",
+            "CANOPY_AUTH_PUBLIC_BASE_URL",
+            "CANOPY_SMTP_TIMEOUT_SECS",
+        ]
+        .iter()
+        .any(|key| lookup(key).is_some_and(|value| !value.trim().is_empty()));
+
+        let smtp_timeout_secs = lookup_positive_u64(
+            &lookup,
+            "CANOPY_SMTP_TIMEOUT_SECS",
+            Self::DEFAULT_SMTP_TIMEOUT_SECS,
+        )?;
+        let worker = AuthEmailWorkerConfig {
+            poll_interval: std::time::Duration::from_secs(lookup_positive_u64(
+                &lookup,
+                "CANOPY_AUTH_EMAIL_POLL_INTERVAL_SECS",
+                Self::DEFAULT_POLL_INTERVAL_SECS,
+            )?),
+            lease_duration: std::time::Duration::from_secs(lookup_positive_u64(
+                &lookup,
+                "CANOPY_AUTH_EMAIL_LEASE_SECS",
+                Self::DEFAULT_LEASE_SECS,
+            )?),
+            batch_size: lookup_positive_u32(
+                &lookup,
+                "CANOPY_AUTH_EMAIL_BATCH_SIZE",
+                Self::DEFAULT_BATCH_SIZE,
+            )?,
+            max_attempts: lookup_positive_u32(
+                &lookup,
+                "CANOPY_AUTH_EMAIL_MAX_ATTEMPTS",
+                Self::DEFAULT_MAX_ATTEMPTS,
+            )?,
+            initial_retry_delay: std::time::Duration::from_secs(lookup_positive_u64(
+                &lookup,
+                "CANOPY_AUTH_EMAIL_INITIAL_RETRY_SECS",
+                Self::DEFAULT_INITIAL_RETRY_SECS,
+            )?),
+            max_retry_delay: std::time::Duration::from_secs(lookup_positive_u64(
+                &lookup,
+                "CANOPY_AUTH_EMAIL_MAX_RETRY_SECS",
+                Self::DEFAULT_MAX_RETRY_SECS,
+            )?),
+        };
+        if worker.lease_duration < std::time::Duration::from_secs(smtp_timeout_secs) {
+            return Err(CanopyError::InvalidArgument(
+                "CANOPY_AUTH_EMAIL_LEASE_SECS must be at least CANOPY_SMTP_TIMEOUT_SECS".into(),
+            ));
+        }
+        if worker.initial_retry_delay > worker.max_retry_delay {
+            return Err(CanopyError::InvalidArgument(
+                "CANOPY_AUTH_EMAIL_INITIAL_RETRY_SECS must not exceed CANOPY_AUTH_EMAIL_MAX_RETRY_SECS".into(),
+            ));
+        }
+
+        let smtp = if smtp_present {
+            let host = required_lookup(&lookup, "CANOPY_SMTP_HOST")?;
+            let username = required_lookup(&lookup, "CANOPY_SMTP_USERNAME")?;
+            let password = required_lookup(&lookup, "CANOPY_SMTP_PASSWORD")?;
+            let from_address = required_lookup(&lookup, "CANOPY_SMTP_FROM_ADDRESS")?;
+            from_address.parse::<lettre::Address>().map_err(|_| {
+                CanopyError::InvalidArgument(
+                    "CANOPY_SMTP_FROM_ADDRESS must be a valid email address".into(),
+                )
+            })?;
+            let from_name = required_lookup(&lookup, "CANOPY_SMTP_FROM_NAME")?;
+            let public_base_url = required_lookup(&lookup, "CANOPY_AUTH_PUBLIC_BASE_URL")?;
+            let public_base_url = reqwest::Url::parse(&public_base_url).map_err(|error| {
+                CanopyError::InvalidArgument(format!(
+                    "invalid CANOPY_AUTH_PUBLIC_BASE_URL: {error}"
+                ))
+            })?;
+            let loopback_http = public_base_url.scheme() == "http"
+                && matches!(public_base_url.host_str(), Some("localhost" | "127.0.0.1"));
+            if public_base_url.scheme() != "https" && !loopback_http {
+                return Err(CanopyError::InvalidArgument(
+                    "CANOPY_AUTH_PUBLIC_BASE_URL must use HTTPS outside loopback".into(),
+                ));
+            }
+
+            let tls_mode = match lookup("CANOPY_SMTP_TLS_MODE")
+                .unwrap_or_else(|| "implicit".into())
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "implicit" => SmtpTlsMode::Implicit,
+                "starttls" => SmtpTlsMode::StartTls,
+                _ => {
+                    return Err(CanopyError::InvalidArgument(
+                        "CANOPY_SMTP_TLS_MODE must be implicit or starttls".into(),
+                    ));
+                }
+            };
+            let default_port = match tls_mode {
+                SmtpTlsMode::Implicit => 465,
+                SmtpTlsMode::StartTls => 587,
+            };
+            let port = lookup("CANOPY_SMTP_PORT")
+                .unwrap_or_else(|| default_port.to_string())
+                .parse::<u16>()
+                .map_err(|_| {
+                    CanopyError::InvalidArgument(
+                        "CANOPY_SMTP_PORT must be a positive integer".into(),
+                    )
+                })?;
+            if port == 0 {
+                return Err(CanopyError::InvalidArgument(
+                    "CANOPY_SMTP_PORT must be a positive integer".into(),
+                ));
+            }
+            if outbox_sealing_key_base64.is_none() {
+                return Err(CanopyError::InvalidArgument(
+                    "CANOPY_AUTH_OUTBOX_SEALING_KEY is required when SMTP delivery is enabled"
+                        .into(),
+                ));
+            }
+
+            Some(SmtpConfig {
+                host,
+                port,
+                tls_mode,
+                username,
+                password,
+                from_address,
+                from_name,
+                public_base_url,
+                timeout: std::time::Duration::from_secs(smtp_timeout_secs),
+            })
+        } else if allow_undelivered_email {
+            None
+        } else {
+            return Err(CanopyError::InvalidArgument(
+                "CANOPY_SMTP_HOST is required unless CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL=true"
+                    .into(),
+            ));
+        };
+
+        Ok(Self {
+            allow_undelivered_email,
+            outbox_sealing_key_base64,
+            smtp,
+            worker,
+        })
+    }
+}
 impl IdentityTokenConfig {
     const DEFAULT_ISSUER: &'static str = "canopy";
     const DEFAULT_AUDIENCE: &'static str = "pandawave";
@@ -117,7 +366,7 @@ impl IdentityTokenConfig {
         }
 
         let allow_ephemeral_dev_key = lookup("CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY")
-            .map(|value| parse_bool(&value))
+            .map(|value| parse_bool("CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY", &value))
             .transpose()?
             .unwrap_or(false);
         let signing_key_base64 = lookup("CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64")
@@ -162,16 +411,64 @@ impl IdentityTokenConfig {
     }
 }
 
-fn parse_bool(value: &str) -> canopy_core::CanopyResult<bool> {
+fn parse_bool(key: &str, value: &str) -> canopy_core::CanopyResult<bool> {
     use canopy_core::CanopyError;
 
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" => Ok(true),
         "false" | "0" | "no" => Ok(false),
-        _ => Err(CanopyError::InvalidArgument(
-            "CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY must be true or false".into(),
-        )),
+        _ => Err(CanopyError::InvalidArgument(format!(
+            "{key} must be true or false"
+        ))),
     }
+}
+
+fn required_lookup(
+    lookup: &impl Fn(&str) -> Option<String>,
+    key: &str,
+) -> canopy_core::CanopyResult<String> {
+    lookup(key)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| canopy_core::CanopyError::InvalidArgument(format!("{key} is required")))
+}
+
+fn lookup_positive_u64(
+    lookup: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: u64,
+) -> canopy_core::CanopyResult<u64> {
+    let value = lookup(key)
+        .unwrap_or_else(|| default.to_string())
+        .parse::<u64>()
+        .map_err(|_| {
+            canopy_core::CanopyError::InvalidArgument(format!("{key} must be a positive integer"))
+        })?;
+    if value == 0 {
+        return Err(canopy_core::CanopyError::InvalidArgument(format!(
+            "{key} must be a positive integer"
+        )));
+    }
+    Ok(value)
+}
+
+fn lookup_positive_u32(
+    lookup: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: u32,
+) -> canopy_core::CanopyResult<u32> {
+    let value = lookup(key)
+        .unwrap_or_else(|| default.to_string())
+        .parse::<u32>()
+        .map_err(|_| {
+            canopy_core::CanopyError::InvalidArgument(format!("{key} must be a positive integer"))
+        })?;
+    if value == 0 {
+        return Err(canopy_core::CanopyError::InvalidArgument(format!(
+            "{key} must be a positive integer"
+        )));
+    }
+    Ok(value)
 }
 
 impl StreamConfig {
@@ -260,6 +557,8 @@ pub struct Config {
     pub identity_tokens: IdentityTokenConfig,
     /// Optional Google OIDC ID-token verifier configuration.
     pub google_oidc: Option<GoogleOidcConfig>,
+    /// Authentication email delivery and SMTP configuration.
+    pub auth_email: AuthEmailConfig,
     /// Root containing Canopy's managed `library/` directory.
     pub media_root: PathBuf,
 }
@@ -317,6 +616,10 @@ impl Config {
         let stream = StreamConfig::from_lookup(|key| env::var(key).ok())?;
         let identity_tokens = IdentityTokenConfig::from_lookup(|key| env::var(key).ok())?;
         let google_oidc = GoogleOidcConfig::from_lookup(|key| env::var(key).ok())?;
+        #[cfg(feature = "pg")]
+        let auth_email = AuthEmailConfig::from_lookup(|key| env::var(key).ok())?;
+        #[cfg(not(feature = "pg"))]
+        let auth_email = AuthEmailConfig::disabled_for_non_pg();
         let media_root = env::var("CANOPY_MEDIA_ROOT")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -334,6 +637,7 @@ impl Config {
             stream,
             identity_tokens,
             google_oidc,
+            auth_email,
             media_root,
         })
     }
@@ -568,6 +872,110 @@ mod tests {
                 )]),
                 Err(CanopyError::InvalidArgument(_))
             ));
+        }
+    }
+    mod auth_email {
+        use std::collections::HashMap;
+
+        use super::super::{AuthEmailConfig, SmtpTlsMode};
+
+        fn parse(values: &[(&str, &str)]) -> canopy_core::CanopyResult<AuthEmailConfig> {
+            let values: HashMap<_, _> = values
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            AuthEmailConfig::from_lookup(|key| values.get(key).cloned())
+        }
+
+        fn required_smtp() -> Vec<(&'static str, &'static str)> {
+            vec![
+                ("CANOPY_SMTP_HOST", "smtp.example.test"),
+                ("CANOPY_SMTP_TLS_MODE", "starttls"),
+                ("CANOPY_SMTP_USERNAME", "canopy"),
+                ("CANOPY_SMTP_PASSWORD", "test-password"),
+                ("CANOPY_SMTP_FROM_ADDRESS", "auth@example.test"),
+                ("CANOPY_SMTP_FROM_NAME", "Canopy"),
+                ("CANOPY_AUTH_PUBLIC_BASE_URL", "https://app.example.test"),
+                (
+                    "CANOPY_AUTH_OUTBOX_SEALING_KEY",
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                ),
+            ]
+        }
+
+        #[test]
+        fn smtp_is_required_by_default() {
+            let error = parse(&[]).err().expect("missing SMTP should fail");
+            assert!(error.to_string().contains("CANOPY_SMTP_HOST"));
+        }
+
+        #[test]
+        fn explicit_escape_hatch_allows_missing_smtp() {
+            let config = parse(&[("CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL", "true")]).unwrap();
+
+            assert!(config.allow_undelivered_email);
+            assert!(config.smtp.is_none());
+        }
+
+        #[test]
+        fn partial_smtp_configuration_is_rejected() {
+            let error = parse(&[
+                ("CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL", "true"),
+                ("CANOPY_SMTP_HOST", "smtp.example.test"),
+            ])
+            .err()
+            .expect("partial SMTP configuration should fail");
+
+            assert!(error.to_string().contains("CANOPY_SMTP_USERNAME"));
+        }
+
+        #[test]
+        fn complete_starttls_configuration_is_accepted() {
+            let config = parse(&required_smtp()).unwrap();
+            let smtp = config.smtp.unwrap();
+
+            assert_eq!(smtp.tls_mode, SmtpTlsMode::StartTls);
+            assert_eq!(smtp.port, 587);
+        }
+
+        #[test]
+        fn configured_smtp_requires_explicit_outbox_sealing_key() {
+            let values = required_smtp()
+                .into_iter()
+                .filter(|(key, _)| *key != "CANOPY_AUTH_OUTBOX_SEALING_KEY")
+                .collect::<Vec<_>>();
+            let error = parse(&values)
+                .err()
+                .expect("missing outbox sealing key should fail");
+
+            assert!(error.to_string().contains("CANOPY_AUTH_OUTBOX_SEALING_KEY"));
+        }
+
+        #[test]
+        fn remote_plaintext_smtp_mode_is_rejected() {
+            let mut values = required_smtp();
+            values[1].1 = "plaintext";
+
+            assert!(parse(&values).is_err());
+        }
+
+        #[test]
+        fn worker_rejects_lease_shorter_than_smtp_timeout() {
+            let mut values = required_smtp();
+            values.extend([
+                ("CANOPY_AUTH_EMAIL_LEASE_SECS", "10"),
+                ("CANOPY_SMTP_TIMEOUT_SECS", "30"),
+            ]);
+
+            assert!(parse(&values).is_err());
+        }
+        #[cfg(not(feature = "pg"))]
+        #[test]
+        fn non_pg_runtime_disables_email_delivery_without_smtp() {
+            let config = AuthEmailConfig::disabled_for_non_pg();
+
+            assert!(config.allow_undelivered_email);
+            assert!(config.smtp.is_none());
         }
     }
 }

@@ -1,16 +1,17 @@
 #![cfg(feature = "pg")]
 
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, CatalogIngest, CatalogRepository, ConsumeChallenge,
-    CreateGoogleLinkChallenge, CreateGoogleLoginChallenge, CreateSessionRecord,
-    ExternalIdentityRecord, IdentityRepository, InstanceSettingsRepository, LibraryRepository,
-    LikeRepository, MediaImportRepository, Page, PendingImportOutcome, PendingMediaImport,
-    PlayableAssetRepository, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
-    PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
-    RegisterPasswordRecord, RotateRefreshTokenRecord, StreamAudience,
+    AudioAsset, AudioAssetRepository, AuthOutboxFailureKind, AuthOutboxRepository, CatalogIngest,
+    CatalogRepository, ClaimAuthOutboxBatch, ConsumeChallenge, CreateGoogleLinkChallenge,
+    CreateGoogleLoginChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
+    InstanceSettingsRepository, LibraryRepository, LikeRepository, MarkAuthOutboxFailed,
+    MediaImportRepository, Page, PendingImportOutcome, PendingMediaImport, PlayableAssetRepository,
+    PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository, PreferencesRepository,
+    ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack, RegisterPasswordRecord,
+    RotateRefreshTokenRecord, StreamAudience,
 };
 use canopy_server::jade_store::{
-    PgAudioAssetRepository, PgCatalogRepository, PgIdentityRepository,
+    PgAudioAssetRepository, PgAuthOutboxRepository, PgCatalogRepository, PgIdentityRepository,
     PgInstanceSettingsRepository, PgLibraryRepository, PgLikeRepository, PgMediaImportRepository,
     PgPlayableAssetRepository, PgPlaybackHistoryRepository, PgPlaylistRepository,
     PgPreferencesRepository, PgProfileRepository,
@@ -2176,4 +2177,262 @@ async fn postgres_local_import_rejects_unknown_owner() {
         .await
         .unwrap();
     assert_eq!(track_count, 0);
+}
+async fn reset_auth_outbox(pool: &sqlx::PgPool) {
+    sqlx::query("DELETE FROM auth_outbox")
+        .execute(pool)
+        .await
+        .expect("auth outbox should reset");
+}
+
+async fn insert_auth_outbox(pool: &sqlx::PgPool, seed: u8) -> String {
+    sqlx::query_scalar::<_, String>(
+        r#"
+            INSERT INTO auth_outbox (kind, encrypted_payload, key_id)
+            VALUES ('email_verification', $1, 'test-key')
+            RETURNING id::text
+        "#,
+    )
+    .bind(vec![seed; 32])
+    .fetch_one(pool)
+    .await
+    .expect("auth outbox fixture should insert")
+}
+
+fn claim_auth_outbox(
+    now_epoch_ms: u64,
+    lease_token: &str,
+    batch_size: u32,
+) -> ClaimAuthOutboxBatch {
+    ClaimAuthOutboxBatch {
+        now_epoch_ms,
+        lease_expires_at_epoch_ms: now_epoch_ms + 1_000,
+        batch_size,
+        lease_token: lease_token.into(),
+    }
+}
+
+#[tokio::test]
+async fn postgres_auth_outbox_claims_each_row_once_across_workers() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+    reset_auth_outbox(&pool).await;
+    let first_id = insert_auth_outbox(&pool, 61).await;
+    let second_id = insert_auth_outbox(&pool, 62).await;
+    let first = PgAuthOutboxRepository::new(pool.clone());
+    let second = PgAuthOutboxRepository::new(pool.clone());
+    let now = identity_epoch_ms(1_000);
+
+    let (first_claim, second_claim) = tokio::join!(
+        first.claim_auth_outbox_batch(claim_auth_outbox(
+            now,
+            "00000000-0000-0000-0000-000000000061",
+            1,
+        )),
+        second.claim_auth_outbox_batch(claim_auth_outbox(
+            now,
+            "00000000-0000-0000-0000-000000000062",
+            1,
+        )),
+    );
+    let first_claim = first_claim.expect("first worker should claim");
+    let second_claim = second_claim.expect("second worker should claim");
+
+    assert_eq!(first_claim.len(), 1);
+    assert_eq!(second_claim.len(), 1);
+    assert_ne!(first_claim[0].id, second_claim[0].id);
+    let claimed = [first_claim[0].id.as_str(), second_claim[0].id.as_str()];
+    assert!(claimed.contains(&first_id.as_str()));
+    assert!(claimed.contains(&second_id.as_str()));
+}
+
+#[tokio::test]
+async fn postgres_auth_outbox_expired_lease_can_be_reclaimed() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+    reset_auth_outbox(&pool).await;
+    let id = insert_auth_outbox(&pool, 63).await;
+    let repository = PgAuthOutboxRepository::new(pool);
+    let now = identity_epoch_ms(1_000);
+
+    let first = repository
+        .claim_auth_outbox_batch(claim_auth_outbox(
+            now,
+            "00000000-0000-0000-0000-000000000063",
+            1,
+        ))
+        .await
+        .expect("first lease should claim");
+    let second = repository
+        .claim_auth_outbox_batch(claim_auth_outbox(
+            now + 2_000,
+            "00000000-0000-0000-0000-000000000064",
+            1,
+        ))
+        .await
+        .expect("expired lease should be reclaimed");
+
+    assert_eq!(first[0].id, id);
+    assert_eq!(second[0].id, id);
+    assert_eq!(second[0].attempts, 2);
+    assert_eq!(
+        second[0].lease_token,
+        "00000000-0000-0000-0000-000000000064"
+    );
+}
+
+#[tokio::test]
+async fn postgres_auth_outbox_stale_lease_cannot_complete_reclaimed_row() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+    reset_auth_outbox(&pool).await;
+    let id = insert_auth_outbox(&pool, 65).await;
+    let repository = PgAuthOutboxRepository::new(pool);
+    let now = identity_epoch_ms(1_000);
+    let stale_token = "00000000-0000-0000-0000-000000000065";
+    let active_token = "00000000-0000-0000-0000-000000000066";
+
+    repository
+        .claim_auth_outbox_batch(claim_auth_outbox(now, stale_token, 1))
+        .await
+        .expect("first lease should claim");
+    repository
+        .claim_auth_outbox_batch(claim_auth_outbox(now + 2_000, active_token, 1))
+        .await
+        .expect("second lease should reclaim");
+
+    assert!(
+        !repository
+            .mark_auth_outbox_delivered(&id, stale_token, now + 2_100)
+            .await
+            .expect("stale completion should be checked")
+    );
+    assert!(
+        repository
+            .mark_auth_outbox_delivered(&id, active_token, now + 2_100)
+            .await
+            .expect("active completion should succeed")
+    );
+}
+
+#[tokio::test]
+async fn postgres_auth_outbox_success_clears_ciphertext() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+    reset_auth_outbox(&pool).await;
+    let id = insert_auth_outbox(&pool, 67).await;
+    let repository = PgAuthOutboxRepository::new(pool.clone());
+    let now = identity_epoch_ms(1_000);
+    let lease_token = "00000000-0000-0000-0000-000000000067";
+
+    repository
+        .claim_auth_outbox_batch(claim_auth_outbox(now, lease_token, 1))
+        .await
+        .expect("row should be claimed");
+    assert!(
+        repository
+            .mark_auth_outbox_delivered(&id, lease_token, now + 100)
+            .await
+            .expect("delivery should update")
+    );
+
+    let row = sqlx::query(
+        "SELECT encrypted_payload, delivered_at IS NOT NULL AS delivered FROM auth_outbox WHERE id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .expect("delivered row should exist");
+    assert!(
+        row.try_get::<Option<Vec<u8>>, _>("encrypted_payload")
+            .unwrap()
+            .is_none()
+    );
+    assert!(row.try_get::<bool, _>("delivered").unwrap());
+}
+
+#[tokio::test]
+async fn postgres_auth_outbox_retry_and_exhaustion_leave_safe_state() {
+    let pool = connect_test_pool().await;
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+    reset_auth_outbox(&pool).await;
+    let id = insert_auth_outbox(&pool, 68).await;
+    let repository = PgAuthOutboxRepository::new(pool.clone());
+    let now = identity_epoch_ms(1_000);
+    let first_token = "00000000-0000-0000-0000-000000000068";
+    let final_token = "00000000-0000-0000-0000-000000000069";
+
+    repository
+        .claim_auth_outbox_batch(claim_auth_outbox(now, first_token, 1))
+        .await
+        .expect("row should be claimed");
+    assert!(
+        repository
+            .mark_auth_outbox_failed(MarkAuthOutboxFailed {
+                id: id.clone(),
+                lease_token: first_token.into(),
+                error_kind: AuthOutboxFailureKind::Connection,
+                available_at_epoch_ms: now + 2_000,
+                failed_at_epoch_ms: None,
+            })
+            .await
+            .expect("retry should update")
+    );
+
+    let reclaimed = repository
+        .claim_auth_outbox_batch(claim_auth_outbox(now + 2_100, final_token, 1))
+        .await
+        .expect("retry should become available");
+    assert_eq!(reclaimed[0].attempts, 2);
+    assert!(
+        repository
+            .mark_auth_outbox_failed(MarkAuthOutboxFailed {
+                id: id.clone(),
+                lease_token: final_token.into(),
+                error_kind: AuthOutboxFailureKind::Rejected,
+                available_at_epoch_ms: now + 2_100,
+                failed_at_epoch_ms: Some(now + 2_100),
+            })
+            .await
+            .expect("terminal failure should update")
+    );
+
+    let exhausted = repository
+        .claim_auth_outbox_batch(claim_auth_outbox(
+            now + 10_000,
+            "00000000-0000-0000-0000-000000000070",
+            1,
+        ))
+        .await
+        .expect("exhausted claim should be checked");
+    assert!(exhausted.is_empty());
+
+    let row = sqlx::query(
+        "SELECT encrypted_payload IS NOT NULL AS sealed, failed_at IS NOT NULL AS failed, last_error_kind FROM auth_outbox WHERE id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .expect("exhausted row should exist");
+    assert!(row.try_get::<bool, _>("sealed").unwrap());
+    assert!(row.try_get::<bool, _>("failed").unwrap());
+    assert_eq!(
+        row.try_get::<String, _>("last_error_kind").unwrap(),
+        "rejected"
+    );
 }

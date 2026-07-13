@@ -2,7 +2,7 @@
 
 ## Status
 
-Canopy consumes the published contract. Core native authentication and session-management implementation is in progress and partially wired.
+Canopy consumes the published contract. All native authentication and session-management RPCs are wired, durable user-state RPCs enforce native identity, and the persisted authentication outbox is delivered by a supervised TLS-only SMTP worker with leased at-least-once processing and readiness reporting.
 
 - Private BSR module: `buf.build/pandawave/canopy-api`
 - Baseline release: `v0.1.0` at `78c41b267ad04168b6a08951de30e415`
