@@ -1,6 +1,6 @@
-# PandaWave Architecture
+# Canopy Backend Architecture
 
-> This document describes the architecture of the **PandaWave** ecosystem as a whole. It lives in the **Canopy** repository — the Rust backend — because Canopy is the central control-plane component. Sections below cover the full system; the **Canopy Backend Structure** and **Canopy Responsibilities** sections are specific to this repo.
+> This document describes the Canopy Rust backend, its implementation boundaries, runtime configuration, deployment, and verification. Adjacent components appear only where they define a backend integration boundary.
 
 ## Status
 
@@ -9,21 +9,21 @@ This document describes the current Canopy architecture and identifies the remai
 | Area                      | Status         | Notes                                                                                       |
 | ------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
 | Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (BSR SDK facade), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (bounded gRPC adapters + `jade_store`). |
-| gRPC server (`tonic`)     | 🟡 Partial     | Eight bounded `canopy.v1` services share one listener. Catalog, playback-source resolution, discovery, system, profile, history, and collection mutations use the audited BSR contract; remaining collection list/playlist resource work is explicit below. |
+| gRPC server (`tonic`)     | ✅ Implemented | Nine bounded `canopy.v1` services share one listener and use the audited generated BSR contract. |
 | Configuration             | ✅ Implemented | Env-driven configuration validates streaming, identity keys, TLS-only SMTP delivery, PostgreSQL, and managed media before listeners start. |
-| API contract / BSR        | ✅ Canopy migrated | Private module uf.build/pandawave/canopy-api commit 8e44e0fa997a4160bfefd5d68599de1b; canopy-proto pins immutable Prost/Tonic SDK versions. PandaEngine migration and the 0.1.0 release label remain. |
+| API contract / BSR        | ✅ `v0.2.0` | Implements BSR commit `145678c1d73e45b7bbaebf7e16ee4d64`; Prost `=0.5.0-00000000000000-145678c1d73e.2`; Tonic `=0.5.0-00000000000000-145678c1d73e.4`. |
 | Catalog service           | Partial | Public repository paths are explicit; PostgreSQL and in-memory adapters isolate `release_safe` media from owner-scoped personal media. |
 | Player/session handling   | ✅ Engine-owned | Canopy owns playback-source authorization only. Play/pause/seek/speed/queue/session state belongs to PandaEngine and no backend session repository or control RPC remains. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
 | Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
 | Playback Resolver         | ✅ Implemented | `ResolvePlayback` is anonymous-compatible and auth-aware: the configured owner receives owner-scoped personal media first with public fallback; other callers receive release-safe public media. Capabilities remain opaque and storage keys never enter client responses. |
-| Auth / Profiles           | 🟡 Partial     | Native email/password identity, verification-time profile creation, refresh rotation, password reset/change, account lookup/deletion, Google login/linking, and account-scoped session revocation/listing are implemented or wired. Browse/search/playback remain anonymous-compatible; anonymous users receive no backend history, library, likes, preferences, or playlists. |
+| Auth / Profiles           | ✅ Implemented | Native identity, SMTP challenge delivery, per-device sessions, Google linking, account lifecycle, and authorization for durable profile state are implemented. |
 | Provider Adapters         | Implemented | Deterministic fixture ingestion remains idempotent and quarantined by default; external provider runtime code has been removed. |
 | Persistence (PostgreSQL)  | Partial | Typed adapters cover ownership, media policy, local-import transactions, checksum deduplication, and fail-closed promotion. |
 | Music storage             | ✅ Implemented | MP3 and artwork import into content-addressed local storage; bundled Nginx authorizes through Canopy and serves byte ranges from an internal read-only location. |
 | Observability             | 🟡 Partial     | `tracing` initialized; no correlation-ID propagation or Prometheus metrics.                 |
 | Health checks             | ✅ Implemented | Readiness checks PostgreSQL, the managed library directory, and authentication email delivery. SMTP outages affect readiness but not liveness or unrelated RPCs. |
-| CI / Verification         | ✅ Implemented | GitHub Actions gates `master` with fmt, all-feature Clippy, default tests, a fail-closed disposable PostgreSQL integration harness, and a release build. Proto compatibility gates are still planned. |
+| CI / Verification         | ✅ Implemented | Lockfile-enforced Rust, PostgreSQL, and streaming gates run in Canopy; `canopy-api` owns contract compatibility and publication gates. |
 
 Legend: ✅ Implemented · 🟡 Partial / prototype · 🔴 Planned
 
@@ -618,18 +618,18 @@ Canopy's health endpoint reports dependency readiness, not only process liveness
 The CI pipeline is implemented via **GitHub Actions** (`.github/workflows/ci.yml`). Every change to `master` and every pull request is gated by:
 
 ```text
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-features --tests -- -D warnings
+cargo check --workspace --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-features --tests --locked -- -D warnings
 cargo fmt --all -- --check
 bash scripts/test-pg.sh         # disposable PostgreSQL policy and migration suite
 bash scripts/test-streaming.sh  # real Nginx ranges, denial, and revocation
-cargo build --workspace --release
+cargo build --workspace --release --locked
 ```
 
-The workflow installs `protoc` so that the `canopy-proto` crate's `build.rs` compiles successfully in CI, and uses `Swatinem/rust-cache` for fast incremental builds.
+The workflow installs stable Rust components and uses `Swatinem/rust-cache`. Authenticated Buf Cargo registry access resolves the exact generated SDK pins, while `Cargo.lock` prevents dependency drift.
 
-The PostgreSQL harness starts an isolated PostgreSQL 18.4 Compose project, applies the migration chain, runs feature tests serially, and destroys the stack. `scripts/test-streaming.sh` adds a real Nginx container and synthetic MP3, verifies `206` range responses, rejects tampered/direct paths, and proves an issued capability stops working immediately after policy revocation. The canonical `canopy-api` repository runs Buf format/lint/build checks; breaking-change enforcement begins after the initial `v0.1.0` release label.
+The PostgreSQL harness starts an isolated PostgreSQL 18.4 Compose project, applies the migration chain, runs feature tests serially, and destroys the stack. `scripts/test-streaming.sh` adds a real Nginx container and synthetic MP3, verifies the served HTTP OpenAPI document, `206` range responses, denial behavior, and immediate policy revocation. Canopy uses lockfile-enforced Cargo commands; the canonical `canopy-api` repository owns Buf format, lint, compatibility, and publication gates. See [Canopy API Consumption](docs/canopy-api-consumption.md).
 
 ---
 

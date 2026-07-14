@@ -48,6 +48,14 @@ compose config --quiet
 managed_stack=1
 compose up -d --wait postgres nginx
 
+openapi_document="$(curl --fail --silent --show-error http://127.0.0.1:18080/openapi.json)"
+grep -Fq '"openapi": "3.1.0"' <<<"$openapi_document"
+grep -Fq '"/stream/{capability}"' <<<"$openapi_document"
+if grep -Fq '"/canopy.' <<<"$openapi_document"; then
+  echo "OpenAPI must not expose gRPC methods as HTTP paths" >&2
+  exit 1
+fi
+
 cargo test -p canopy-server --features pg --test streaming_integration \
   nginx_serves_ranges_and_rechecks_revoked_policy -- \
   --ignored --exact --test-threads=1
