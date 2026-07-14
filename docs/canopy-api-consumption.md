@@ -4,6 +4,10 @@ This document records the exact released contract implemented by the Canopy
 backend. Product-neutral RPC and message semantics live in the canonical
 [consumer guide](https://github.com/adrianrusu16/canopy-api/blob/master/docs/consumer-guide.md).
 
+Deployment-provided public endpoints, TLS requirements, authentication action
+links, and client-ready environment checks live in the
+[Client Integration Handoff](client-integration.md).
+
 ## Supported Contract
 
 - BSR module: `buf.build/pandawave/canopy-api`

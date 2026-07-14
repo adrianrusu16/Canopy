@@ -629,7 +629,7 @@ cargo build --workspace --release --locked
 
 The workflow installs stable Rust components and uses `Swatinem/rust-cache`. Authenticated Buf Cargo registry access resolves the exact generated SDK pins, while `Cargo.lock` prevents dependency drift.
 
-The PostgreSQL harness starts an isolated PostgreSQL 18.4 Compose project, applies the migration chain, runs feature tests serially, and destroys the stack. `scripts/test-streaming.sh` adds a real Nginx container and synthetic MP3, verifies the served HTTP OpenAPI document, `206` range responses, denial behavior, and immediate policy revocation. Canopy uses lockfile-enforced Cargo commands; the canonical `canopy-api` repository owns Buf format, lint, compatibility, and publication gates. See [Canopy API Consumption](docs/canopy-api-consumption.md).
+The PostgreSQL harness starts an isolated PostgreSQL 18.4 Compose project, applies the migration chain, runs feature tests serially, and destroys the stack. `scripts/test-streaming.sh` adds a real Nginx container and synthetic MP3, verifies the served HTTP OpenAPI document, `206` range responses, denial behavior, and immediate policy revocation. Canopy uses lockfile-enforced Cargo commands; the canonical `canopy-api` repository owns Buf format, lint, compatibility, and publication gates. See [Canopy API Consumption](docs/canopy-api-consumption.md) for backend dependency pins and [Client Integration Handoff](docs/client-integration.md) for deployment-provided client connection values.
 
 ---
 
@@ -766,6 +766,12 @@ export CANOPY_IDENTITY_ALLOW_EPHEMERAL_DEV_KEY=true
 export CANOPY_AUTH_ALLOW_UNDELIVERED_EMAIL=true
 cargo run -p canopy-server --features pg --bin canopy
 ```
+
+The checked-in local client reference uses
+`CANOPY_GRPC_ADDR=127.0.0.1:50051` and a separately served Nginx origin at
+`http://127.0.0.1:8080`. See the
+[Client Integration Handoff](docs/client-integration.md) before sharing an
+environment with a client team.
 
 When the `pg` feature is enabled, PostgreSQL is mandatory. Startup fails before either listener serves traffic if the database connection, stream configuration, media root, or private listener bind is invalid. Non-PG builds retain isolated in-memory stores for tests and local experimentation only.
 

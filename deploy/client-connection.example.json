@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "environment": "local-reference",
+  "contract": {
+    "protobuf_package": "canopy.v1",
+    "bsr_module": "buf.build/pandawave/canopy-api",
+    "release": "v0.2.0",
+    "commit": "145678c1d73e45b7bbaebf7e16ee4d64",
+    "prost_package": "pandawave_canopy-api_community_neoeinstein-prost",
+    "prost_version": "=0.5.0-00000000000000-145678c1d73e.2",
+    "tonic_package": "pandawave_canopy-api_community_neoeinstein-tonic",
+    "tonic_version": "=0.5.0-00000000000000-145678c1d73e.4"
+  },
+  "transport": {
+    "grpc_endpoint": "http://127.0.0.1:50051",
+    "stream_base_url": "http://127.0.0.1:8080",
+    "openapi_url": "http://127.0.0.1:8080/openapi.json",
+    "tls_required_outside_loopback": true
+  },
+  "authentication": {
+    "metadata_key": "authorization",
+    "metadata_scheme": "Bearer",
+    "verification_action_relative_path": "verify-email",
+    "verification_token_query_parameter": "token",
+    "password_reset_action_relative_path": "reset-password",
+    "password_reset_token_query_parameter": "token",
+    "expiry_query_parameter": "expires_at",
+    "auth_service_requires_postgresql": true,
+    "password_bootstrap_requires_email_delivery": true
+  }
+}
