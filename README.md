@@ -674,6 +674,38 @@ docker compose --profile adminer up -d
 # Visit http://localhost:8080
 ```
 
+### Complete Local Integration Environment
+
+The backend-owned local reference runs Canopy as a native WSL process and
+PostgreSQL, Mailpit, and Nginx in the scoped `canopy-local-integration`
+Compose project. It requires Docker Compose v2 with Linux host networking,
+OpenSSL, the repository Rust toolchain, `curl`, `sqlx-cli`, and standard WSL
+utilities (`ss`, `awk`, `readlink`, and `nohup`).
+
+Start and inspect an interactive environment, then remove it with:
+
+```bash
+./scripts/local-integration.sh up
+./scripts/local-integration.sh status
+./scripts/local-integration.sh down
+```
+
+The developer endpoints are gRPC at `http://127.0.0.1:50051`, streaming at
+`http://127.0.0.1:8080`, OpenAPI at
+`http://127.0.0.1:8080/openapi.json`, and the operator-only Mailpit inbox at
+`http://127.0.0.1:8025`.
+
+Run the clean end-to-end authentication and playback smoke flow with:
+
+```bash
+./scripts/local-integration.sh test
+```
+
+The script generates ephemeral credentials and certificates under the ignored
+target/local-integration/` directory. The environment is loopback-only and
+disposable; it is not a production deployment. Mailpit, PostgreSQL, SMTP, and
+the private stream authorization listener are never client handoff surfaces.
+
 ### Service Configuration
 
 All services are configurable via environment variables. A `.env.example` is included in the repo; copy it to `.env` and override values as needed.
@@ -703,6 +735,7 @@ All services are configurable via environment variables. A `.env.example` is inc
 | `CANOPY_SMTP_HOST` | unset | SMTP relay host; required unless the development-only undelivered-email escape hatch is enabled |
 | `CANOPY_SMTP_PORT` | `465` or `587` | Relay port; defaults to 465 for implicit TLS and 587 for STARTTLS |
 | `CANOPY_SMTP_TLS_MODE` | `implicit` | `implicit` or required `starttls`; plaintext SMTP is rejected |
+| `CANOPY_SMTP_CA_CERT_PATH` | unset | Optional readable PEM CA bundle added to verified SMTP TLS trust; it does not disable hostname or certificate validation |
 | `CANOPY_SMTP_USERNAME` | unset | Required SMTP authentication username |
 | `CANOPY_SMTP_PASSWORD` | unset | Required SMTP authentication password |
 | `CANOPY_SMTP_FROM_ADDRESS` | unset | Required validated sender address |

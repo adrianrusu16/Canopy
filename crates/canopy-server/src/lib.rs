@@ -201,7 +201,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             Ok(pool) => {
                 let pool = Arc::new(pool);
                 info!(
-                    database_url = %config.database_url,
                     max_connections = config.pg_max_connections,
                     "Connected to PostgreSQL; using persistent stores"
                 );

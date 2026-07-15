@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+compose_file="$repo_root/docker-compose.local-integration.yml"
+local_seed_sql="$repo_root/fixtures/local-integration.sql"
+compose_project="canopy-local-integration"
+state_root="$repo_root/target/local-integration"
+runtime_env="$state_root/runtime.env"
+pid_file="$state_root/canopy.pid"
+canopy_log="$state_root/canopy.log"
+built_canopy_binary="$repo_root/target/debug/canopy"
+canopy_binary="$state_root/canopy"
+cleanup_on_exit=0
+
+grpc_endpoint="http://127.0.0.1:50051"
+stream_endpoint="http://127.0.0.1:8080"
+openapi_endpoint="http://127.0.0.1:8080/openapi.json"
+mailpit_endpoint="http://127.0.0.1:8025"
+
+cd "$repo_root"
+
+usage() {
+  echo "usage: ./scripts/local-integration.sh up|test|status|down" >&2
+}
+
+die() {
+  echo "local integration: $1" >&2
+  exit "${2:-1}"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+validate_prerequisites() {
+  local command
+  for command in docker openssl cargo curl sqlx ss awk readlink nohup; do
+    require_command "$command"
+  done
+  docker compose version >/dev/null
+  openssl version >/dev/null
+  cargo --version >/dev/null
+  sqlx --version >/dev/null
+}
+
+compose_project_ids() {
+  docker ps --all --filter "label=com.docker.compose.project=$compose_project" --quiet
+}
+
+read_recorded_pid() {
+  [[ -f "$pid_file" ]] || return 1
+  read -r recorded_pid recorded_start <"$pid_file"
+  [[ "$recorded_pid" =~ ^[0-9]+$ && "$recorded_start" =~ ^[0-9]+$ ]]
+}
+
+recorded_pid_is_owned() {
+  read_recorded_pid || return 1
+  [[ -r "/proc/$recorded_pid/stat" ]] || return 1
+  [[ "$(awk '{print $22}' "/proc/$recorded_pid/stat")" == "$recorded_start" ]] || return 1
+  [[ "$(readlink -f "/proc/$recorded_pid/exe")" == "$canopy_binary" ]]
+}
+
+environment_active() {
+  if [[ -f "$pid_file" ]]; then
+    read_recorded_pid || die "recorded Canopy PID is malformed; refusing mutation"
+    [[ -r "/proc/$recorded_pid/stat" ]] || return 1
+    recorded_pid_is_owned || die "recorded Canopy PID is stale; refusing mutation"
+    return 0
+  fi
+  [[ -n "$(compose_project_ids)" ]]
+}
+
+state_present() {
+  [[ -e "$runtime_env" || -e "$pid_file" ]] || [[ -n "$(compose_project_ids)" ]]
+}
+
+assert_ports_available() {
+  local port
+  for port in 50051 18081 55434 1025 8025 8080; do
+    if ss -H -ltn "sport = :$port" | grep -q .; then
+      die "port $port is already in use"
+    fi
+  done
+}
+
+write_env() {
+  printf '%s=%q\n' "$1" "$2"
+}
+
+prepare_state() {
+  [[ "$state_root" == "$repo_root/target/local-integration" ]] \
+    || die "refusing unsafe state path"
+  umask 077
+  rm -rf -- "$state_root"
+  mkdir -p \
+    "$state_root/certs" \
+    "$state_root/media/library/audio/tracks/musopen"
+
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 2 \
+    -subj "/CN=Canopy Local Integration CA" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout "$state_root/certs/ca.key" \
+    -out "$state_root/certs/ca.crt" >/dev/null 2>&1
+  openssl req -new -newkey rsa:2048 -nodes -sha256 \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+    -keyout "$state_root/certs/server.key" \
+    -out "$state_root/certs/server.csr" >/dev/null 2>&1
+  openssl x509 -req -sha256 -days 2 \
+    -in "$state_root/certs/server.csr" \
+    -CA "$state_root/certs/ca.crt" \
+    -CAkey "$state_root/certs/ca.key" \
+    -CAcreateserial -copy_extensions copy \
+    -out "$state_root/certs/server.crt" >/dev/null 2>&1
+
+  cp "$repo_root/fixtures/media/test-tone.mp3" \
+    "$state_root/media/library/audio/tracks/musopen/beethoven-moonlight-sonata.mp3"
+  chmod -R a+rX "$state_root/media"
+
+  local postgres_password smtp_password signing_key outbox_key stream_secret
+  postgres_password="$(openssl rand -hex 24)"
+  smtp_password="$(openssl rand -hex 24)"
+  signing_key="$(openssl rand -base64 32 | tr -d '\n')"
+  outbox_key="$(openssl rand -base64 32 | tr -d '\n')"
+  stream_secret="$(openssl rand -hex 32)"
+
+  {
+    write_env CANOPY_LOCAL_INTEGRATION_ROOT "$state_root"
+    write_env CANOPY_LOCAL_POSTGRES_PASSWORD "$postgres_password"
+    write_env CANOPY_LOCAL_SMTP_USERNAME "canopy-local"
+    write_env CANOPY_LOCAL_SMTP_PASSWORD "$smtp_password"
+    write_env CANOPY_DATABASE_URL "postgres://canopy_local:$postgres_password@127.0.0.1:55434/canopy_local"
+    write_env CANOPY_GRPC_ADDR "127.0.0.1:50051"
+    write_env CANOPY_MEDIA_ROOT "$state_root/media"
+    write_env CANOPY_PROVIDER_FIXTURE_PATH "$repo_root/fixtures/catalog.json"
+    write_env CANOPY_STREAM_PUBLIC_BASE_URL "$stream_endpoint"
+    write_env CANOPY_STREAM_AUTH_ADDR "127.0.0.1:18081"
+    write_env CANOPY_STREAM_TOKEN_SECRET "$stream_secret"
+    write_env CANOPY_IDENTITY_ACCESS_TOKEN_SIGNING_KEY_BASE64 "$signing_key"
+    write_env CANOPY_AUTH_TOKEN_SECRET "$(openssl rand -hex 32)"
+    write_env CANOPY_AUTH_OUTBOX_SEALING_KEY "$outbox_key"
+    write_env CANOPY_SMTP_HOST "localhost"
+    write_env CANOPY_SMTP_PORT "1025"
+    write_env CANOPY_SMTP_TLS_MODE "starttls"
+    write_env CANOPY_SMTP_USERNAME "canopy-local"
+    write_env CANOPY_SMTP_PASSWORD "$smtp_password"
+    write_env CANOPY_SMTP_FROM_ADDRESS "auth@canopy.local.test"
+    write_env CANOPY_SMTP_FROM_NAME "Canopy"
+    write_env CANOPY_AUTH_PUBLIC_BASE_URL "http://127.0.0.1:3000/auth/"
+    write_env CANOPY_SMTP_TIMEOUT_SECS "10"
+    write_env CANOPY_AUTH_EMAIL_POLL_INTERVAL_SECS "1"
+    write_env CANOPY_AUTH_EMAIL_LEASE_SECS "15"
+    write_env CANOPY_SMTP_CA_CERT_PATH "$state_root/certs/ca.crt"
+    write_env CANOPY_LOCAL_GRPC_ENDPOINT "$grpc_endpoint"
+    write_env CANOPY_LOCAL_STREAM_ENDPOINT "$stream_endpoint"
+    write_env CANOPY_LOCAL_OPENAPI_ENDPOINT "$openapi_endpoint"
+    write_env CANOPY_LOCAL_MAILPIT_ENDPOINT "$mailpit_endpoint"
+  } >"$runtime_env"
+  chmod 0600 "$runtime_env"
+}
+
+load_runtime() {
+  [[ -f "$runtime_env" ]] || die "runtime state is missing"
+  set -a
+  # shellcheck disable=SC1090
+  source "$runtime_env"
+  set +a
+}
+
+compose() {
+  docker compose --env-file "$runtime_env" \
+    -p "$compose_project" -f "$compose_file" "$@"
+}
+
+stop_canopy() {
+  [[ -f "$pid_file" ]] || return 0
+  read_recorded_pid || {
+    echo "local integration: recorded Canopy PID is malformed; refusing mutation" >&2
+    return 1
+  }
+  if [[ ! -r "/proc/$recorded_pid/stat" ]]; then
+    rm -f -- "$pid_file"
+    return 0
+  fi
+  recorded_pid_is_owned || {
+    echo "local integration: recorded Canopy PID is stale; refusing mutation" >&2
+    return 1
+  }
+
+  kill -TERM "$recorded_pid"
+  local attempt state
+  for attempt in {1..100}; do
+    if [[ ! -r "/proc/$recorded_pid/stat" ]]; then
+      wait "$recorded_pid" 2>/dev/null || true
+      rm -f -- "$pid_file"
+      return 0
+    fi
+    state="$(awk '{print $3}' "/proc/$recorded_pid/stat")"
+    if [[ "$state" == "Z" ]]; then
+      wait "$recorded_pid" 2>/dev/null || true
+      rm -f -- "$pid_file"
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  recorded_pid_is_owned || return 1
+  kill -KILL "$recorded_pid"
+  wait "$recorded_pid" 2>/dev/null || true
+  rm -f -- "$pid_file"
+}
+
+show_diagnostics() {
+  [[ ! -f "$canopy_log" ]] || tail -n 100 "$canopy_log"
+  if [[ -f "$runtime_env" ]]; then
+    load_runtime
+    compose ps
+    compose logs --no-color postgres nginx
+  fi
+}
+
+cleanup_managed() {
+  local cleanup_status=0
+  if [[ -f "$pid_file" ]]; then
+    stop_canopy || cleanup_status=1
+  fi
+  if [[ -f "$runtime_env" ]]; then
+    load_runtime
+    compose down --volumes --remove-orphans || cleanup_status=1
+  fi
+  if [[ "$cleanup_status" == "0" ]]; then
+    [[ "$state_root" == "$repo_root/target/local-integration" ]] \
+      || die "refusing unsafe state cleanup"
+    rm -rf -- "$state_root"
+  fi
+  return "$cleanup_status"
+}
+
+on_exit() {
+  local status=$?
+  local cleanup_status=0
+  trap - EXIT
+  set +e
+  if [[ "$cleanup_on_exit" == "1" ]]; then
+    [[ "$status" == "0" ]] || show_diagnostics
+    cleanup_managed || cleanup_status=$?
+    if [[ "$status" == "0" && "$cleanup_status" != "0" ]]; then
+      status="$cleanup_status"
+    fi
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
+
+start_environment() {
+  environment_active && die "local integration environment is already active"
+  assert_ports_available
+  prepare_state
+  load_runtime
+
+  compose config --quiet
+  compose up -d --wait postgres mailpit nginx
+  DATABASE_URL="$CANOPY_DATABASE_URL" \
+    sqlx migrate run --source "$repo_root/migrations"
+  cargo build -p canopy-server --features pg --bin canopy --locked
+  cp "$built_canopy_binary" "$canopy_binary"
+  chmod 0700 "$canopy_binary"
+
+  nohup "$canopy_binary" >>"$canopy_log" 2>&1 </dev/null &
+  local pid=$!
+  local start
+  start="$(awk '{print $22}' "/proc/$pid/stat")"
+  printf '%s %s\n' "$pid" "$start" >"$pid_file"
+
+  cargo test -p canopy-server --features pg --test local_integration \
+    local_environment_is_ready --locked -- \
+    --ignored --exact --test-threads=1
+  compose exec -T postgres psql --username canopy_local --dbname canopy_local --no-psqlrc --set ON_ERROR_STOP=1 <"$local_seed_sql"
+}
+
+if [[ "$#" -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+case "$1" in
+  up)
+    validate_prerequisites
+    cleanup_on_exit=1
+    start_environment
+    cleanup_on_exit=0
+    printf '%s\n' \
+      "gRPC: $grpc_endpoint" \
+      "Streaming: $stream_endpoint" \
+      "OpenAPI: $openapi_endpoint" \
+      "Test inbox: $mailpit_endpoint"
+    ;;
+  test)
+    validate_prerequisites
+    environment_active && die "stop the interactive environment before test"
+    cleanup_on_exit=1
+    start_environment
+    cargo test -p canopy-server --features pg --test local_integration \
+      local_environment_auth_and_playback_smoke --locked -- \
+      --ignored --exact --test-threads=1
+    ;;
+  status)
+    require_command docker
+    if ! state_present; then
+      echo "local integration: stopped"
+      exit 0
+    fi
+    if ! environment_active; then
+      echo "local integration: stopped (stale state present)"
+      exit 0
+    fi
+    [[ -f "$runtime_env" ]] || die "runtime state is incomplete"
+    load_runtime
+    echo "Canopy: running"
+    compose ps
+    printf '%s\n' \
+      "gRPC: $grpc_endpoint" \
+      "Streaming: $stream_endpoint" \
+      "OpenAPI: $openapi_endpoint" \
+      "Test inbox: $mailpit_endpoint"
+    ;;
+  down)
+    require_command docker
+    if ! state_present; then
+      echo "local integration: already stopped"
+      exit 0
+    fi
+    [[ -f "$runtime_env" ]] \
+      || die "runtime state is incomplete; refusing mutation"
+    if [[ -f "$pid_file" ]]; then
+      if ! read_recorded_pid; then
+        die "recorded Canopy PID is malformed; refusing mutation"
+      fi
+      if [[ -r "/proc/$recorded_pid/stat" ]] && ! recorded_pid_is_owned; then
+        die "recorded Canopy PID is stale; refusing mutation"
+      fi
+    fi
+    cleanup_managed
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

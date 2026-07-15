@@ -7,7 +7,11 @@ use canopy_core::{AuthOutboxFailureKind, CanopyError, CanopyResult};
 use lettre::{
     Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{Mailbox, MultiPart},
-    transport::smtp::{Error as SmtpError, authentication::Credentials},
+    transport::smtp::{
+        Error as SmtpError,
+        authentication::Credentials,
+        client::{Certificate, Tls, TlsParametersBuilder},
+    },
 };
 use reqwest::Url;
 use uuid::Uuid;
@@ -172,16 +176,36 @@ pub struct SmtpEmailSender {
     from: Mailbox,
 }
 
+fn custom_tls(config: &SmtpConfig) -> CanopyResult<Option<Tls>> {
+    let Some(pem) = config.ca_certificate_pem.as_deref() else {
+        return Ok(None);
+    };
+    let certificate = Certificate::from_pem(pem)
+        .map_err(|_| CanopyError::InvalidArgument("invalid custom SMTP CA certificate".into()))?;
+    let parameters = TlsParametersBuilder::new(config.host.clone())
+        .add_root_certificate(certificate)
+        .build()
+        .map_err(|_| CanopyError::InvalidArgument("invalid SMTP TLS configuration".into()))?;
+
+    Ok(Some(match config.tls_mode {
+        SmtpTlsMode::Implicit => Tls::Wrapper(parameters),
+        SmtpTlsMode::StartTls => Tls::Required(parameters),
+    }))
+}
+
 impl SmtpEmailSender {
     /// Builds a sender from validated SMTP configuration.
     pub fn new(config: &SmtpConfig) -> CanopyResult<Self> {
-        let builder = match config.tls_mode {
+        let mut builder = match config.tls_mode {
             SmtpTlsMode::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host),
             SmtpTlsMode::StartTls => {
                 AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
             }
         }
         .map_err(|_| CanopyError::InvalidArgument("invalid SMTP relay configuration".into()))?;
+        if let Some(tls) = custom_tls(config)? {
+            builder = builder.tls(tls);
+        }
         let from_address = config.from_address.parse::<Address>().map_err(|_| {
             CanopyError::InvalidArgument("invalid authentication email sender address".into())
         })?;
@@ -278,6 +302,47 @@ mod tests {
             "auth@example.test",
         )
         .unwrap()
+    }
+
+    fn smtp_config(tls_mode: SmtpTlsMode) -> SmtpConfig {
+        SmtpConfig {
+            host: "smtp.example.test".into(),
+            port: 465,
+            tls_mode,
+            username: "canopy".into(),
+            password: "secret".into(),
+            from_address: "auth@example.test".into(),
+            from_name: "Canopy".into(),
+            public_base_url: Url::parse("https://app.example.test/auth/").unwrap(),
+            timeout: std::time::Duration::from_secs(10),
+            ca_certificate_pem: Some(
+                include_bytes!("../../../../fixtures/certs/local-integration-test-ca.pem").to_vec(),
+            ),
+        }
+    }
+
+    #[test]
+    fn custom_ca_keeps_starttls_required() {
+        let tls = custom_tls(&smtp_config(SmtpTlsMode::StartTls))
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            tls,
+            lettre::transport::smtp::client::Tls::Required(_)
+        ));
+    }
+
+    #[test]
+    fn custom_ca_keeps_implicit_tls_wrapped() {
+        let tls = custom_tls(&smtp_config(SmtpTlsMode::Implicit))
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            tls,
+            lettre::transport::smtp::client::Tls::Wrapper(_)
+        ));
     }
 
     #[test]

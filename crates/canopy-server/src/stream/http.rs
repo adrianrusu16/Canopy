@@ -17,6 +17,7 @@ use tokio::net::TcpListener;
 use super::StreamAuthorizer;
 
 const TOKEN_HEADER: &str = "x-canopy-stream-token";
+const ORIGINAL_URI_HEADER: &str = "x-canopy-original-uri";
 const INTERNAL_REDIRECT_HEADER: &str = "x-accel-redirect";
 const CONTENT_TYPE_HINT_HEADER: &str = "x-canopy-content-type";
 
@@ -40,10 +41,7 @@ async fn authorize_stream(
     State(authorizer): State<Arc<StreamAuthorizer>>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(token) = headers
-        .get(TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok())
-    else {
+    let Some(token) = stream_token(&headers) else {
         return forbidden();
     };
 
@@ -76,6 +74,23 @@ async fn authorize_stream(
         ) => forbidden(),
         Err(CanopyError::Storage(_) | CanopyError::Internal(_)) => unavailable(),
     }
+}
+
+fn stream_token(headers: &HeaderMap) -> Option<&str> {
+    if let Some(value) = headers.get(TOKEN_HEADER) {
+        return value.to_str().ok().filter(|token| !token.is_empty());
+    }
+
+    headers
+        .get(ORIGINAL_URI_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(token_from_original_uri)
+}
+
+fn token_from_original_uri(original_uri: &str) -> Option<&str> {
+    let token = original_uri.strip_prefix("/stream/")?;
+    (!token.is_empty() && !token.bytes().any(|byte| matches!(byte, b'/' | b'?' | b'#')))
+        .then_some(token)
 }
 
 fn forbidden() -> Response {
@@ -164,11 +179,18 @@ mod tests {
     }
 
     fn request(token: Option<&str>) -> Request<Body> {
+        request_with_original_uri(token, None)
+    }
+
+    fn request_with_original_uri(token: Option<&str>, original_uri: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder()
             .uri("/internal/stream/authorize")
             .method("GET");
         if let Some(token) = token {
             builder = builder.header("X-Canopy-Stream-Token", token);
+        }
+        if let Some(original_uri) = original_uri {
+            builder = builder.header("X-Canopy-Original-URI", original_uri);
         }
         builder.body(Body::empty()).unwrap()
     }
@@ -204,6 +226,68 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn original_stream_uri_supplies_capability_when_token_header_is_missing() {
+        let (router, codec) = router(Ok(Some(AuthorizedStreamAsset {
+            asset_id: ASSET_ID.into(),
+            storage_key: "audio/aa/bb/hash.mp3".into(),
+            content_type: "audio/mpeg".into(),
+        })));
+        let token = codec
+            .mint(ASSET_ID, StreamAudience::Public, u64::MAX)
+            .unwrap();
+        let original_uri = format!("/stream/{token}");
+
+        let response = router
+            .oneshot(request_with_original_uri(None, Some(&original_uri)))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn malformed_original_stream_uris_are_forbidden() {
+        for original_uri in [
+            "/stream/",
+            "/stream/token/extra",
+            "/stream/token?query=1",
+            "/other/token",
+        ] {
+            let (router, _) = router(Ok(None));
+
+            let response = router
+                .oneshot(request_with_original_uri(None, Some(original_uri)))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_token_header_takes_precedence_over_original_uri() {
+        let (router, codec) = router(Ok(Some(AuthorizedStreamAsset {
+            asset_id: ASSET_ID.into(),
+            storage_key: "audio/aa/bb/hash.mp3".into(),
+            content_type: "audio/mpeg".into(),
+        })));
+        let token = codec
+            .mint(ASSET_ID, StreamAudience::Public, u64::MAX)
+            .unwrap();
+        let original_uri = format!("/stream/{token}");
+
+        let response = router
+            .oneshot(request_with_original_uri(
+                Some("invalid"),
+                Some(&original_uri),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

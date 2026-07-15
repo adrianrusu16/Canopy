@@ -40,6 +40,26 @@ The JSON file is a versioned reference artifact, not runtime discovery.
 Clients must reject unknown `schema_version` values instead of guessing at a
 new shape.
 
+## Local Reference Environment
+
+Backend developers can start the documented public endpoints with:
+
+```bash
+./scripts/local-integration.sh up
+```
+
+The local public values remain the gRPC endpoint at
+`http://127.0.0.1:50051`, streaming origin at `http://127.0.0.1:8080`, and
+OpenAPI document already defined in
+`deploy/client-connection.example.json`. Running
+`./scripts/local-integration.sh test` instead creates a clean environment,
+proves the complete backend authentication and playback smoke flow, and tears
+it down.
+
+Mailpit, PostgreSQL, SMTP credentials, generated secrets, and the private
+`127.0.0.1:18081` stream-authorization listener are operator-only. They are
+not fields in the client connection handoff.
+
 ## Local And Remote Connectivity
 
 Loopback URLs work only when the client shares the server's network namespace

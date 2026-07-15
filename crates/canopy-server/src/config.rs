@@ -4,6 +4,8 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use rustls_pki_types::pem::PemObject;
+
 /// Configuration for capability issuance and the private authorization listener.
 #[derive(Clone)]
 pub struct StreamConfig {
@@ -103,6 +105,7 @@ pub struct SmtpConfig {
     pub from_name: String,
     pub public_base_url: reqwest::Url,
     pub timeout: std::time::Duration,
+    pub ca_certificate_pem: Option<Vec<u8>>,
 }
 
 /// Polling, leasing, and retry limits for authentication email delivery.
@@ -178,19 +181,21 @@ impl AuthEmailConfig {
             }
         }
 
-        let smtp_present = [
-            "CANOPY_SMTP_HOST",
-            "CANOPY_SMTP_PORT",
-            "CANOPY_SMTP_TLS_MODE",
-            "CANOPY_SMTP_USERNAME",
-            "CANOPY_SMTP_PASSWORD",
-            "CANOPY_SMTP_FROM_ADDRESS",
-            "CANOPY_SMTP_FROM_NAME",
-            "CANOPY_AUTH_PUBLIC_BASE_URL",
-            "CANOPY_SMTP_TIMEOUT_SECS",
-        ]
-        .iter()
-        .any(|key| lookup(key).is_some_and(|value| !value.trim().is_empty()));
+        let smtp_ca_cert_path = lookup("CANOPY_SMTP_CA_CERT_PATH");
+        let smtp_present = smtp_ca_cert_path.is_some()
+            || [
+                "CANOPY_SMTP_HOST",
+                "CANOPY_SMTP_PORT",
+                "CANOPY_SMTP_TLS_MODE",
+                "CANOPY_SMTP_USERNAME",
+                "CANOPY_SMTP_PASSWORD",
+                "CANOPY_SMTP_FROM_ADDRESS",
+                "CANOPY_SMTP_FROM_NAME",
+                "CANOPY_AUTH_PUBLIC_BASE_URL",
+                "CANOPY_SMTP_TIMEOUT_SECS",
+            ]
+            .iter()
+            .any(|key| lookup(key).is_some_and(|value| !value.trim().is_empty()));
 
         let smtp_timeout_secs = lookup_positive_u64(
             &lookup,
@@ -303,6 +308,32 @@ impl AuthEmailConfig {
                 ));
             }
 
+            let ca_certificate_pem = smtp_ca_cert_path
+                .map(|path| {
+                    let path = path.trim();
+                    if path.is_empty() {
+                        return Err(CanopyError::InvalidArgument(
+                            "CANOPY_SMTP_CA_CERT_PATH must not be empty".into(),
+                        ));
+                    }
+                    let pem = std::fs::read(path).map_err(|_| {
+                        CanopyError::InvalidArgument(
+                            "CANOPY_SMTP_CA_CERT_PATH must name a readable PEM certificate".into(),
+                        )
+                    })?;
+                    rustls_pki_types::CertificateDer::from_pem_slice(&pem).map_err(|_| {
+                        CanopyError::InvalidArgument(
+                            "CANOPY_SMTP_CA_CERT_PATH must contain valid PEM certificates".into(),
+                        )
+                    })?;
+                    lettre::transport::smtp::client::Certificate::from_pem(&pem).map_err(|_| {
+                        CanopyError::InvalidArgument(
+                            "CANOPY_SMTP_CA_CERT_PATH must contain valid PEM certificates".into(),
+                        )
+                    })?;
+                    Ok(pem)
+                })
+                .transpose()?;
             Some(SmtpConfig {
                 host,
                 port,
@@ -313,6 +344,7 @@ impl AuthEmailConfig {
                 from_name,
                 public_base_url,
                 timeout: std::time::Duration::from_secs(smtp_timeout_secs),
+                ca_certificate_pem,
             })
         } else if allow_undelivered_email {
             None
@@ -879,6 +911,11 @@ mod tests {
 
         use super::super::{AuthEmailConfig, SmtpTlsMode};
 
+        const TEST_CA_PATH: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/certs/local-integration-test-ca.pem"
+        );
+
         fn parse(values: &[(&str, &str)]) -> canopy_core::CanopyResult<AuthEmailConfig> {
             let values: HashMap<_, _> = values
                 .iter()
@@ -938,6 +975,80 @@ mod tests {
             assert_eq!(smtp.port, 587);
         }
 
+        #[test]
+        fn valid_custom_smtp_ca_is_loaded() {
+            let mut values = required_smtp();
+            values.push(("CANOPY_SMTP_CA_CERT_PATH", TEST_CA_PATH));
+            let smtp = parse(&values).unwrap().smtp.unwrap();
+
+            assert_eq!(
+                smtp.ca_certificate_pem.as_deref(),
+                Some(
+                    include_bytes!("../../../fixtures/certs/local-integration-test-ca.pem")
+                        .as_slice()
+                )
+            );
+        }
+
+        #[test]
+        fn empty_custom_smtp_ca_path_is_rejected() {
+            let mut values = required_smtp();
+            values.push(("CANOPY_SMTP_CA_CERT_PATH", " "));
+
+            let error = parse(&values)
+                .err()
+                .expect("empty custom SMTP CA path should fail");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("CANOPY_SMTP_CA_CERT_PATH must not be empty")
+            );
+        }
+
+        #[test]
+        fn unreadable_custom_smtp_ca_path_is_rejected() {
+            let mut values = required_smtp();
+            values.push((
+                "CANOPY_SMTP_CA_CERT_PATH",
+                "/definitely/missing/canopy-ca.pem",
+            ));
+
+            let error = parse(&values)
+                .err()
+                .expect("missing custom SMTP CA should fail");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("CANOPY_SMTP_CA_CERT_PATH must name a readable PEM certificate")
+            );
+        }
+
+        #[test]
+        fn malformed_custom_smtp_ca_is_rejected() {
+            let malformed = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(malformed.path(), b"not a certificate").unwrap();
+            let path: &'static str = Box::leak(
+                malformed
+                    .path()
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_boxed_str(),
+            );
+            let mut values = required_smtp();
+            values.push(("CANOPY_SMTP_CA_CERT_PATH", path));
+
+            let error = parse(&values)
+                .err()
+                .expect("malformed custom SMTP CA should fail");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("CANOPY_SMTP_CA_CERT_PATH must contain valid PEM certificates")
+            );
+        }
         #[test]
         fn configured_smtp_requires_explicit_outbox_sealing_key() {
             let values = required_smtp()
