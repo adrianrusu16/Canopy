@@ -8,11 +8,40 @@ fn password_policy_accepts_long_passphrases_without_composition_rules() {
 }
 
 #[test]
-fn password_policy_rejects_fewer_than_fifteen_characters() {
+fn password_policy_accepts_eight_through_sixty_four_unicode_characters() {
+    let policy = PasswordPolicy::default();
+
+    assert!(policy.validate("12345678").is_ok());
+    assert!(policy.validate(&"a".repeat(64)).is_ok());
+    assert!(policy.validate(&"\u{1f43c}".repeat(8)).is_ok());
+}
+
+#[test]
+fn password_policy_rejects_outside_creation_boundaries() {
+    let policy = PasswordPolicy::default();
+
+    assert!(policy.validate("1234567").is_err());
+    assert!(policy.validate(&"a".repeat(65)).is_err());
+}
+
+#[test]
+fn verification_does_not_apply_new_password_length_policy() {
+    use argon2::Argon2;
+    use argon2::password_hash::{PasswordHasher as _, SaltString};
+    use rand_core::OsRng;
+
+    let legacy_password = "a".repeat(65);
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(legacy_password.as_bytes(), &salt)
+        .unwrap()
+        .to_string();
+
     assert!(
-        PasswordPolicy::default()
-            .validate("short password")
-            .is_err()
+        Argon2PasswordHasher::default()
+            .verify(&legacy_password, &hash)
+            .unwrap()
+            .valid
     );
 }
 

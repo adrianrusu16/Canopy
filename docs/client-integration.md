@@ -89,6 +89,12 @@ server names, and any private-CA installation requirement. It never includes
 database configuration, SMTP credentials, token-signing keys, outbox-sealing
 keys, stream-token secrets, or private authorization addresses.
 
+Canopy applies a 15-second gRPC server deadline, limits each connection to 64
+concurrent requests and HTTP/2 streams, and sheds excess load. The deployment
+ingress remains responsible for public DDoS protection, connection and request
+rate limits, request-size limits, and fair-use controls across source addresses
+and accounts.
+
 ## Password Authentication Bootstrap
 
 `AuthService` is registered only when Canopy runs with PostgreSQL support. A
@@ -113,6 +119,19 @@ The password flow is:
    require authentication again because reuse can revoke the session family.
 8. After successful `Logout`, clear the current local envelope. `LogoutAll`,
    password reset, and account deletion invalidate all account sessions.
+
+New and replacement passwords contain 8 through 64 Unicode characters. Login
+accepts an existing non-empty password without reapplying the creation bounds,
+so credentials created under an earlier policy remain usable. Email input is
+trimmed and lowercased, must contain exactly one `@`, and accepts a common ASCII
+local part plus DNS-style domain labels within the standard length bounds.
+
+Argon2 work is bounded separately from the async transport. Canopy allows four
+concurrent password hash or verification jobs and returns `RESOURCE_EXHAUSTED`
+when the one-second work queue is saturated. Clients may retry definite
+rate-limit failures with bounded backoff, but must never blindly replay an
+account-creation, login, password-change, reset, or refresh request whose
+transport result is ambiguous.
 
 Password reset joins `reset-password` to `CANOPY_AUTH_PUBLIC_BASE_URL` and
 uses the same `token` and `expires_at` query parameters. Tokens and page tokens

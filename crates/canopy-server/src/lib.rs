@@ -393,6 +393,10 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let grpc_state = shutting_down.clone();
     let grpc = async move {
         let router = Server::builder()
+            .concurrency_limit_per_connection(64)
+            .max_concurrent_streams(64)
+            .load_shed(true)
+            .timeout(std::time::Duration::from_secs(15))
             .add_service(CatalogServiceServer::new(CatalogGrpc(services.clone())))
             .add_service(PlaybackServiceServer::new(PlaybackGrpc(services.clone())))
             .add_service(DiscoveryServiceServer::new(DiscoveryGrpc(services.clone())))

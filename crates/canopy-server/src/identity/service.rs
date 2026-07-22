@@ -1,7 +1,8 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 use canopy_core::{
     AccountRecord, AccountStatus, AuthSession, CanopyError, CanopyResult, ChangePasswordRecord,
@@ -16,7 +17,7 @@ use super::{
     OidcVerifier, OpaqueToken, PasswordHasher, TokenDigest,
 };
 
-const PASSWORD_POLICY_VERSION: u32 = 1;
+const PASSWORD_POLICY_VERSION: u32 = 2;
 const VERIFICATION_TOKEN_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 const GOOGLE_CHALLENGE_TTL_MS: u64 = 10 * 60 * 1000;
@@ -24,6 +25,13 @@ const RATE_LIMIT_WINDOW_MS: u64 = 15 * 60 * 1000;
 const LOGIN_FAILURE_LIMIT: u32 = 5;
 const REGISTER_REQUEST_LIMIT: u32 = 5;
 const GENERIC_EMAIL_REQUEST_LIMIT: u32 = 3;
+
+const PASSWORD_WORK_LIMIT: usize = 4;
+const PASSWORD_WORK_QUEUE_TIMEOUT: Duration = Duration::from_secs(1);
+const EMAIL_MAX_UTF8_BYTES: usize = 254;
+const EMAIL_LOCAL_MAX_UTF8_BYTES: usize = 64;
+const EMAIL_DOMAIN_MAX_BYTES: usize = 253;
+static PASSWORD_WORK: Semaphore = Semaphore::const_new(PASSWORD_WORK_LIMIT);
 
 pub trait Clock: Send + Sync {
     fn now_epoch_ms(&self) -> u64;
@@ -56,6 +64,36 @@ impl Clock for FixedClock {
     fn now_epoch_ms(&self) -> u64 {
         self.now_epoch_ms
     }
+}
+
+async fn run_bounded_password_work<T, Work>(
+    semaphore: &Semaphore,
+    queue_timeout: Duration,
+    work: Work,
+) -> CanopyResult<T>
+where
+    T: Send + 'static,
+    Work: FnOnce() -> CanopyResult<T> + Send + 'static,
+{
+    let permit = tokio::time::timeout(queue_timeout, semaphore.acquire())
+        .await
+        .map_err(|_| {
+            CanopyError::RateLimited("password processing is temporarily saturated".into())
+        })?
+        .map_err(|_| CanopyError::Internal("password processing is unavailable".into()))?;
+    let result = tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| CanopyError::Internal(format!("password task failed: {error}")))?;
+    drop(permit);
+    result
+}
+
+async fn run_password_work<T, Work>(work: Work) -> CanopyResult<T>
+where
+    T: Send + 'static,
+    Work: FnOnce() -> CanopyResult<T> + Send + 'static,
+{
+    run_bounded_password_work(&PASSWORD_WORK, PASSWORD_WORK_QUEUE_TIMEOUT, work).await
 }
 
 pub struct RegisterPasswordCommand {
@@ -217,12 +255,7 @@ impl IdentityService {
 
         let password_hasher = self.password_hasher.clone();
         let password = command.password;
-        let password_hash_phc =
-            tokio::task::spawn_blocking(move || password_hasher.hash(&password))
-                .await
-                .map_err(|error| {
-                    CanopyError::Internal(format!("password task failed: {error}"))
-                })??;
+        let password_hash_phc = run_password_work(move || password_hasher.hash(&password)).await?;
 
         let verification_token = OpaqueToken::generate();
         let verification_token_hash = *TokenDigest::from_token(&verification_token).as_bytes();
@@ -342,11 +375,7 @@ impl IdentityService {
         let password_hasher = self.password_hasher.clone();
         let new_password = command.new_password;
         let password_hash_phc =
-            tokio::task::spawn_blocking(move || password_hasher.hash(&new_password))
-                .await
-                .map_err(|error| {
-                    CanopyError::Internal(format!("password task failed: {error}"))
-                })??;
+            run_password_work(move || password_hasher.hash(&new_password)).await?;
         let now = self.clock.now_epoch_ms();
         self.repository
             .complete_password_reset(CompletePasswordResetRecord {
@@ -373,11 +402,9 @@ impl IdentityService {
         let password_hasher = self.password_hasher.clone();
         let current_password = command.current_password;
         let current_hash = credential.password_hash_phc.clone();
-        let verification = tokio::task::spawn_blocking(move || {
-            password_hasher.verify(&current_password, &current_hash)
-        })
-        .await
-        .map_err(|error| CanopyError::Internal(format!("password task failed: {error}")))??;
+        let verification =
+            run_password_work(move || password_hasher.verify(&current_password, &current_hash))
+                .await?;
         if !verification.valid {
             return Err(CanopyError::unauthenticated("invalid current password"));
         }
@@ -385,11 +412,7 @@ impl IdentityService {
         let password_hasher = self.password_hasher.clone();
         let new_password = command.new_password;
         let password_hash_phc =
-            tokio::task::spawn_blocking(move || password_hasher.hash(&new_password))
-                .await
-                .map_err(|error| {
-                    CanopyError::Internal(format!("password task failed: {error}"))
-                })??;
+            run_password_work(move || password_hasher.hash(&new_password)).await?;
 
         self.repository
             .change_password(ChangePasswordRecord {
@@ -561,11 +584,10 @@ impl IdentityService {
         let password = command.password;
         let password_for_verify = password.clone();
         let password_hash_phc = login.password_hash_phc.clone();
-        let verification = tokio::task::spawn_blocking(move || {
+        let verification = run_password_work(move || {
             password_hasher.verify(&password_for_verify, &password_hash_phc)
         })
-        .await
-        .map_err(|error| CanopyError::Internal(format!("password task failed: {error}")))??;
+        .await?;
 
         if !verification.valid {
             self.record_rate_limit_hit(bucket).await?;
@@ -574,19 +596,21 @@ impl IdentityService {
 
         if verification.needs_rehash {
             let password_hasher = self.password_hasher.clone();
-            let password_hash_phc =
-                tokio::task::spawn_blocking(move || password_hasher.hash(&password))
-                    .await
-                    .map_err(|error| {
-                        CanopyError::Internal(format!("password task failed: {error}"))
-                    })??;
-            self.repository
-                .update_password_hash(
-                    &login.account.id,
-                    &password_hash_phc,
-                    PASSWORD_POLICY_VERSION,
-                )
-                .await?;
+            match run_password_work(move || password_hasher.hash(&password)).await {
+                Ok(password_hash_phc) => {
+                    self.repository
+                        .update_password_hash(
+                            &login.account.id,
+                            &password_hash_phc,
+                            PASSWORD_POLICY_VERSION,
+                        )
+                        .await?;
+                }
+                // Existing credentials remain usable even when their password no longer meets
+                // the policy for newly created or replacement passwords.
+                Err(CanopyError::InvalidArgument(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
 
         let refresh_token = OpaqueToken::generate();
@@ -796,10 +820,110 @@ impl GoogleLinkChallengePayload {
 
 fn normalize_email(email: &str) -> CanopyResult<String> {
     let normalized = email.trim().to_ascii_lowercase();
-    if normalized.is_empty() || !normalized.contains('@') {
+    if normalized.is_empty() || normalized.len() > EMAIL_MAX_UTF8_BYTES {
+        return Err(CanopyError::InvalidArgument(
+            "valid email is required".into(),
+        ));
+    }
+
+    let mut parts = normalized.split('@');
+    let local = parts.next().unwrap_or_default();
+    let domain = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || local.is_empty()
+        || domain.is_empty()
+        || local.len() > EMAIL_LOCAL_MAX_UTF8_BYTES
+        || domain.len() > EMAIL_DOMAIN_MAX_BYTES
+        || local.starts_with('.')
+        || local.ends_with('.')
+        || local.contains("..")
+        || !local.bytes().all(valid_email_local_byte)
+        || !domain.split('.').all(valid_email_domain_label)
+    {
         return Err(CanopyError::InvalidArgument(
             "valid email is required".into(),
         ));
     }
     Ok(normalized)
+}
+
+fn valid_email_local_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b".!#$%&'*+/=?^_`{|}~-".contains(&byte)
+}
+
+fn valid_email_domain_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && label
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && label
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+#[cfg(test)]
+mod input_and_password_work_tests {
+    use std::time::Duration;
+
+    use canopy_core::CanopyError;
+    use tokio::sync::Semaphore;
+
+    use super::{normalize_email, run_bounded_password_work};
+
+    #[test]
+    fn email_policy_accepts_common_trimmed_addresses() {
+        assert_eq!(
+            normalize_email(" Driver+Car@Example.COM ").unwrap(),
+            "driver+car@example.com"
+        );
+        assert_eq!(
+            normalize_email("driver@canopy.test").unwrap(),
+            "driver@canopy.test"
+        );
+    }
+
+    #[test]
+    fn email_policy_rejects_malformed_and_oversized_addresses() {
+        for invalid in [
+            "",
+            "foo",
+            "a@@example.com",
+            "a b@example.com",
+            ".a@example.com",
+            "a@example..com",
+        ] {
+            assert!(
+                matches!(
+                    normalize_email(invalid),
+                    Err(CanopyError::InvalidArgument(_))
+                ),
+                "expected invalid email: {invalid}"
+            );
+        }
+        let oversized = format!("{}@example.com", "a".repeat(245));
+        assert!(matches!(
+            normalize_email(&oversized),
+            Err(CanopyError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn saturated_password_work_fails_with_rate_limit() {
+        let semaphore = Semaphore::new(1);
+        let _permit = semaphore.acquire().await.unwrap();
+
+        let error = run_bounded_password_work(&semaphore, Duration::from_millis(1), || {
+            Ok::<_, CanopyError>(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CanopyError::RateLimited(_)));
+    }
 }

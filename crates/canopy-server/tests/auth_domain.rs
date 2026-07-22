@@ -730,7 +730,7 @@ async fn complete_password_reset_consumes_token_and_writes_new_hash() {
         *TokenDigest::from_secret("reset-token").as_bytes()
     );
     assert!(reset.password_hash_phc.starts_with("$argon2id$"));
-    assert_eq!(reset.policy_version, 1);
+    assert_eq!(reset.policy_version, 2);
     assert_eq!(reset.now_epoch_ms, NOW_MS);
 }
 

@@ -10,6 +10,9 @@ const ARGON2_MEMORY_COST_KIB: u32 = 19_456;
 const ARGON2_TIME_COST: u32 = 2;
 const ARGON2_PARALLELISM: u32 = 1;
 
+pub const PASSWORD_MIN_CHARS: usize = 8;
+pub const PASSWORD_MAX_CHARS: usize = 64;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PasswordPolicy {
     min_chars: usize,
@@ -19,8 +22,8 @@ pub struct PasswordPolicy {
 impl Default for PasswordPolicy {
     fn default() -> Self {
         Self {
-            min_chars: 15,
-            max_chars: 1_024,
+            min_chars: PASSWORD_MIN_CHARS,
+            max_chars: PASSWORD_MAX_CHARS,
         }
     }
 }
@@ -29,14 +32,14 @@ impl PasswordPolicy {
     pub fn validate(&self, password: &str) -> CanopyResult<()> {
         let char_count = password.chars().count();
         if char_count < self.min_chars {
-            return Err(CanopyError::InvalidArgument(
-                "password must be at least 15 characters".into(),
-            ));
+            return Err(CanopyError::InvalidArgument(format!(
+                "password must be at least {PASSWORD_MIN_CHARS} characters"
+            )));
         }
         if char_count > self.max_chars {
-            return Err(CanopyError::InvalidArgument(
-                "password exceeds maximum accepted length".into(),
-            ));
+            return Err(CanopyError::InvalidArgument(format!(
+                "password must be no more than {PASSWORD_MAX_CHARS} characters"
+            )));
         }
         Ok(())
     }
