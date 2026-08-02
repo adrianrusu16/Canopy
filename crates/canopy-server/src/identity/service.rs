@@ -146,7 +146,7 @@ pub struct GoogleLoginChallenge {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GoogleLoginOutcome {
-    Session(SessionEnvelope),
+    Session(Box<SessionEnvelope>),
     AccountLinkRequired { link_challenge_id: String },
 }
 
@@ -491,11 +491,9 @@ impl IdentityService {
                     expires_at_epoch_ms: now + REFRESH_TOKEN_TTL_MS,
                 })
                 .await?;
-            return Ok(GoogleLoginOutcome::Session(self.session_envelope(
-                stored,
-                refresh_token,
-                now,
-            )?));
+            return Ok(GoogleLoginOutcome::Session(Box::new(
+                self.session_envelope(stored, refresh_token, now)?,
+            )));
         }
 
         if let Some(email) = verified_email.as_deref()
@@ -530,11 +528,9 @@ impl IdentityService {
                 },
             )
             .await?;
-        Ok(GoogleLoginOutcome::Session(self.session_envelope(
-            stored,
-            refresh_token,
-            now,
-        )?))
+        Ok(GoogleLoginOutcome::Session(Box::new(
+            self.session_envelope(stored, refresh_token, now)?,
+        )))
     }
 
     pub async fn link_google(&self, command: LinkGoogleCommand) -> CanopyResult<()> {

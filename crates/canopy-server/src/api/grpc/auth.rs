@@ -180,7 +180,7 @@ impl AuthService for AuthGrpc {
             .map_err(to_status)?;
         let result = match outcome {
             GoogleLoginOutcome::Session(envelope) => {
-                google_login_response::Result::Session(to_proto_session_envelope(envelope))
+                google_login_response::Result::Session(to_proto_session_envelope(*envelope))
             }
             GoogleLoginOutcome::AccountLinkRequired { link_challenge_id } => {
                 google_login_response::Result::AccountLinkRequired(AccountLinkRequired {
