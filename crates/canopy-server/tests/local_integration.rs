@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use canopy_proto::{
     GetStatusRequest, ListSessionsRequest, LoginPasswordRequest, LogoutRequest,
     RefreshSessionRequest, RegisterPasswordRequest, ResolvePlaybackRequest, SearchRequest,
-    VerifyEmailRequest, auth_service_client::AuthServiceClient,
+    SessionEnvelope, VerifyEmailRequest, auth_service_client::AuthServiceClient,
     catalog_service_client::CatalogServiceClient, playback_service_client::PlaybackServiceClient,
     system_service_client::SystemServiceClient,
 };
@@ -18,6 +18,22 @@ use tonic::{
 };
 
 const PASSWORD: &str = "Canopy-Local-Test-Password-42!";
+
+fn assert_complete_session_envelope(envelope: &SessionEnvelope) {
+    assert!(envelope.access_expires_at_epoch_ms > 0);
+    assert!(envelope.refresh_expires_at_epoch_ms > 0);
+    assert!(
+        envelope
+            .account
+            .as_ref()
+            .and_then(|account| account.created_at.as_ref())
+            .is_some()
+    );
+    let session = envelope.session.as_ref().expect("session is required");
+    assert!(session.created_at.is_some());
+    assert!(session.last_used_at.is_some());
+    assert!(session.expires_at.is_some());
+}
 
 fn endpoint(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.into())
@@ -171,13 +187,21 @@ async fn local_environment_auth_and_playback_smoke() {
         !verified.access_token.is_empty() && !verified.refresh_token.is_empty(),
         "verification must return a complete session envelope"
     );
+    assert_complete_session_envelope(&verified);
 
-    auth.list_sessions(authorized(
-        ListSessionsRequest { page: None },
-        &verified.access_token,
-    ))
-    .await
-    .expect("verified session should authorize protected calls");
+    let listed = auth
+        .list_sessions(authorized(
+            ListSessionsRequest { page: None },
+            &verified.access_token,
+        ))
+        .await
+        .expect("verified session should authorize protected calls")
+        .into_inner();
+    assert!(listed.sessions.iter().all(|session| {
+        session.created_at.is_some()
+            && session.last_used_at.is_some()
+            && session.expires_at.is_some()
+    }));
     auth.logout(authorized(LogoutRequest {}, &verified.access_token))
         .await
         .expect("verification session logout should succeed");
@@ -191,6 +215,7 @@ async fn local_environment_auth_and_playback_smoke() {
         .await
         .expect("password login should succeed")
         .into_inner();
+    assert_complete_session_envelope(&logged_in);
     let refreshed = auth
         .refresh_session(RefreshSessionRequest {
             refresh_token: logged_in.refresh_token.clone(),
@@ -198,6 +223,7 @@ async fn local_environment_auth_and_playback_smoke() {
         .await
         .expect("single refresh should succeed")
         .into_inner();
+    assert_complete_session_envelope(&refreshed);
     assert!(
         logged_in.refresh_token != refreshed.refresh_token,
         "refresh must rotate the opaque refresh token"

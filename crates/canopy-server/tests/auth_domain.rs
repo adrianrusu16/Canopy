@@ -27,6 +27,13 @@ use canopy_server::identity::{
 const NOW_MS: u64 = 1_780_000_000_000;
 const PASSPHRASE: &str = "correct horse battery staple";
 
+fn timestamp_from_test_epoch_ms(epoch_ms: u64) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: (epoch_ms / 1_000) as i64,
+        nanos: ((epoch_ms % 1_000) * 1_000_000) as i32,
+    }
+}
+
 #[derive(Default)]
 struct FakeIdentityRepository {
     registered: Mutex<Option<CapturedRegistration>>,
@@ -1053,8 +1060,31 @@ async fn auth_grpc_maps_verify_email_to_session_envelope() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(response.account.unwrap().id, "account-1");
-    assert_eq!(response.session.unwrap().id, "grpc-session-1");
+    assert_eq!(response.access_expires_at_epoch_ms, 1_780_000_900_000);
+    assert_eq!(
+        response.refresh_expires_at_epoch_ms,
+        (NOW_MS + 86_400_000) as i64
+    );
+    let account = response.account.expect("account is required");
+    assert_eq!(account.id, "account-1");
+    assert_eq!(
+        account.created_at,
+        Some(timestamp_from_test_epoch_ms(NOW_MS))
+    );
+    let session = response.session.expect("session is required");
+    assert_eq!(session.id, "grpc-session-1");
+    assert_eq!(
+        session.created_at,
+        Some(timestamp_from_test_epoch_ms(NOW_MS))
+    );
+    assert_eq!(
+        session.last_used_at,
+        Some(timestamp_from_test_epoch_ms(NOW_MS))
+    );
+    assert_eq!(
+        session.expires_at,
+        Some(timestamp_from_test_epoch_ms(NOW_MS + 86_400_000))
+    );
     assert!(!response.access_token.is_empty());
     assert!(!response.refresh_token.is_empty());
 }
@@ -1129,6 +1159,7 @@ async fn auth_grpc_get_account_returns_authenticated_account() {
     let account = response.account.unwrap();
     assert_eq!(account.id, "account-1");
     assert_eq!(account.primary_email, "ada@example.test");
+    assert!(account.created_at.is_some());
 }
 
 #[tokio::test]
@@ -1205,6 +1236,11 @@ async fn auth_grpc_session_management_requires_valid_access_token() {
 
     let listed = grpc.list_sessions(list_request).await.unwrap().into_inner();
     assert_eq!(listed.sessions.len(), 2);
+    assert!(listed.sessions.iter().all(|session| {
+        session.created_at.is_some()
+            && session.last_used_at.is_some()
+            && session.expires_at.is_some()
+    }));
     assert_eq!(
         listed
             .sessions

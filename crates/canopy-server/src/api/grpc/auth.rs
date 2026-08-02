@@ -319,7 +319,8 @@ fn to_proto_session_envelope(envelope: DomainSessionEnvelope) -> SessionEnvelope
     SessionEnvelope {
         access_token: envelope.access_token,
         refresh_token: envelope.refresh_token,
-        access_expires_at_epoch_ms: 0,
+        access_expires_at_epoch_ms: i64::try_from(envelope.access_expires_at_epoch_ms)
+            .unwrap_or(i64::MAX),
         refresh_expires_at_epoch_ms: i64::try_from(envelope.session.expires_at_epoch_ms)
             .unwrap_or(i64::MAX),
         account: Some(to_proto_account(envelope.account)),
@@ -332,7 +333,7 @@ fn to_proto_account(account: AccountRecord) -> AccountSummary {
         id: account.id,
         primary_email: account.primary_email.unwrap_or_default(),
         status: account_status_name(account.status).into(),
-        created_at: None,
+        created_at: Some(timestamp_from_epoch_ms(account.created_at_epoch_ms)),
     }
 }
 
@@ -340,9 +341,9 @@ fn to_proto_session(session: AuthSession, current: bool) -> SessionSummary {
     SessionSummary {
         id: session.id,
         device_label: session.device_label,
-        created_at: None,
-        last_used_at: None,
-        expires_at: None,
+        created_at: Some(timestamp_from_epoch_ms(session.created_at_epoch_ms)),
+        last_used_at: Some(timestamp_from_epoch_ms(session.last_used_at_epoch_ms)),
+        expires_at: Some(timestamp_from_epoch_ms(session.expires_at_epoch_ms)),
         current,
     }
 }
