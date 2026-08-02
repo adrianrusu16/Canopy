@@ -11,8 +11,13 @@ fn access_token_round_trips_required_claims() {
         ttl_seconds: 900,
     });
 
-    let token = issuer.issue("account-1", "session-1", 1_000).unwrap();
-    let claims = issuer.verify(&token, 1_100).unwrap();
+    let issued = issuer.issue("account-1", "session-1", 1_000).unwrap();
+    let claims = issuer.verify(&issued.token, 1_100).unwrap();
+    assert_eq!(issued.expires_at_epoch_ms, 1_900_000);
+    assert_eq!(
+        issued.expires_at_epoch_ms,
+        claims.expires_at_epoch_seconds * 1_000
+    );
 
     assert_eq!(claims.subject, "account-1");
     assert_eq!(claims.session_id, "session-1");
@@ -39,9 +44,9 @@ fn access_token_rejects_wrong_audience() {
         ttl_seconds: 900,
     });
 
-    let token = issuer.issue("account-1", "session-1", 1_000).unwrap();
+    let issued = issuer.issue("account-1", "session-1", 1_000).unwrap();
 
-    assert!(verifier.verify(&token, 1_100).is_err());
+    assert!(verifier.verify(&issued.token, 1_100).is_err());
 }
 
 #[test]
@@ -53,9 +58,9 @@ fn access_token_rejects_expired_tokens() {
         ttl_seconds: 900,
     });
 
-    let token = issuer.issue("account-1", "session-1", 1_000).unwrap();
+    let issued = issuer.issue("account-1", "session-1", 1_000).unwrap();
 
-    assert!(issuer.verify(&token, 1_901).is_err());
+    assert!(issuer.verify(&issued.token, 1_901).is_err());
 }
 
 #[test]
@@ -80,9 +85,12 @@ fn access_token_issuer_uses_configured_signing_key() {
             ttl_seconds: 900,
         });
 
-    let token = issuer.issue("account-1", "session-1", 1_000).unwrap();
+    let issued = issuer.issue("account-1", "session-1", 1_000).unwrap();
 
-    assert_eq!(verifier.verify(&token, 1_100).unwrap().subject, "account-1");
+    assert_eq!(
+        verifier.verify(&issued.token, 1_100).unwrap().subject,
+        "account-1"
+    );
 }
 #[test]
 fn opaque_tokens_are_random_digestible_and_redacted() {

@@ -24,5 +24,6 @@ pub use service::{
     VerifyEmailCommand,
 };
 pub use tokens::{
-    AccessTokenClaims, AccessTokenConfig, Ed25519AccessTokenIssuer, OpaqueToken, TokenDigest,
+    AccessTokenClaims, AccessTokenConfig, Ed25519AccessTokenIssuer, IssuedAccessToken, OpaqueToken,
+    TokenDigest,
 };

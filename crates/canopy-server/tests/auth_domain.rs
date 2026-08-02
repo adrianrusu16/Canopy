@@ -1013,6 +1013,10 @@ async fn refresh_session_rotates_presented_token_and_returns_replacement() {
         .unwrap();
 
     assert_eq!(envelope.session.id, "refresh-session-1");
+    assert_eq!(
+        envelope.access_expires_at_epoch_ms,
+        (NOW_MS / 1_000 + 900) * 1_000
+    );
     assert!(!envelope.access_token.is_empty());
     assert!(!envelope.refresh_token.is_empty());
 

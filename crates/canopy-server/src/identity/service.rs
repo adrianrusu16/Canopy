@@ -177,6 +177,7 @@ pub struct SessionEnvelope {
     pub session: AuthSession,
     pub access_token: String,
     pub refresh_token: String,
+    pub access_expires_at_epoch_ms: u64,
 }
 
 pub struct IdentityService {
@@ -709,7 +710,7 @@ impl IdentityService {
         refresh_token: OpaqueToken,
         now_epoch_ms: u64,
     ) -> CanopyResult<SessionEnvelope> {
-        let access_token = self.access_tokens.issue(
+        let issued_access_token = self.access_tokens.issue(
             &stored.account.id,
             &stored.session.id,
             now_epoch_ms / 1000,
@@ -717,7 +718,8 @@ impl IdentityService {
         Ok(SessionEnvelope {
             account: stored.account,
             session: stored.session,
-            access_token,
+            access_token: issued_access_token.token,
+            access_expires_at_epoch_ms: issued_access_token.expires_at_epoch_ms,
             refresh_token: refresh_token.into_string(),
         })
     }
@@ -742,14 +744,15 @@ impl IdentityService {
             )
             .await?;
 
-        let access_token =
+        let issued_access_token =
             self.access_tokens
                 .issue(&stored.account.id, &stored.session.id, now / 1000)?;
 
         Ok(SessionEnvelope {
             account: stored.account,
             session: stored.session,
-            access_token,
+            access_token: issued_access_token.token,
+            access_expires_at_epoch_ms: issued_access_token.expires_at_epoch_ms,
             refresh_token: refresh_token.into_string(),
         })
     }

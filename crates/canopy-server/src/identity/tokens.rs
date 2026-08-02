@@ -28,6 +28,12 @@ pub struct AccessTokenClaims {
     pub key_id: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct IssuedAccessToken {
+    pub token: String,
+    pub expires_at_epoch_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct Ed25519AccessTokenIssuer {
     config: AccessTokenConfig,
@@ -95,7 +101,7 @@ impl Ed25519AccessTokenIssuer {
         account_id: &str,
         session_id: &str,
         now_epoch_seconds: u64,
-    ) -> CanopyResult<String> {
+    ) -> CanopyResult<IssuedAccessToken> {
         let signing_key = self.signing_key.as_ref().ok_or_else(|| {
             CanopyError::Internal("access-token verifier cannot issue tokens".into())
         })?;
@@ -104,13 +110,14 @@ impl Ed25519AccessTokenIssuer {
             typ: "JWT".into(),
             kid: self.config.key_id.clone(),
         };
+        let expires_at_epoch_seconds = now_epoch_seconds + self.config.ttl_seconds;
         let payload = AccessTokenPayload {
             iss: self.config.issuer.clone(),
             aud: self.config.audience.clone(),
             sub: account_id.into(),
             sid: session_id.into(),
             iat: now_epoch_seconds,
-            exp: now_epoch_seconds + self.config.ttl_seconds,
+            exp: expires_at_epoch_seconds,
             jti: OpaqueToken::generate().into_string(),
             kid: self.config.key_id.clone(),
         };
@@ -121,7 +128,10 @@ impl Ed25519AccessTokenIssuer {
         let signature = signing_key.sign(signing_input.as_bytes());
         let signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
 
-        Ok(format!("{signing_input}.{signature}"))
+        Ok(IssuedAccessToken {
+            token: format!("{signing_input}.{signature}"),
+            expires_at_epoch_ms: expires_at_epoch_seconds * 1_000,
+        })
     }
 
     pub fn verify(&self, token: &str, now_epoch_seconds: u64) -> CanopyResult<AccessTokenClaims> {
