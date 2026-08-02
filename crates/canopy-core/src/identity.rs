@@ -39,6 +39,10 @@ pub struct AuthSession {
     /// User-visible device label.
     pub device_label: String,
     /// Absolute session expiry in Unix epoch milliseconds.
+    /// Creation time in Unix epoch milliseconds.
+    pub created_at_epoch_ms: u64,
+    /// Most recent successful use in Unix epoch milliseconds.
+    pub last_used_at_epoch_ms: u64,
     pub expires_at_epoch_ms: u64,
     /// Revocation timestamp when the session is no longer valid.
     pub revoked_at_epoch_ms: Option<u64>,

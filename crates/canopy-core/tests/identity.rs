@@ -18,6 +18,8 @@ fn revoked_sessions_are_not_active() {
         id: "session-1".into(),
         account_id: "account-1".into(),
         device_label: "PandaWave".into(),
+        created_at_epoch_ms: 1_000,
+        last_used_at_epoch_ms: 2_000,
         expires_at_epoch_ms: 10_000,
         revoked_at_epoch_ms: Some(5_000),
     };

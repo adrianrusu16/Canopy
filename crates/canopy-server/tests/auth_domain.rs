@@ -602,6 +602,8 @@ async fn email_verification_consumes_challenge_and_issues_device_session() {
         account_id: account.id.clone(),
         device_label: "PandaWave Android".into(),
         expires_at_epoch_ms: NOW_MS + 86_400_000,
+        created_at_epoch_ms: NOW_MS,
+        last_used_at_epoch_ms: NOW_MS,
         revoked_at_epoch_ms: None,
     };
     let repo = Arc::new(FakeIdentityRepository::with_activation(
@@ -648,6 +650,8 @@ fn active_session(id: &str) -> AuthSession {
         account_id: "account-1".into(),
         device_label: "PandaWave Android".into(),
         expires_at_epoch_ms: NOW_MS + 86_400_000,
+        created_at_epoch_ms: NOW_MS,
+        last_used_at_epoch_ms: NOW_MS,
         revoked_at_epoch_ms: None,
     }
 }
@@ -1167,6 +1171,8 @@ async fn auth_grpc_session_management_requires_valid_access_token() {
         account_id: account.id.clone(),
         device_label: "PandaWave Tablet".into(),
         expires_at_epoch_ms: NOW_MS + 86_400_000,
+        created_at_epoch_ms: NOW_MS,
+        last_used_at_epoch_ms: NOW_MS,
         revoked_at_epoch_ms: None,
     };
     let repo = Arc::new(FakeIdentityRepository::with_activation_and_sessions(

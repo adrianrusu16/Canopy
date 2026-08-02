@@ -331,6 +331,9 @@ async fn postgres_identity_session_validation_listing_and_revocation_are_account
         )
         .await
         .expect("email verification should create an initial session");
+    assert!(activated.session.created_at_epoch_ms > 0);
+    assert!(activated.session.last_used_at_epoch_ms >= activated.session.created_at_epoch_ms);
+    assert_eq!(activated.session.expires_at_epoch_ms, expires_at);
 
     let second = identity
         .create_session(CreateSessionRecord {
@@ -356,6 +359,17 @@ async fn postgres_identity_session_validation_listing_and_revocation_are_account
         .await
         .expect("account sessions should list");
     assert_eq!(listed.len(), 2);
+    assert!(listed.iter().all(|session| session.created_at_epoch_ms > 0));
+    assert!(
+        listed
+            .iter()
+            .all(|session| session.last_used_at_epoch_ms >= session.created_at_epoch_ms)
+    );
+    assert!(
+        listed
+            .iter()
+            .all(|session| session.expires_at_epoch_ms == expires_at)
+    );
     assert!(
         listed
             .iter()
@@ -471,11 +485,15 @@ async fn postgres_identity_refresh_rotation_reuse_revokes_session_family() {
     });
 
     let (first, second) = tokio::join!(first, second);
-    match (first, second) {
-        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {}
+    let refreshed = match (first, second) {
+        (Ok(session), Err(_)) | (Err(_), Ok(session)) => session,
         (Ok(_), Ok(_)) => panic!("refresh token was rotated more than once"),
-        (Err(first), Err(second)) => panic!("both refresh attempts failed: {first:?}; {second:?}"),
-    }
+        (Err(first), Err(second)) => {
+            panic!("both refresh attempts failed: {first:?}; {second:?}")
+        }
+    };
+    assert_eq!(refreshed.session.last_used_at_epoch_ms, now);
+    assert_eq!(refreshed.session.expires_at_epoch_ms, expires_at);
 
     let revoked_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM auth_sessions WHERE id = $1::uuid AND revoked_at IS NOT NULL",

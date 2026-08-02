@@ -113,6 +113,8 @@ fn session_from_row(row: &sqlx::postgres::PgRow) -> CanopyResult<AuthSession> {
             .to_string(),
         device_label: row.try_get("device_label").map_err(db_err)?,
         expires_at_epoch_ms: epoch_ms(row, "expires_at_epoch_ms"),
+        created_at_epoch_ms: epoch_ms(row, "session_created_at_epoch_ms"),
+        last_used_at_epoch_ms: epoch_ms(row, "last_used_at_epoch_ms"),
         revoked_at_epoch_ms: row
             .try_get::<Option<i64>, _>("revoked_at_epoch_ms")
             .map_err(db_err)?
@@ -882,6 +884,8 @@ impl IdentityRepository for PgIdentityRepository {
                     s.account_id AS session_account_id,
                     s.device_label,
                     floor(extract(epoch from s.expires_at) * 1000)::bigint AS expires_at_epoch_ms,
+                    floor(extract(epoch from s.created_at) * 1000)::bigint AS session_created_at_epoch_ms,
+                    floor(extract(epoch from s.last_used_at) * 1000)::bigint AS last_used_at_epoch_ms,
                     CASE
                         WHEN s.revoked_at IS NULL THEN NULL
                         ELSE floor(extract(epoch from s.revoked_at) * 1000)::bigint
@@ -961,6 +965,8 @@ impl IdentityRepository for PgIdentityRepository {
                     s.account_id AS session_account_id,
                     s.device_label,
                     floor(extract(epoch from s.expires_at) * 1000)::bigint AS expires_at_epoch_ms,
+                    floor(extract(epoch from s.created_at) * 1000)::bigint AS session_created_at_epoch_ms,
+                    floor(extract(epoch from s.last_used_at) * 1000)::bigint AS last_used_at_epoch_ms,
                     CASE
                         WHEN s.revoked_at IS NULL THEN NULL
                         ELSE floor(extract(epoch from s.revoked_at) * 1000)::bigint
@@ -1131,6 +1137,8 @@ impl IdentityRepository for PgIdentityRepository {
                     s.account_id AS session_account_id,
                     s.device_label,
                     floor(extract(epoch from s.expires_at) * 1000)::bigint AS expires_at_epoch_ms,
+                    floor(extract(epoch from s.created_at) * 1000)::bigint AS session_created_at_epoch_ms,
+                    floor(extract(epoch from s.last_used_at) * 1000)::bigint AS last_used_at_epoch_ms,
                     CASE
                         WHEN s.revoked_at IS NULL THEN NULL
                         ELSE floor(extract(epoch from s.revoked_at) * 1000)::bigint
@@ -1302,6 +1310,8 @@ impl IdentityRepository for PgIdentityRepository {
                     s.account_id AS session_account_id,
                     s.device_label,
                     floor(extract(epoch from s.expires_at) * 1000)::bigint AS expires_at_epoch_ms,
+                    floor(extract(epoch from s.created_at) * 1000)::bigint AS session_created_at_epoch_ms,
+                    floor(extract(epoch from s.last_used_at) * 1000)::bigint AS last_used_at_epoch_ms,
                     CASE
                         WHEN s.revoked_at IS NULL THEN NULL
                         ELSE floor(extract(epoch from s.revoked_at) * 1000)::bigint
@@ -1478,6 +1488,8 @@ impl IdentityRepository for PgIdentityRepository {
                     s.account_id AS session_account_id,
                     s.device_label,
                     floor(extract(epoch from s.expires_at) * 1000)::bigint AS expires_at_epoch_ms,
+                    floor(extract(epoch from s.created_at) * 1000)::bigint AS session_created_at_epoch_ms,
+                    floor(extract(epoch from s.last_used_at) * 1000)::bigint AS last_used_at_epoch_ms,
                     CASE
                         WHEN s.revoked_at IS NULL THEN NULL
                         ELSE floor(extract(epoch from s.revoked_at) * 1000)::bigint
