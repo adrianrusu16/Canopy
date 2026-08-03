@@ -9,7 +9,7 @@ fn nginx_config_is_private_and_redacted() {
 
     for required in [
         "auth_request",
-        "X-Canopy-Stream-Token",
+        "proxy_set_header X-Canopy-Original-URI $request_uri;",
         "auth_request_set",
         "/_canopy_media/",
         "internal",
@@ -25,6 +25,7 @@ fn nginx_config_is_private_and_redacted() {
 
     assert!(!config.contains("ssl_certificate"));
     assert!(!config.contains("access_log on"));
+    assert!(!config.contains("X-Canopy-Stream-Token"));
 }
 
 const STREAM_SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
