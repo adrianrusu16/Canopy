@@ -19,9 +19,11 @@ service PlaybackService {
   rpc ResolvePlayback(ResolvePlaybackRequest) returns (PlaybackSource);
 }
 
-// Batched discovery feeds. Recommendations can be added compatibly in v1.
+// Batched discovery-family feeds.
 service DiscoveryService {
   rpc GetDiscoveryFeed(GetDiscoveryFeedRequest) returns (GetDiscoveryFeedResponse);
+  rpc GetForYouFeed(GetForYouFeedRequest) returns (GetForYouFeedResponse);
+  rpc GetRecommendations(GetRecommendationsRequest) returns (GetRecommendationsResponse);
 }
 
 // Logged-in profile lifecycle and ordinary UI preferences.
@@ -157,6 +159,26 @@ message GetDiscoveryFeedResponse {
   repeated TrackSummary tracks = 1;
   PageInfo page_info = 2;
 }
+message GetForYouFeedRequest {
+  repeated string exclude_track_ids = 1;
+  PageRequest page = 2;
+}
+
+message GetForYouFeedResponse {
+  repeated TrackSummary tracks = 1;
+  PageInfo page_info = 2;
+}
+
+message GetRecommendationsRequest {
+  repeated string exclude_track_ids = 1;
+  PageRequest page = 2;
+}
+
+message GetRecommendationsResponse {
+  repeated TrackSummary tracks = 1;
+  PageInfo page_info = 2;
+}
+
 
 message Profile {
   string id = 1;

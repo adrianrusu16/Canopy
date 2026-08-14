@@ -1,5 +1,6 @@
 use canopy_proto::{
-    ArtworkRef, PageInfo, PageRequest, ResolvePlaybackRequest, TrackSummary,
+    ArtworkRef, GetForYouFeedRequest, GetForYouFeedResponse, GetRecommendationsRequest,
+    GetRecommendationsResponse, PageInfo, PageRequest, ResolvePlaybackRequest, TrackSummary,
     auth_service_client::AuthServiceClient, catalog_service_client::CatalogServiceClient,
     discovery_service_client::DiscoveryServiceClient, history_service_client::HistoryServiceClient,
     library_service_client::LibraryServiceClient, playback_service_client::PlaybackServiceClient,
@@ -35,6 +36,47 @@ fn audited_v1_common_messages_have_platform_neutral_shapes() {
     assert_eq!(page_info.next_page_token, "next");
     assert_eq!(playback.track_id, "track-1");
     assert_eq!(track.artwork.unwrap().id, "artwork-1");
+}
+
+#[test]
+fn audited_v1_exposes_independent_discovery_feed_messages() {
+    let page = Some(PageRequest {
+        page_size: 25,
+        page_token: String::new(),
+    });
+
+    let for_you = GetForYouFeedRequest {
+        exclude_track_ids: vec!["track-1".into()],
+        page: page.clone(),
+    };
+    let recommendations = GetRecommendationsRequest {
+        exclude_track_ids: vec!["track-1".into()],
+        page,
+    };
+
+    let for_you_response = GetForYouFeedResponse {
+        tracks: Vec::new(),
+        page_info: None,
+    };
+    let recommendations_response = GetRecommendationsResponse {
+        tracks: Vec::new(),
+        page_info: None,
+    };
+
+    assert_eq!(for_you.exclude_track_ids, vec!["track-1"]);
+    assert_eq!(recommendations.exclude_track_ids, vec!["track-1"]);
+    assert!(for_you_response.tracks.is_empty());
+    assert!(recommendations_response.tracks.is_empty());
+}
+
+#[allow(dead_code)]
+fn generated_discovery_client_has_named_feed_methods(
+    client: &mut DiscoveryServiceClient<tonic::transport::Channel>,
+    for_you: GetForYouFeedRequest,
+    recommendations: GetRecommendationsRequest,
+) {
+    std::mem::drop(client.get_for_you_feed(for_you));
+    std::mem::drop(client.get_recommendations(recommendations));
 }
 
 #[test]
