@@ -4,11 +4,11 @@ use serde_json::Value;
 
 const EXPECTED_BSR_MODULE: &str = "buf.build/pandawave/canopy-api";
 const EXPECTED_RELEASE: &str = "v0.2.0";
-const EXPECTED_COMMIT: &str = "145678c1d73e45b7bbaebf7e16ee4d64";
+const EXPECTED_COMMIT: &str = "af019e2d7fa245a2a7d9fc21a4dd9afa";
 const EXPECTED_PROST_PACKAGE: &str = "pandawave_canopy-api_community_neoeinstein-prost";
-const EXPECTED_PROST_VERSION: &str = "=0.5.0-00000000000000-145678c1d73e.2";
+const EXPECTED_PROST_VERSION: &str = "=0.5.0-00000000000000-af019e2d7fa2.2";
 const EXPECTED_TONIC_PACKAGE: &str = "pandawave_canopy-api_community_neoeinstein-tonic";
-const EXPECTED_TONIC_VERSION: &str = "=0.5.0-00000000000000-145678c1d73e.4";
+const EXPECTED_TONIC_VERSION: &str = "=0.5.0-00000000000000-af019e2d7fa2.4";
 
 const FORBIDDEN_KEYS: &[&str] = &[
     "database_url",

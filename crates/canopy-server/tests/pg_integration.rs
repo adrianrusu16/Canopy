@@ -3,12 +3,12 @@
 use canopy_core::{
     AudioAsset, AudioAssetRepository, AuthOutboxFailureKind, AuthOutboxRepository, CatalogIngest,
     CatalogRepository, ClaimAuthOutboxBatch, ConsumeChallenge, CreateGoogleLinkChallenge,
-    CreateGoogleLoginChallenge, CreateSessionRecord, ExternalIdentityRecord, IdentityRepository,
-    InstanceSettingsRepository, LibraryRepository, LikeRepository, MarkAuthOutboxFailed,
-    MediaImportRepository, Page, PendingImportOutcome, PendingMediaImport, PlayableAssetRepository,
-    PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository, PreferencesRepository,
-    ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack, RegisterPasswordRecord,
-    RotateRefreshTokenRecord, StreamAudience,
+    CreateGoogleLoginChallenge, CreateSessionRecord, DiscoveryRepository, ExternalIdentityRecord,
+    IdentityRepository, InstanceSettingsRepository, LibraryRepository, LikeRepository,
+    MarkAuthOutboxFailed, MediaImportRepository, Page, PendingImportOutcome, PendingMediaImport,
+    PlayableAssetRepository, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
+    PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
+    RegisterPasswordRecord, RotateRefreshTokenRecord, StreamAudience,
 };
 use canopy_server::jade_store::{
     PgAudioAssetRepository, PgAuthOutboxRepository, PgCatalogRepository, PgIdentityRepository,
@@ -826,6 +826,159 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
     assert_eq!(duplicate_discovery_rows, 0);
 
     cleanup_provider_track(&pool, "canopy-test", &provider_id).await;
+}
+#[tokio::test]
+async fn postgres_discovery_fallback_preserves_public_visibility_policy() {
+    let pool = connect_test_pool().await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrations should apply cleanly");
+
+    let provider_id = format!("discovery-fallback-{}", uuid::Uuid::new_v4());
+    cleanup_provider_track(&pool, "canopy-test", &provider_id).await;
+
+    let catalog = PgCatalogRepository::new(pool.clone());
+    let quarantined_id = catalog
+        .ingest(provider_track(provider_id.clone()))
+        .await
+        .expect("quarantined discovery fixture should ingest");
+
+    let unique = uuid::Uuid::new_v4();
+    let artist_id: String = sqlx::query_scalar(
+        "INSERT INTO artists (name, sort_name) VALUES ($1, $1) RETURNING id::text",
+    )
+    .bind(format!("Discovery Fallback Artist {unique}"))
+    .fetch_one(&pool)
+    .await
+    .expect("fallback artist should insert");
+    let album_id: String = sqlx::query_scalar(
+        "INSERT INTO albums (title, artist_id) VALUES ($1, $2::uuid) RETURNING id::text",
+    )
+    .bind(format!("Discovery Fallback Album {unique}"))
+    .bind(&artist_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fallback album should insert");
+    let approved_license: String = sqlx::query_scalar(
+        r#"
+            INSERT INTO licenses (license_type, source_url, review_status, reviewed_at)
+            VALUES ('CC0', $1, 'approved', NOW())
+            RETURNING id::text
+        "#,
+    )
+    .bind(format!("https://license.test/discovery-fallback/{unique}"))
+    .fetch_one(&pool)
+    .await
+    .expect("fallback license should insert");
+    let explicit_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Explicit Discovery Fallback Track {unique}"),
+            visibility: "release_safe",
+            ingest_status: "ready",
+            owner_profile_id: None,
+            composition_license_id: Some(&approved_license),
+            recording_license_id: Some(&approved_license),
+        },
+    )
+    .await;
+    let eligible_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Eligible Discovery Fallback Track {unique}"),
+            visibility: "release_safe",
+            ingest_status: "ready",
+            owner_profile_id: None,
+            composition_license_id: Some(&approved_license),
+            recording_license_id: Some(&approved_license),
+        },
+    )
+    .await;
+
+    let public_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"
+            SELECT id
+            FROM tracks
+            WHERE visibility = 'release_safe' AND ingest_status = 'ready'
+            ORDER BY id
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("release-safe fixtures should be queryable");
+
+    sqlx::query(
+        r#"
+            UPDATE tracks
+            SET visibility = 'quarantined', ingest_status = 'quarantined'
+            WHERE visibility = 'release_safe'
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("release-safe rows should be temporarily quarantined");
+    sqlx::query("REFRESH MATERIALIZED VIEW mv_discovery_pool")
+        .execute(&pool)
+        .await
+        .expect("discovery view should refresh to an empty snapshot");
+    sqlx::query(
+        r#"
+            UPDATE tracks
+            SET visibility = 'release_safe', ingest_status = 'ready'
+            WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&public_ids)
+    .execute(&pool)
+    .await
+    .expect("release-safe rows should be restored without refreshing the view");
+
+    sqlx::query("UPDATE tracks SET is_explicit = TRUE WHERE id::text = $1")
+        .bind(&explicit_id)
+        .execute(&pool)
+        .await
+        .expect("one restored row should become explicit");
+
+    let fallback_result = catalog.shuffle_pool().await;
+
+    sqlx::query("DELETE FROM tracks WHERE id::text = ANY($1)")
+        .bind(vec![explicit_id.clone(), eligible_id.clone()])
+        .execute(&pool)
+        .await
+        .expect("fallback track fixtures should be removed");
+    sqlx::query("DELETE FROM albums WHERE id::text = $1")
+        .bind(&album_id)
+        .execute(&pool)
+        .await
+        .expect("fallback album fixture should be removed");
+    sqlx::query("DELETE FROM artists WHERE id::text = $1")
+        .bind(&artist_id)
+        .execute(&pool)
+        .await
+        .expect("fallback artist fixture should be removed");
+    sqlx::query("DELETE FROM licenses WHERE id::text = $1")
+        .bind(&approved_license)
+        .execute(&pool)
+        .await
+        .expect("fallback license fixture should be removed");
+    cleanup_provider_track(&pool, "canopy-test", &provider_id).await;
+    sqlx::query("REFRESH MATERIALIZED VIEW mv_discovery_pool")
+        .execute(&pool)
+        .await
+        .expect("discovery view should be restored after the assertion snapshot");
+
+    let items = fallback_result.expect("fallback discovery should succeed");
+    let item_ids: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
+
+    assert!(!item_ids.contains(&quarantined_id.as_str()));
+    assert!(!item_ids.contains(&explicit_id.as_str()));
+    assert!(item_ids.contains(&eligible_id.as_str()));
 }
 
 #[tokio::test]

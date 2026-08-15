@@ -5,11 +5,11 @@
     "protobuf_package": "canopy.v1",
     "bsr_module": "buf.build/pandawave/canopy-api",
     "release": "v0.2.0",
-    "commit": "145678c1d73e45b7bbaebf7e16ee4d64",
+    "commit": "af019e2d7fa245a2a7d9fc21a4dd9afa",
     "prost_package": "pandawave_canopy-api_community_neoeinstein-prost",
-    "prost_version": "=0.5.0-00000000000000-145678c1d73e.2",
+    "prost_version": "=0.5.0-00000000000000-af019e2d7fa2.2",
     "tonic_package": "pandawave_canopy-api_community_neoeinstein-tonic",
-    "tonic_version": "=0.5.0-00000000000000-145678c1d73e.4"
+    "tonic_version": "=0.5.0-00000000000000-af019e2d7fa2.4"
   },
   "transport": {
     "grpc_endpoint": "http://127.0.0.1:50051",

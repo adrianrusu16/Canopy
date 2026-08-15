@@ -12,9 +12,9 @@ links, and client-ready environment checks live in the
 
 - BSR module: `buf.build/pandawave/canopy-api`
 - Stable release: `v0.2.0`
-- Immutable BSR commit: `145678c1d73e45b7bbaebf7e16ee4d64`
-- Prost SDK: `=0.5.0-00000000000000-145678c1d73e.2`
-- Tonic SDK: `=0.5.0-00000000000000-145678c1d73e.4`
+- Immutable BSR commit: `af019e2d7fa245a2a7d9fc21a4dd9afa`
+- Prost SDK: `=0.5.0-00000000000000-af019e2d7fa2.2`
+- Tonic SDK: `=0.5.0-00000000000000-af019e2d7fa2.4`
 
 The exact SDK versions in `crates/canopy-proto/Cargo.toml` and `Cargo.lock`
 are the machine-verifiable support declaration. Release labels are useful for

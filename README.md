@@ -11,11 +11,11 @@ This document describes the current Canopy architecture and identifies the remai
 | Workspace / modularization | ✅ Implemented | Cargo workspace: `canopy-proto` (BSR SDK facade), `canopy-core` (domain model, `CanopyError`, repository ports), `canopy-server` (bounded gRPC adapters + `jade_store`). |
 | gRPC server (`tonic`)     | ✅ Implemented | Nine bounded `canopy.v1` services share one listener and use the audited generated BSR contract. |
 | Configuration             | ✅ Implemented | Env-driven configuration validates streaming, identity keys, TLS-only SMTP delivery, PostgreSQL, and managed media before listeners start. |
-| API contract / BSR        | ✅ `v0.2.0` | Implements BSR commit `145678c1d73e45b7bbaebf7e16ee4d64`; Prost `=0.5.0-00000000000000-145678c1d73e.2`; Tonic `=0.5.0-00000000000000-145678c1d73e.4`. |
+| API contract / BSR        | ✅ `v0.2.0` | Implements BSR commit `af019e2d7fa245a2a7d9fc21a4dd9afa`; Prost `=0.5.0-00000000000000-af019e2d7fa2.2`; Tonic `=0.5.0-00000000000000-af019e2d7fa2.4`. |
 | Catalog service           | Partial | Public repository paths are explicit; PostgreSQL and in-memory adapters isolate `release_safe` media from owner-scoped personal media. |
 | Player/session handling   | ✅ Engine-owned | Canopy owns playback-source authorization only. Play/pause/seek/speed/queue/session state belongs to PandaEngine and no backend session repository or control RPC remains. |
 | Search (`pg_trgm`)        | 🟡 Prototype   | Dedicated `SearchService` over the `CatalogRepository` port: query normalization + page-size clamping. PostgreSQL mode uses trigram similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. |
-| Discovery service         | Partial | Public discovery is restricted to `release_safe` + `ready` tracks through a filtered materialized view. |
+| Discovery service         | ✅ Implemented | `GetDiscoveryFeed`, `GetForYouFeed`, and `GetRecommendations` serve the same release-safe discovery feed for now; personalized ranking remains future work. |
 | Playback Resolver         | ✅ Implemented | `ResolvePlayback` is anonymous-compatible and auth-aware: the configured owner receives owner-scoped personal media first with public fallback; other callers receive release-safe public media. Capabilities remain opaque and storage keys never enter client responses. |
 | Auth / Profiles           | ✅ Implemented | Native identity, SMTP challenge delivery, per-device sessions, Google linking, account lifecycle, and authorization for durable profile state are implemented. |
 | Provider Adapters         | Implemented | Deterministic fixture ingestion remains idempotent and quarantined by default; external provider runtime code has been removed. |
@@ -220,7 +220,7 @@ The gRPC API is Canopy's single control-plane contract with PandaEngine. It owns
 
 ```proto
 rpc Search(SearchRequest)
-    returns (stream SearchResult);
+    returns (SearchResponse);
 
 rpc Browse(BrowseRequest)
     returns (BrowseResponse);
@@ -228,8 +228,12 @@ rpc Browse(BrowseRequest)
 rpc ResolvePlayback(PlaybackRequest)
     returns (PlaybackSource);
 
-rpc DiscoveryNext(DiscoveryRequest)
-    returns (DiscoveryTrack);
+rpc GetDiscoveryFeed(GetDiscoveryFeedRequest)
+    returns (GetDiscoveryFeedResponse);
+rpc GetForYouFeed(GetForYouFeedRequest)
+    returns (GetForYouFeedResponse);
+rpc GetRecommendations(GetRecommendationsRequest)
+    returns (GetRecommendationsResponse);
 
 rpc UpsertProfile(UpsertProfileRequest)
     returns (UpsertProfileResponse);
@@ -321,11 +325,9 @@ Private playlists support metadata updates, deletion, pagination, idempotent tra
 
 ### Search Service
 
-Search runs on PostgreSQL full-text search with `pg_trgm` trigram similarity. Queries are normalized, matched via `ILIKE` against trigram-indexed columns, and results are paginated and streamed back to the client as they're found. This is the entire search implementation — there is no separate search engine or index to operate.
+Search runs through the `CatalogRepository` port. Queries are normalized, clamped, and returned as a unary `SearchResponse`. PostgreSQL mode uses `pg_trgm` similarity over tracks, artists, and albums; in-memory mode keeps the lightweight demo matcher. There is no separate search engine or external index to operate.
 
-Ranking and personalized suggestions are intentionally out of scope for the initial implementation. They are addressed only once trigram search has been observed to be insufficient for the catalog's actual size and query patterns, at which point a dedicated search engine becomes a deliberate, evidence-driven addition rather than a default.
-
----
+Personalized suggestions are intentionally separate from text search. They can evolve once discovery and observed catalog/query patterns justify a dedicated ranking layer.
 
 ### Catalog Service
 
@@ -335,9 +337,9 @@ The catalog service owns artists, albums, and tracks and serves the hierarchical
 
 ### Discovery Service
 
-Discovery serves the shuffle channel: randomized playback with diversity filtering and exclusion of recently played tracks. Track selection is sourced from a pre-shuffled materialized view rather than an `ORDER BY random()` query against the live catalog table, so selection cost stays flat as the catalog grows. The materialized view is refreshed on a schedule independent of request traffic.
+Discovery serves batched feed endpoints for the shuffle channel: randomized playback with diversity filtering and exclusion of recently played tracks. Track selection is sourced from a pre-shuffled materialized view rather than an `ORDER BY random()` query against the live catalog table, so selection cost stays flat as the catalog grows. If the materialized view is empty, the PostgreSQL fallback applies the same public policy filters before reading the live catalog.
 
-A recommendation engine is a future layer on top of this service; the initial implementation is uniform random selection with the diversity and exclusion rules above.
+`GetDiscoveryFeed`, `GetForYouFeed`, and `GetRecommendations` currently delegate to the same discovery selector. A recommendation engine remains a future layer on top of these RPCs; the initial implementation is uniform random selection with the diversity and exclusion rules above.
 
 ---
 
@@ -553,11 +555,11 @@ sequenceDiagram
     participant PostgreSQL
     participant Nginx
 
-    PandaWave->>PandaEngine: DiscoveryNext()
-    PandaEngine->>Canopy: DiscoveryNext()
+    PandaWave->>PandaEngine: GetDiscoveryFeed() / GetForYouFeed() / GetRecommendations()
+    PandaEngine->>Canopy: DiscoveryService feed request
     Canopy->>PostgreSQL: Read release-safe discovery pool
     PostgreSQL-->>Canopy: Selected track
-    Canopy-->>PandaEngine: DiscoveryTrack
+    Canopy-->>PandaEngine: Feed response
     PandaEngine->>Canopy: ResolvePlayback()
     Canopy-->>PandaEngine: PlaybackSource
     PandaEngine-->>PandaWave: PlaybackSource

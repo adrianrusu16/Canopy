@@ -782,6 +782,9 @@ impl DiscoveryRepository for PgCatalogRepository {
                 JOIN artists a     ON t.artist_id = a.id
                 JOIN albums al     ON t.album_id = al.id
                 {REPRESENTATIVE_ASSET_JOIN}
+                WHERE t.is_explicit = FALSE
+                  AND t.visibility = 'release_safe'
+                  AND t.ingest_status = 'ready'
                 ORDER BY t.created_at
             "#
             );
