@@ -262,12 +262,11 @@ async fn local_environment_auth_and_playback_smoke() {
         .await
         .expect("playback resolution should succeed")
         .into_inner();
-    let public_stream_endpoint = endpoint("CANOPY_STREAM_PUBLIC_BASE_URL", "http://127.0.0.1:8080");
     assert!(
         source
             .stream_url
-            .starts_with(&format!("{public_stream_endpoint}/stream/")),
-        "playback must use the configured public Nginx stream origin"
+            .starts_with("http://127.0.0.1:8080/stream/"),
+        "playback must use the local Nginx stream origin"
     );
 
     let stream_url = Url::parse(&source.stream_url).expect("stream URL should be valid");
@@ -286,15 +285,8 @@ async fn local_environment_auth_and_playback_smoke() {
         .expect("direct stream authorization should be reachable");
     assert_eq!(direct.status(), StatusCode::NO_CONTENT);
 
-    let mut local_stream_url = Url::parse(&endpoint(
-        "CANOPY_LOCAL_STREAM_ENDPOINT",
-        "http://127.0.0.1:8080",
-    ))
-    .expect("local stream endpoint should be valid");
-    local_stream_url.set_path(stream_url.path());
-    local_stream_url.set_query(stream_url.query());
     let response = client
-        .get(local_stream_url)
+        .get(stream_url)
         .header(RANGE, "bytes=0-15")
         .send()
         .await

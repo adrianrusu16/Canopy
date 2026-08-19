@@ -365,24 +365,6 @@ case "$1" in
         die "recorded Canopy PID is stale; refusing mutation"
       fi
     fi
-    stop_managed
-    ;;
-  reset)
-    require_command docker
-    if ! state_present; then
-      echo "local integration: already reset"
-      exit 0
-    fi
-    [[ -f "$runtime_env" ]] \
-      || die "runtime state is incomplete; refusing mutation"
-    if [[ -f "$pid_file" ]]; then
-      if ! read_recorded_pid; then
-        die "recorded Canopy PID is malformed; refusing mutation"
-      fi
-      if [[ -r "/proc/$recorded_pid/stat" ]] && ! recorded_pid_is_owned; then
-        die "recorded Canopy PID is stale; refusing mutation"
-      fi
-    fi
     cleanup_managed
     ;;
   *)

@@ -729,12 +729,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_config_accepts_http_development_urls() {
-        for base_url in [
-            "http://127.0.0.1:18080",
-            "http://localhost:18080",
-            "http://10.0.2.2:18080",
-        ] {
+    fn stream_config_accepts_http_loopback_urls() {
+        for base_url in ["http://127.0.0.1:18080", "http://localhost:18080"] {
             let mut values = required();
             values[0].1 = base_url;
             assert!(parse(&values).is_ok());
