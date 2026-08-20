@@ -146,9 +146,9 @@ mod tests {
         let catalog_repo: Arc<dyn CatalogRepository> = Arc::new(catalog.clone());
         let profiles = Arc::new(InMemoryProfileStore::default());
         let settings = Arc::new(InMemoryInstanceSettingsStore::default());
-        let history_repo = Arc::new(InMemoryPlaybackHistoryStore::default());
-        let library_repo = Arc::new(InMemoryLibraryStore::default());
-        let like_repo = Arc::new(InMemoryLikeStore::default());
+        let history_repo = Arc::new(InMemoryPlaybackHistoryStore::new(catalog_repo.clone()));
+        let library_repo = Arc::new(InMemoryLibraryStore::new(catalog_repo.clone()));
+        let like_repo = Arc::new(InMemoryLikeStore::new(catalog_repo.clone()));
         let preferences_repo = Arc::new(InMemoryPreferencesStore::default());
         let playlist_repo = Arc::new(InMemoryPlaylistStore::default());
         let resolver = ResolverService::new(
@@ -159,14 +159,15 @@ mod tests {
                 ..ResolverConfig::default()
             },
         );
+        let principal = PrincipalService::new(profiles.clone(), settings.clone());
         let services = GrpcServices {
             catalog: DomainCatalogService::new(catalog_repo.clone()),
             search: SearchService::new(catalog_repo.clone()),
             profile: ProfileService::new(profiles.clone(), history_repo.clone())
                 .with_deletion_policy(settings.clone(), catalog_repo),
-            history: HistoryService::new(profiles.clone(), history_repo),
-            library: LibraryService::new(profiles.clone(), library_repo),
-            likes: LikeService::new(profiles.clone(), like_repo),
+            history: HistoryService::new(profiles.clone(), history_repo, principal.clone()),
+            library: LibraryService::new(profiles.clone(), library_repo, principal.clone()),
+            likes: LikeService::new(profiles.clone(), like_repo, principal.clone()),
             preferences: PreferencesService::new(profiles.clone(), preferences_repo),
             playlists: PlaylistService::new(profiles.clone(), playlist_repo),
             health: HealthService::new(),
@@ -174,7 +175,7 @@ mod tests {
             discovery: DomainDiscoveryService::new(Arc::new(catalog)),
             auth: AuthService::new(b"0123456789abcdef0123456789abcdef".to_vec()),
             identity: None,
-            principal: PrincipalService::new(profiles, settings),
+            principal,
             page_tokens: Arc::new(
                 PageTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap(),
             ),

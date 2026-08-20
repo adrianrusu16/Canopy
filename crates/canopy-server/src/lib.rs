@@ -304,9 +304,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         playable_asset_repo = Arc::new(demo_assets().with_instance_settings(settings.clone()));
         profile_repo = Arc::new(jade_store::InMemoryProfileStore::default());
         instance_settings_repo = settings;
-        history_repo = Arc::new(InMemoryPlaybackHistoryStore::default());
-        library_repo = Arc::new(InMemoryLibraryStore::default());
-        like_repo = Arc::new(InMemoryLikeStore::default());
+        history_repo = Arc::new(InMemoryPlaybackHistoryStore::new(catalog_repo.clone()));
+        library_repo = Arc::new(InMemoryLibraryStore::new(catalog_repo.clone()));
+        like_repo = Arc::new(InMemoryLikeStore::new(catalog_repo.clone()));
         preferences_repo = Arc::new(InMemoryPreferencesStore::default());
         playlist_repo = Arc::new(InMemoryPlaylistStore::default());
         health = HealthService::new()
@@ -321,9 +321,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let principal = PrincipalService::new(profile_repo.clone(), instance_settings_repo.clone());
     let profile = ProfileService::new(profile_repo.clone(), history_repo.clone())
         .with_deletion_policy(instance_settings_repo, catalog_repo);
-    let history = HistoryService::new(profile_repo.clone(), history_repo);
-    let library = LibraryService::new(profile_repo.clone(), library_repo);
-    let likes = LikeService::new(profile_repo.clone(), like_repo);
+    let history = HistoryService::new(profile_repo.clone(), history_repo, principal.clone());
+    let library = LibraryService::new(profile_repo.clone(), library_repo, principal.clone());
+    let likes = LikeService::new(profile_repo.clone(), like_repo, principal.clone());
     let preferences = PreferencesService::new(profile_repo.clone(), preferences_repo);
     let playlists = PlaylistService::new(profile_repo, playlist_repo);
     let discovery = DiscoveryService::new(discovery_repo);

@@ -10,11 +10,14 @@ use canopy_core::{
     PlaybackHistoryRepository, ProfileRepository, UserIdentity, UserProfile,
 };
 
+use crate::principal::PrincipalService;
+
 /// Application service for profile-scoped playback history.
 #[derive(Clone)]
 pub struct HistoryService {
     profiles: Arc<dyn ProfileRepository>,
     history: Arc<dyn PlaybackHistoryRepository>,
+    principal: PrincipalService,
 }
 
 impl HistoryService {
@@ -22,8 +25,13 @@ impl HistoryService {
     pub fn new(
         profiles: Arc<dyn ProfileRepository>,
         history: Arc<dyn PlaybackHistoryRepository>,
+        principal: PrincipalService,
     ) -> Self {
-        Self { profiles, history }
+        Self {
+            profiles,
+            history,
+            principal,
+        }
     }
 
     /// Records a playback event when the real logged-in profile has opted in.
@@ -53,14 +61,18 @@ impl HistoryService {
         if !profile.history_enabled {
             return Ok(false);
         }
+        let scope = self.principal.track_scope_for_profile(&profile.id).await?;
 
         self.history
-            .record(PlaybackHistoryEvent {
-                profile_id: profile.id,
-                track_id: track_id.to_string(),
-                duration_ms,
-                completion_pct,
-            })
+            .record(
+                PlaybackHistoryEvent {
+                    profile_id: profile.id,
+                    track_id: track_id.to_string(),
+                    duration_ms,
+                    completion_pct,
+                },
+                &scope,
+            )
             .await
     }
 
@@ -71,8 +83,9 @@ impl HistoryService {
         page: Page,
     ) -> CanopyResult<PlaybackHistoryPage> {
         let profile = self.profile(identity).await?;
+        let scope = self.principal.track_scope_for_profile(&profile.id).await?;
         self.history
-            .list(&profile.id, normalize_history_page(page))
+            .list(&profile.id, &scope, normalize_history_page(page))
             .await
     }
 
@@ -127,7 +140,11 @@ fn normalize_history_page(page: Page) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jade_store::{InMemoryPlaybackHistoryStore, InMemoryProfileStore};
+    use crate::jade_store::{
+        InMemoryCatalog, InMemoryCatalogEntry, InMemoryInstanceSettingsStore,
+        InMemoryPlaybackHistoryStore, InMemoryProfileStore,
+    };
+    use canopy_core::{IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility};
     use std::sync::Arc;
 
     fn identity() -> UserIdentity {
@@ -136,9 +153,20 @@ mod tests {
         }
     }
 
+    fn service(
+        profiles: Arc<InMemoryProfileStore>,
+        history: Arc<InMemoryPlaybackHistoryStore>,
+    ) -> HistoryService {
+        let principal = PrincipalService::new(
+            profiles.clone(),
+            Arc::new(InMemoryInstanceSettingsStore::default()),
+        );
+        HistoryService::new(profiles, history, principal)
+    }
+
     #[tokio::test]
     async fn record_playback_rejects_missing_profile() {
-        let service = HistoryService::new(
+        let service = service(
             Arc::new(InMemoryProfileStore::default()),
             Arc::new(InMemoryPlaybackHistoryStore::default()),
         );
@@ -159,7 +187,7 @@ mod tests {
             .await
             .unwrap();
         let history = Arc::new(InMemoryPlaybackHistoryStore::default());
-        let service = HistoryService::new(profiles, history.clone());
+        let service = service(profiles, history.clone());
 
         let recorded = service
             .record_playback(&identity(), "track-1", 1000, 0.5)
@@ -178,7 +206,7 @@ mod tests {
             .await
             .unwrap();
         let history = Arc::new(InMemoryPlaybackHistoryStore::default());
-        let service = HistoryService::new(profiles, history.clone());
+        let service = service(profiles, history.clone());
 
         let recorded = service
             .record_playback(&identity(), "track-1", 1000, 0.5)
@@ -209,7 +237,7 @@ mod tests {
             .await
             .unwrap();
         let history = Arc::new(InMemoryPlaybackHistoryStore::default());
-        let service = HistoryService::new(profiles, history);
+        let service = service(profiles, history);
 
         service
             .record_playback(&identity(), "track-1", 1000, 0.5)
@@ -259,8 +287,7 @@ mod tests {
             .upsert_profile("user-123", Some("Ada"), true)
             .await
             .unwrap();
-        let service =
-            HistoryService::new(profiles, Arc::new(InMemoryPlaybackHistoryStore::default()));
+        let service = service(profiles, Arc::new(InMemoryPlaybackHistoryStore::default()));
 
         let err = service.delete_entry(&identity(), " ").await.unwrap_err();
 
@@ -291,8 +318,7 @@ mod tests {
             .upsert_profile("user-123", Some("Ada"), true)
             .await
             .unwrap();
-        let service =
-            HistoryService::new(profiles, Arc::new(InMemoryPlaybackHistoryStore::default()));
+        let service = service(profiles, Arc::new(InMemoryPlaybackHistoryStore::default()));
 
         let err = service
             .record_playback(&identity(), " ", 1000, 0.5)
@@ -300,5 +326,95 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, CanopyError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn ownership_transfer_hides_personal_history_but_allows_deletion() {
+        let profiles = Arc::new(InMemoryProfileStore::default());
+        let owner = profiles
+            .upsert_profile("user-123", Some("Ada"), true)
+            .await
+            .unwrap();
+        let replacement = profiles
+            .upsert_profile("replacement", Some("Grace"), true)
+            .await
+            .unwrap();
+        let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+        let catalog = Arc::new(InMemoryCatalog::from_entries(vec![InMemoryCatalogEntry {
+            item: MediaItem {
+                id: "personal-track".into(),
+                ..MediaItem::default()
+            },
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some(owner.id.clone()),
+        }]));
+        let history = Arc::new(InMemoryPlaybackHistoryStore::new(catalog));
+        let principal = PrincipalService::new(profiles.clone(), settings.clone());
+        let service = HistoryService::new(profiles, history, principal);
+
+        service
+            .record_playback(&identity(), "personal-track", 1000, 1.0)
+            .await
+            .unwrap();
+        let visible = service
+            .list_history(
+                &identity(),
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let history_id = visible.entries[0].id.clone();
+        settings
+            .set_owner_profile_id(&replacement.id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service
+                .list_history(
+                    &identity(),
+                    Page {
+                        limit: 10,
+                        offset: 0
+                    }
+                )
+                .await
+                .unwrap()
+                .total_count,
+            0
+        );
+        assert!(matches!(
+            service
+                .record_playback(&identity(), "personal-track", 1000, 1.0)
+                .await,
+            Err(CanopyError::NotFound { .. })
+        ));
+
+        assert!(
+            service
+                .delete_entry(&identity(), &history_id)
+                .await
+                .unwrap()
+        );
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+        assert_eq!(
+            service
+                .list_history(
+                    &identity(),
+                    Page {
+                        limit: 10,
+                        offset: 0
+                    }
+                )
+                .await
+                .unwrap()
+                .total_count,
+            0
+        );
     }
 }

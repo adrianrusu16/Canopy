@@ -146,10 +146,19 @@ pub trait MediaImportRepository: Send + Sync {
 #[async_trait]
 pub trait PlaybackHistoryRepository: Send + Sync {
     /// Records one playback-history event while profile consent remains enabled.
-    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<bool>;
+    async fn record(
+        &self,
+        event: PlaybackHistoryEvent,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool>;
 
     /// Lists profile-owned events newest first.
-    async fn list(&self, profile_id: &str, page: Page) -> CanopyResult<PlaybackHistoryPage>;
+    async fn list(
+        &self,
+        profile_id: &str,
+        scope: &TrackAccessScope,
+        page: Page,
+    ) -> CanopyResult<PlaybackHistoryPage>;
 
     /// Deletes one owned event; unknown and foreign identifiers return false.
     async fn delete_entry(&self, profile_id: &str, history_id: &str) -> CanopyResult<bool>;
@@ -162,33 +171,62 @@ pub trait PlaybackHistoryRepository: Send + Sync {
 #[async_trait]
 pub trait LibraryRepository: Send + Sync {
     /// Saves a track to a profile library. Re-saving is idempotent.
-    async fn save_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<LibraryItem>;
+    async fn save_track(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<LibraryItem>;
 
     /// Removes a track from a profile library. Removing an absent item succeeds.
     async fn remove_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()>;
 
     /// Lists saved library items newest first.
-    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<SavedTrackPage>;
+    async fn list_tracks(
+        &self,
+        profile_id: &str,
+        scope: &TrackAccessScope,
+        page: Page,
+    ) -> CanopyResult<SavedTrackPage>;
 
     /// Returns whether the profile has saved the track.
-    async fn is_saved(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool>;
+    async fn is_saved(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool>;
 }
 
 /// Persistence of profile-owned positive track likes.
 #[async_trait]
 pub trait LikeRepository: Send + Sync {
     /// Likes a track for a profile. Re-liking is idempotent.
-    async fn like_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<TrackLike>;
+    async fn like_track(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<TrackLike>;
 
     /// Removes a like for a profile. Removing an absent like succeeds.
     async fn unlike_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<()>;
 
     /// Lists liked tracks newest first.
-    async fn list_liked_tracks(&self, profile_id: &str, page: Page)
-    -> CanopyResult<LikedTrackPage>;
+    async fn list_liked_tracks(
+        &self,
+        profile_id: &str,
+        scope: &TrackAccessScope,
+        page: Page,
+    ) -> CanopyResult<LikedTrackPage>;
 
     /// Returns whether the profile has liked the track.
-    async fn is_liked(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool>;
+    async fn is_liked(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool>;
 }
 
 /// Persistence of profile-scoped preferences.

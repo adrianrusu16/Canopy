@@ -392,12 +392,19 @@ struct InMemoryHistoryRow {
 }
 
 /// In-memory playback-history store for tests and standalone prototype mode.
-#[derive(Default)]
 pub struct InMemoryPlaybackHistoryStore {
+    catalog: Arc<dyn CatalogRepository>,
     events: Mutex<Vec<InMemoryHistoryRow>>,
 }
 
 impl InMemoryPlaybackHistoryStore {
+    pub fn new(catalog: Arc<dyn CatalogRepository>) -> Self {
+        Self {
+            catalog,
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
     /// Returns a snapshot of stored events for tests.
     pub fn events(&self) -> CanopyResult<Vec<PlaybackHistoryEvent>> {
         Ok(self
@@ -410,9 +417,24 @@ impl InMemoryPlaybackHistoryStore {
     }
 }
 
+#[cfg(test)]
+impl Default for InMemoryPlaybackHistoryStore {
+    fn default() -> Self {
+        Self::new(test_catalog())
+    }
+}
+
 #[async_trait]
 impl PlaybackHistoryRepository for InMemoryPlaybackHistoryStore {
-    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<bool> {
+    async fn record(
+        &self,
+        event: PlaybackHistoryEvent,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool> {
+        self.catalog
+            .get_media(scope, &event.track_id)
+            .await?
+            .ok_or_else(|| CanopyError::not_found("track", &event.track_id))?;
         self.events.lock().unwrap().push(InMemoryHistoryRow {
             id: uuid::Uuid::new_v4().to_string(),
             event,
@@ -421,7 +443,12 @@ impl PlaybackHistoryRepository for InMemoryPlaybackHistoryStore {
         Ok(true)
     }
 
-    async fn list(&self, profile_id: &str, page: Page) -> CanopyResult<PlaybackHistoryPage> {
+    async fn list(
+        &self,
+        profile_id: &str,
+        scope: &TrackAccessScope,
+        page: Page,
+    ) -> CanopyResult<PlaybackHistoryPage> {
         let mut rows: Vec<InMemoryHistoryRow> = self
             .events
             .lock()
@@ -437,27 +464,28 @@ impl PlaybackHistoryRepository for InMemoryPlaybackHistoryStore {
                 .then_with(|| right.id.cmp(&left.id))
         });
 
-        let total_count = rows.len() as i32;
-        let start = (page.offset as usize).min(rows.len());
-        let end = start.saturating_add(page.limit as usize).min(rows.len());
-        let entries = rows[start..end]
-            .iter()
-            .map(|row| PlaybackHistoryEntry {
+        let mut entries = Vec::new();
+        for row in rows {
+            let Some(item) = self.catalog.get_media(scope, &row.event.track_id).await? else {
+                continue;
+            };
+            entries.push(PlaybackHistoryEntry {
                 id: row.id.clone(),
                 played_at_epoch_ms: row.played_at_epoch_ms,
                 duration_ms: row.event.duration_ms,
                 completion_pct: row.event.completion_pct,
-                item: MediaItem {
-                    id: row.event.track_id.clone(),
-                    ..MediaItem::default()
-                },
-            })
-            .collect();
+                item,
+            });
+        }
+        let total_count = entries.len() as i32;
+        let start = (page.offset as usize).min(entries.len());
+        let end = start.saturating_add(page.limit as usize).min(entries.len());
+        let entries = entries[start..end].to_vec();
 
         Ok(PlaybackHistoryPage {
             entries,
             total_count,
-            has_more: end < rows.len(),
+            has_more: end < total_count as usize,
         })
     }
 
@@ -488,14 +516,39 @@ fn profile_track_key(profile_id: &str, track_id: &str) -> String {
 }
 
 /// In-memory saved-library store for tests and standalone prototype mode.
-#[derive(Default)]
 pub struct InMemoryLibraryStore {
+    catalog: Arc<dyn CatalogRepository>,
     items: Mutex<HashMap<String, LibraryItem>>,
+}
+
+impl InMemoryLibraryStore {
+    pub fn new(catalog: Arc<dyn CatalogRepository>) -> Self {
+        Self {
+            catalog,
+            items: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for InMemoryLibraryStore {
+    fn default() -> Self {
+        Self::new(test_catalog())
+    }
 }
 
 #[async_trait]
 impl LibraryRepository for InMemoryLibraryStore {
-    async fn save_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<LibraryItem> {
+    async fn save_track(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<LibraryItem> {
+        self.catalog
+            .get_media(scope, track_id)
+            .await?
+            .ok_or_else(|| CanopyError::not_found("track", track_id))?;
         let mut items = self.items.lock().unwrap();
         let item = items
             .entry(profile_track_key(profile_id, track_id))
@@ -515,7 +568,12 @@ impl LibraryRepository for InMemoryLibraryStore {
         Ok(())
     }
 
-    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<SavedTrackPage> {
+    async fn list_tracks(
+        &self,
+        profile_id: &str,
+        scope: &TrackAccessScope,
+        page: Page,
+    ) -> CanopyResult<SavedTrackPage> {
         let mut items: Vec<LibraryItem> = self
             .items
             .lock()
@@ -525,44 +583,88 @@ impl LibraryRepository for InMemoryLibraryStore {
             .cloned()
             .collect();
         items.sort_by_key(|item| std::cmp::Reverse(item.added_at_epoch_ms));
-        let total_count = items.len() as i32;
-        let start = (page.offset as usize).min(items.len());
-        let end = (start + page.limit as usize).min(items.len());
-        let saved_items = items[start..end]
-            .iter()
-            .map(|item| SavedTrackItem {
-                item: MediaItem {
-                    id: item.track_id.clone(),
-                    ..MediaItem::default()
-                },
-                saved_at_epoch_ms: item.added_at_epoch_ms,
-            })
-            .collect();
+
+        let mut saved_items = Vec::new();
+        for saved in items {
+            let Some(item) = self.catalog.get_media(scope, &saved.track_id).await? else {
+                continue;
+            };
+            saved_items.push(SavedTrackItem {
+                item,
+                saved_at_epoch_ms: saved.added_at_epoch_ms,
+            });
+        }
+        let total_count = saved_items.len() as i32;
+        let start = (page.offset as usize).min(saved_items.len());
+        let end = (start + page.limit as usize).min(saved_items.len());
+        let saved_items = saved_items[start..end].to_vec();
         Ok(SavedTrackPage {
             items: saved_items,
             total_count,
-            has_more: end < items.len(),
+            has_more: end < total_count as usize,
         })
     }
 
-    async fn is_saved(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
-        Ok(self
+    async fn is_saved(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool> {
+        let saved = self
             .items
             .lock()
             .unwrap()
-            .contains_key(&profile_track_key(profile_id, track_id)))
+            .contains_key(&profile_track_key(profile_id, track_id));
+        if !saved {
+            return Ok(false);
+        }
+        Ok(self.catalog.get_media(scope, track_id).await?.is_some())
     }
 }
 
 /// In-memory track-like store for tests and standalone prototype mode.
-#[derive(Default)]
 pub struct InMemoryLikeStore {
+    catalog: Arc<dyn CatalogRepository>,
     likes: Mutex<HashMap<String, TrackLike>>,
+}
+
+impl InMemoryLikeStore {
+    pub fn new(catalog: Arc<dyn CatalogRepository>) -> Self {
+        Self {
+            catalog,
+            likes: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for InMemoryLikeStore {
+    fn default() -> Self {
+        Self::new(test_catalog())
+    }
+}
+
+#[cfg(test)]
+fn test_catalog() -> Arc<dyn CatalogRepository> {
+    Arc::new(InMemoryCatalog::with_items(vec![MediaItem {
+        id: "track-1".into(),
+        ..MediaItem::default()
+    }]))
 }
 
 #[async_trait]
 impl LikeRepository for InMemoryLikeStore {
-    async fn like_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<TrackLike> {
+    async fn like_track(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<TrackLike> {
+        self.catalog
+            .get_media(scope, track_id)
+            .await?
+            .ok_or_else(|| CanopyError::not_found("track", track_id))?;
         let mut likes = self.likes.lock().unwrap();
         let like = likes
             .entry(profile_track_key(profile_id, track_id))
@@ -585,6 +687,7 @@ impl LikeRepository for InMemoryLikeStore {
     async fn list_liked_tracks(
         &self,
         profile_id: &str,
+        scope: &TrackAccessScope,
         page: Page,
     ) -> CanopyResult<LikedTrackPage> {
         let mut likes: Vec<TrackLike> = self
@@ -596,32 +699,43 @@ impl LikeRepository for InMemoryLikeStore {
             .cloned()
             .collect();
         likes.sort_by_key(|like| std::cmp::Reverse(like.liked_at_epoch_ms));
-        let total_count = likes.len() as i32;
-        let start = (page.offset as usize).min(likes.len());
-        let end = (start + page.limit as usize).min(likes.len());
-        let liked_items = likes[start..end]
-            .iter()
-            .map(|like| LikedTrackItem {
-                item: MediaItem {
-                    id: like.track_id.clone(),
-                    ..MediaItem::default()
-                },
+
+        let mut liked_items = Vec::new();
+        for like in likes {
+            let Some(item) = self.catalog.get_media(scope, &like.track_id).await? else {
+                continue;
+            };
+            liked_items.push(LikedTrackItem {
+                item,
                 liked_at_epoch_ms: like.liked_at_epoch_ms,
-            })
-            .collect();
+            });
+        }
+        let total_count = liked_items.len() as i32;
+        let start = (page.offset as usize).min(liked_items.len());
+        let end = (start + page.limit as usize).min(liked_items.len());
+        let liked_items = liked_items[start..end].to_vec();
         Ok(LikedTrackPage {
             items: liked_items,
             total_count,
-            has_more: end < likes.len(),
+            has_more: end < total_count as usize,
         })
     }
 
-    async fn is_liked(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
-        Ok(self
+    async fn is_liked(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool> {
+        let liked = self
             .likes
             .lock()
             .unwrap()
-            .contains_key(&profile_track_key(profile_id, track_id)))
+            .contains_key(&profile_track_key(profile_id, track_id));
+        if !liked {
+            return Ok(false);
+        }
+        Ok(self.catalog.get_media(scope, track_id).await?.is_some())
     }
 }
 

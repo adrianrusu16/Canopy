@@ -165,7 +165,7 @@ mod tests {
     };
     use canopy_core::{
         IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility, PlaybackHistoryEvent,
-        PlaybackHistoryRepository,
+        PlaybackHistoryRepository, TrackAccessScope,
     };
     use std::sync::Arc;
 
@@ -182,12 +182,15 @@ mod tests {
             .await
             .unwrap();
         history
-            .record(PlaybackHistoryEvent {
-                profile_id: profile.id,
-                track_id: "track-1".into(),
-                duration_ms: 1000,
-                completion_pct: 0.5,
-            })
+            .record(
+                PlaybackHistoryEvent {
+                    profile_id: profile.id,
+                    track_id: "track-1".into(),
+                    duration_ms: 1000,
+                    completion_pct: 0.5,
+                },
+                &TrackAccessScope::Public,
+            )
             .await
             .unwrap();
 
@@ -253,12 +256,15 @@ mod tests {
             .await
             .unwrap();
         history
-            .record(PlaybackHistoryEvent {
-                profile_id: profile.id,
-                track_id: "track-1".into(),
-                duration_ms: 1000,
-                completion_pct: 0.5,
-            })
+            .record(
+                PlaybackHistoryEvent {
+                    profile_id: profile.id,
+                    track_id: "track-1".into(),
+                    duration_ms: 1000,
+                    completion_pct: 0.5,
+                },
+                &TrackAccessScope::Public,
+            )
             .await
             .unwrap();
 

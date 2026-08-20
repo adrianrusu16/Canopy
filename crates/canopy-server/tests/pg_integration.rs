@@ -1639,26 +1639,36 @@ async fn postgres_migrations_support_profile_scoped_history() {
 
     let track_id: String = sqlx::query_scalar(
         r#"
-            INSERT INTO tracks (title, artist_id, album_id, duration_ms)
-            VALUES ($1, $2::uuid, $3::uuid, 1000)
+            INSERT INTO tracks (
+                title, artist_id, album_id, duration_ms,
+                visibility, ingest_status, owner_profile_id
+            )
+            VALUES ($1, $2::uuid, $3::uuid, 1000, 'personal', 'ready', $4::uuid)
             RETURNING id::text
         "#,
     )
     .bind(format!("History Track {external_user_id}"))
     .bind(&artist_id)
     .bind(&album_id)
+    .bind(&profile.id)
     .fetch_one(&pool)
     .await
     .expect("track should be inserted");
+    let owner_scope = TrackAccessScope::Owner {
+        profile_id: profile.id.clone(),
+    };
 
     assert!(
         history
-            .record(PlaybackHistoryEvent {
-                profile_id: profile.id.clone(),
-                track_id: track_id.clone(),
-                duration_ms: 1000,
-                completion_pct: 0.75,
-            })
+            .record(
+                PlaybackHistoryEvent {
+                    profile_id: profile.id.clone(),
+                    track_id: track_id.clone(),
+                    duration_ms: 1000,
+                    completion_pct: 0.75,
+                },
+                &owner_scope
+            )
             .await
             .expect("history should be recorded")
     );
@@ -1704,12 +1714,15 @@ async fn postgres_migrations_support_profile_scoped_history() {
 
     assert!(
         history
-            .record(PlaybackHistoryEvent {
-                profile_id: profile.id.clone(),
-                track_id: track_id.clone(),
-                duration_ms: 500,
-                completion_pct: 0.5,
-            })
+            .record(
+                PlaybackHistoryEvent {
+                    profile_id: profile.id.clone(),
+                    track_id: track_id.clone(),
+                    duration_ms: 500,
+                    completion_pct: 0.5,
+                },
+                &owner_scope
+            )
             .await
             .unwrap()
     );
@@ -1723,12 +1736,15 @@ async fn postgres_migrations_support_profile_scoped_history() {
         .unwrap();
     assert!(
         history
-            .record(PlaybackHistoryEvent {
-                profile_id: other_profile.id.clone(),
-                track_id: track_id.clone(),
-                duration_ms: 250,
-                completion_pct: 0.25,
-            })
+            .record(
+                PlaybackHistoryEvent {
+                    profile_id: other_profile.id.clone(),
+                    track_id: track_id.clone(),
+                    duration_ms: 250,
+                    completion_pct: 0.25,
+                },
+                &owner_scope
+            )
             .await
             .unwrap()
     );
@@ -1736,6 +1752,7 @@ async fn postgres_migrations_support_profile_scoped_history() {
     let page = history
         .list(
             &profile.id,
+            &owner_scope,
             Page {
                 limit: 10,
                 offset: 0,
@@ -1774,12 +1791,15 @@ async fn postgres_migrations_support_profile_scoped_history() {
         .unwrap();
     assert!(
         !history
-            .record(PlaybackHistoryEvent {
-                profile_id: profile.id.clone(),
-                track_id: track_id.clone(),
-                duration_ms: 1000,
-                completion_pct: 1.0,
-            })
+            .record(
+                PlaybackHistoryEvent {
+                    profile_id: profile.id.clone(),
+                    track_id: track_id.clone(),
+                    duration_ms: 1000,
+                    completion_pct: 1.0,
+                },
+                &owner_scope
+            )
             .await
             .unwrap()
     );
@@ -1980,32 +2000,39 @@ async fn postgres_repositories_support_profile_library_likes_preferences() {
 
     let track_id: String = sqlx::query_scalar(
         r#"
-            INSERT INTO tracks (title, artist_id, album_id, duration_ms)
-            VALUES ($1, $2::uuid, $3::uuid, 1000)
+            INSERT INTO tracks (
+                title, artist_id, album_id, duration_ms,
+                visibility, ingest_status, owner_profile_id
+            )
+            VALUES ($1, $2::uuid, $3::uuid, 1000, 'personal', 'ready', $4::uuid)
             RETURNING id::text
         "#,
     )
     .bind(format!("Library Track {external_user_id}"))
     .bind(&artist_id)
     .bind(&album_id)
+    .bind(&profile.id)
     .fetch_one(&pool)
     .await
     .expect("track should be inserted");
+    let owner_scope = TrackAccessScope::Owner {
+        profile_id: profile.id.clone(),
+    };
 
     let saved = library
-        .save_track(&profile.id, &track_id)
+        .save_track(&profile.id, &track_id, &owner_scope)
         .await
         .expect("save should work");
     assert_eq!(saved.profile_id, profile.id);
     assert_eq!(saved.track_id, track_id);
     let saved_again = library
-        .save_track(&profile.id, &track_id)
+        .save_track(&profile.id, &track_id, &owner_scope)
         .await
         .expect("resave should work");
     assert_eq!(saved_again.track_id, track_id);
     assert!(
         library
-            .is_saved(&profile.id, &track_id)
+            .is_saved(&profile.id, &track_id, &owner_scope)
             .await
             .expect("saved flag should work")
     );
@@ -2013,6 +2040,7 @@ async fn postgres_repositories_support_profile_library_likes_preferences() {
         library
             .list_tracks(
                 &profile.id,
+                &owner_scope,
                 Page {
                     limit: 10,
                     offset: 0,
@@ -2034,24 +2062,24 @@ async fn postgres_repositories_support_profile_library_likes_preferences() {
         .expect("second remove should be idempotent");
     assert!(
         !library
-            .is_saved(&profile.id, &track_id)
+            .is_saved(&profile.id, &track_id, &owner_scope)
             .await
             .expect("saved flag should work after remove")
     );
 
     let liked = likes
-        .like_track(&profile.id, &track_id)
+        .like_track(&profile.id, &track_id, &owner_scope)
         .await
         .expect("like should work");
     assert_eq!(liked.profile_id, profile.id);
     assert_eq!(liked.track_id, track_id);
     likes
-        .like_track(&profile.id, &track_id)
+        .like_track(&profile.id, &track_id, &owner_scope)
         .await
         .expect("relike should be idempotent");
     assert!(
         likes
-            .is_liked(&profile.id, &track_id)
+            .is_liked(&profile.id, &track_id, &owner_scope)
             .await
             .expect("liked flag should work")
     );
@@ -2059,6 +2087,7 @@ async fn postgres_repositories_support_profile_library_likes_preferences() {
         likes
             .list_liked_tracks(
                 &profile.id,
+                &owner_scope,
                 Page {
                     limit: 10,
                     offset: 0,
@@ -2080,7 +2109,7 @@ async fn postgres_repositories_support_profile_library_likes_preferences() {
         .expect("second unlike should be idempotent");
     assert!(
         !likes
-            .is_liked(&profile.id, &track_id)
+            .is_liked(&profile.id, &track_id, &owner_scope)
             .await
             .expect("liked flag should work after unlike")
     );

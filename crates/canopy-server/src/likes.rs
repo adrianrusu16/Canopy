@@ -9,17 +9,28 @@ use canopy_core::{
     UserIdentity,
 };
 
+use crate::principal::PrincipalService;
+
 /// Application service for profile-owned positive track likes.
 #[derive(Clone)]
 pub struct LikeService {
     profiles: Arc<dyn ProfileRepository>,
     likes: Arc<dyn LikeRepository>,
+    principal: PrincipalService,
 }
 
 impl LikeService {
     /// Creates a like service over profile storage and like storage.
-    pub fn new(profiles: Arc<dyn ProfileRepository>, likes: Arc<dyn LikeRepository>) -> Self {
-        Self { profiles, likes }
+    pub fn new(
+        profiles: Arc<dyn ProfileRepository>,
+        likes: Arc<dyn LikeRepository>,
+        principal: PrincipalService,
+    ) -> Self {
+        Self {
+            profiles,
+            likes,
+            principal,
+        }
     }
 
     /// Likes a track for the authenticated profile.
@@ -30,7 +41,8 @@ impl LikeService {
     ) -> CanopyResult<TrackLike> {
         let profile_id = self.profile_id(identity).await?;
         let track_id = validate_track_id(track_id)?;
-        self.likes.like_track(&profile_id, track_id).await
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
+        self.likes.like_track(&profile_id, track_id, &scope).await
     }
 
     /// Removes a track like for the authenticated profile.
@@ -47,14 +59,18 @@ impl LikeService {
         page: Page,
     ) -> CanopyResult<LikedTrackPage> {
         let profile_id = self.profile_id(identity).await?;
-        self.likes.list_liked_tracks(&profile_id, page).await
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
+        self.likes
+            .list_liked_tracks(&profile_id, &scope, page)
+            .await
     }
 
     /// Returns whether the authenticated profile has liked the track.
     pub async fn is_liked(&self, identity: &UserIdentity, track_id: &str) -> CanopyResult<bool> {
         let profile_id = self.profile_id(identity).await?;
         let track_id = validate_track_id(track_id)?;
-        self.likes.is_liked(&profile_id, track_id).await
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
+        self.likes.is_liked(&profile_id, track_id, &scope).await
     }
 
     async fn profile_id(&self, identity: &UserIdentity) -> CanopyResult<String> {
@@ -78,7 +94,11 @@ fn validate_track_id(track_id: &str) -> CanopyResult<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jade_store::{InMemoryLikeStore, InMemoryProfileStore};
+    use crate::jade_store::{
+        InMemoryCatalog, InMemoryCatalogEntry, InMemoryInstanceSettingsStore, InMemoryLikeStore,
+        InMemoryProfileStore,
+    };
+    use canopy_core::{IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility};
 
     fn identity() -> UserIdentity {
         UserIdentity {
@@ -87,7 +107,11 @@ mod tests {
     }
 
     fn service(profiles: Arc<InMemoryProfileStore>, likes: Arc<InMemoryLikeStore>) -> LikeService {
-        LikeService::new(profiles, likes)
+        let principal = PrincipalService::new(
+            profiles.clone(),
+            Arc::new(InMemoryInstanceSettingsStore::default()),
+        );
+        LikeService::new(profiles, likes, principal)
     }
 
     #[tokio::test]
@@ -153,5 +177,75 @@ mod tests {
         service.unlike_track(&identity(), "track-1").await.unwrap();
 
         assert!(!service.is_liked(&identity(), "track-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn ownership_transfer_hides_liked_personal_track_but_allows_unlike() {
+        let profiles = Arc::new(InMemoryProfileStore::default());
+        let owner = profiles
+            .upsert_profile("user-123", Some("Ada"), true)
+            .await
+            .unwrap();
+        let replacement = profiles
+            .upsert_profile("replacement", Some("Grace"), true)
+            .await
+            .unwrap();
+        let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+        let catalog = Arc::new(InMemoryCatalog::from_entries(vec![InMemoryCatalogEntry {
+            item: MediaItem {
+                id: "personal-track".into(),
+                ..MediaItem::default()
+            },
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some(owner.id.clone()),
+        }]));
+        let likes = Arc::new(InMemoryLikeStore::new(catalog));
+        let principal = PrincipalService::new(profiles.clone(), settings.clone());
+        let service = LikeService::new(profiles, likes, principal);
+
+        service
+            .like_track(&identity(), "personal-track")
+            .await
+            .unwrap();
+        settings
+            .set_owner_profile_id(&replacement.id)
+            .await
+            .unwrap();
+
+        assert!(
+            !service
+                .is_liked(&identity(), "personal-track")
+                .await
+                .unwrap()
+        );
+        let page = service
+            .list_liked_tracks(
+                &identity(),
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total_count, 0);
+        assert!(matches!(
+            service.like_track(&identity(), "personal-track").await,
+            Err(CanopyError::NotFound { .. })
+        ));
+
+        service
+            .unlike_track(&identity(), "personal-track")
+            .await
+            .unwrap();
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+        assert!(
+            !service
+                .is_liked(&identity(), "personal-track")
+                .await
+                .unwrap()
+        );
     }
 }

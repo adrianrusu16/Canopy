@@ -10,17 +10,28 @@ use canopy_core::{
     SavedTrackPage, UserIdentity,
 };
 
+use crate::principal::PrincipalService;
+
 /// Application service for profile-owned saved library items.
 #[derive(Clone)]
 pub struct LibraryService {
     profiles: Arc<dyn ProfileRepository>,
     library: Arc<dyn LibraryRepository>,
+    principal: PrincipalService,
 }
 
 impl LibraryService {
     /// Creates a library service over profile storage and library storage.
-    pub fn new(profiles: Arc<dyn ProfileRepository>, library: Arc<dyn LibraryRepository>) -> Self {
-        Self { profiles, library }
+    pub fn new(
+        profiles: Arc<dyn ProfileRepository>,
+        library: Arc<dyn LibraryRepository>,
+        principal: PrincipalService,
+    ) -> Self {
+        Self {
+            profiles,
+            library,
+            principal,
+        }
     }
 
     /// Saves a track in the authenticated profile's library.
@@ -31,7 +42,8 @@ impl LibraryService {
     ) -> CanopyResult<LibraryItem> {
         let profile_id = self.profile_id(identity).await?;
         let track_id = validate_track_id(track_id)?;
-        self.library.save_track(&profile_id, track_id).await
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
+        self.library.save_track(&profile_id, track_id, &scope).await
     }
 
     /// Removes a track from the authenticated profile's library.
@@ -48,14 +60,16 @@ impl LibraryService {
         page: Page,
     ) -> CanopyResult<SavedTrackPage> {
         let profile_id = self.profile_id(identity).await?;
-        self.library.list_tracks(&profile_id, page).await
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
+        self.library.list_tracks(&profile_id, &scope, page).await
     }
 
     /// Returns whether the authenticated profile has saved the track.
     pub async fn is_saved(&self, identity: &UserIdentity, track_id: &str) -> CanopyResult<bool> {
         let profile_id = self.profile_id(identity).await?;
         let track_id = validate_track_id(track_id)?;
-        self.library.is_saved(&profile_id, track_id).await
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
+        self.library.is_saved(&profile_id, track_id, &scope).await
     }
 
     async fn profile_id(&self, identity: &UserIdentity) -> CanopyResult<String> {
@@ -79,7 +93,11 @@ fn validate_track_id(track_id: &str) -> CanopyResult<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jade_store::{InMemoryLibraryStore, InMemoryProfileStore};
+    use crate::jade_store::{
+        InMemoryCatalog, InMemoryCatalogEntry, InMemoryInstanceSettingsStore, InMemoryLibraryStore,
+        InMemoryProfileStore,
+    };
+    use canopy_core::{IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility};
 
     fn identity() -> UserIdentity {
         UserIdentity {
@@ -91,7 +109,11 @@ mod tests {
         profiles: Arc<InMemoryProfileStore>,
         library: Arc<InMemoryLibraryStore>,
     ) -> LibraryService {
-        LibraryService::new(profiles, library)
+        let principal = PrincipalService::new(
+            profiles.clone(),
+            Arc::new(InMemoryInstanceSettingsStore::default()),
+        );
+        LibraryService::new(profiles, library, principal)
     }
 
     #[tokio::test]
@@ -157,5 +179,75 @@ mod tests {
         service.remove_track(&identity(), "track-1").await.unwrap();
 
         assert!(!service.is_saved(&identity(), "track-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn ownership_transfer_hides_saved_personal_track_but_allows_removal() {
+        let profiles = Arc::new(InMemoryProfileStore::default());
+        let owner = profiles
+            .upsert_profile("user-123", Some("Ada"), true)
+            .await
+            .unwrap();
+        let replacement = profiles
+            .upsert_profile("replacement", Some("Grace"), true)
+            .await
+            .unwrap();
+        let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+        let catalog = Arc::new(InMemoryCatalog::from_entries(vec![InMemoryCatalogEntry {
+            item: MediaItem {
+                id: "personal-track".into(),
+                ..MediaItem::default()
+            },
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some(owner.id.clone()),
+        }]));
+        let library = Arc::new(InMemoryLibraryStore::new(catalog));
+        let principal = PrincipalService::new(profiles.clone(), settings.clone());
+        let service = LibraryService::new(profiles, library, principal);
+
+        service
+            .save_track(&identity(), "personal-track")
+            .await
+            .unwrap();
+        settings
+            .set_owner_profile_id(&replacement.id)
+            .await
+            .unwrap();
+
+        assert!(
+            !service
+                .is_saved(&identity(), "personal-track")
+                .await
+                .unwrap()
+        );
+        let page = service
+            .list_tracks(
+                &identity(),
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total_count, 0);
+        assert!(matches!(
+            service.save_track(&identity(), "personal-track").await,
+            Err(CanopyError::NotFound { .. })
+        ));
+
+        service
+            .remove_track(&identity(), "personal-track")
+            .await
+            .unwrap();
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+        assert!(
+            !service
+                .is_saved(&identity(), "personal-track")
+                .await
+                .unwrap()
+        );
     }
 }

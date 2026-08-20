@@ -1070,9 +1070,14 @@ impl PgPlaybackHistoryRepository {
 
 #[async_trait]
 impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
-    async fn record(&self, event: PlaybackHistoryEvent) -> CanopyResult<bool> {
+    async fn record(
+        &self,
+        event: PlaybackHistoryEvent,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool> {
         let profile_uuid = parse_uuid_arg(&event.profile_id, "profile_id")?;
         let track_uuid = parse_uuid_arg(&event.track_id, "track_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let duration_ms = i32::try_from(event.duration_ms).map_err(|_| {
             CanopyError::InvalidArgument("duration_ms exceeds database range".into())
         })?;
@@ -1090,6 +1095,28 @@ impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
         if !enabled {
             tx.commit().await.map_err(db_err)?;
             return Ok(false);
+        }
+
+        let accessible: bool = sqlx::query_scalar(
+            r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM tracks t
+                    WHERE t.id = $2
+                      AND t.ingest_status = 'ready'
+                      AND (
+                        t.visibility = 'release_safe'
+                        OR ($1::uuid IS NOT NULL AND t.visibility = 'personal' AND t.owner_profile_id = $1)
+                      )
+                )
+            "#,
+        )
+        .bind(owner_uuid)
+        .bind(track_uuid)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if !accessible {
+            return Err(CanopyError::not_found("track", &event.track_id));
         }
 
         sqlx::query(
@@ -1110,8 +1137,14 @@ impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
         Ok(true)
     }
 
-    async fn list(&self, profile_id: &str, page: Page) -> CanopyResult<PlaybackHistoryPage> {
+    async fn list(
+        &self,
+        profile_id: &str,
+        scope: &TrackAccessScope,
+        page: Page,
+    ) -> CanopyResult<PlaybackHistoryPage> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let sql = format!(
             r#"
                 SELECT
@@ -1134,23 +1167,48 @@ impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
                 JOIN albums al ON t.album_id = al.id
                 {REPRESENTATIVE_ASSET_JOIN}
                 WHERE ph.profile_id = $1
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR (
+                        $2::uuid IS NOT NULL
+                        AND t.visibility = 'personal'
+                        AND t.owner_profile_id = $2
+                    )
+                  )
                 ORDER BY ph.played_at DESC, ph.id DESC
-                LIMIT $2 OFFSET $3
+                LIMIT $3 OFFSET $4
             "#
         );
         let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(profile_uuid)
+            .bind(owner_uuid)
             .bind(page.limit as i64)
             .bind(page.offset as i64)
             .fetch_all(self.pool.as_ref())
             .await
             .map_err(db_err)?;
-        let total_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM playback_history WHERE profile_id = $1")
-                .bind(profile_uuid)
-                .fetch_one(self.pool.as_ref())
-                .await
-                .map_err(db_err)?;
+        let total_count: i64 = sqlx::query_scalar(
+            r#"
+                SELECT COUNT(*) FROM playback_history ph
+                JOIN tracks t ON ph.track_id = t.id
+                WHERE ph.profile_id = $1
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR (
+                        $2::uuid IS NOT NULL
+                        AND t.visibility = 'personal'
+                        AND t.owner_profile_id = $2
+                    )
+                  )
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(owner_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
 
         let entries = rows
             .iter()
@@ -1215,13 +1273,26 @@ impl PgLibraryRepository {
 
 #[async_trait]
 impl LibraryRepository for PgLibraryRepository {
-    async fn save_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<LibraryItem> {
+    async fn save_track(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<LibraryItem> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let row = sqlx::query(
             r#"
                 INSERT INTO profile_library_items (profile_id, track_id)
-                VALUES ($1, $2)
+                SELECT $1, $2
+                FROM tracks t
+                WHERE t.id = $2
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR ($3::uuid IS NOT NULL AND t.visibility = 'personal' AND t.owner_profile_id = $3)
+                  )
                 ON CONFLICT (profile_id, track_id) DO UPDATE SET updated_at = NOW()
                 RETURNING
                     profile_id::text,
@@ -1231,9 +1302,11 @@ impl LibraryRepository for PgLibraryRepository {
         )
         .bind(profile_uuid)
         .bind(track_uuid)
-        .fetch_one(self.pool.as_ref())
+        .bind(owner_uuid)
+        .fetch_optional(self.pool.as_ref())
         .await
         .map_err(|err| map_track_write_err(err, track_id))?;
+        let row = row.ok_or_else(|| CanopyError::not_found("track", track_id))?;
 
         Ok(LibraryItem {
             profile_id: row.try_get("profile_id").unwrap_or_default(),
@@ -1254,8 +1327,14 @@ impl LibraryRepository for PgLibraryRepository {
         Ok(())
     }
 
-    async fn list_tracks(&self, profile_id: &str, page: Page) -> CanopyResult<SavedTrackPage> {
+    async fn list_tracks(
+        &self,
+        profile_id: &str,
+        scope: &TrackAccessScope,
+        page: Page,
+    ) -> CanopyResult<SavedTrackPage> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let sql = format!(
             r#"
             SELECT
@@ -1275,23 +1354,48 @@ impl LibraryRepository for PgLibraryRepository {
             JOIN albums al     ON t.album_id = al.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE pli.profile_id = $1
+              AND t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR (
+                    $2::uuid IS NOT NULL
+                    AND t.visibility = 'personal'
+                    AND t.owner_profile_id = $2
+                )
+              )
             ORDER BY pli.added_at DESC, t.title
-            LIMIT $2 OFFSET $3
+            LIMIT $3 OFFSET $4
         "#
         );
         let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(profile_uuid)
+            .bind(owner_uuid)
             .bind(page.limit as i64)
             .bind(page.offset as i64)
             .fetch_all(self.pool.as_ref())
             .await
             .map_err(db_err)?;
-        let total_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM profile_library_items WHERE profile_id = $1")
-                .bind(profile_uuid)
-                .fetch_one(self.pool.as_ref())
-                .await
-                .map_err(db_err)?;
+        let total_count: i64 = sqlx::query_scalar(
+            r#"
+                SELECT COUNT(*) FROM profile_library_items pli
+                JOIN tracks t ON pli.track_id = t.id
+                WHERE pli.profile_id = $1
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR (
+                        $2::uuid IS NOT NULL
+                        AND t.visibility = 'personal'
+                        AND t.owner_profile_id = $2
+                    )
+                  )
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(owner_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
         Ok(SavedTrackPage {
             items: rows
                 .iter()
@@ -1305,14 +1409,34 @@ impl LibraryRepository for PgLibraryRepository {
         })
     }
 
-    async fn is_saved(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
+    async fn is_saved(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM profile_library_items WHERE profile_id = $1 AND track_id = $2)",
+            r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM profile_library_items pli
+                    JOIN tracks t ON pli.track_id = t.id
+                    WHERE pli.profile_id = $1
+                      AND pli.track_id = $2
+                      AND t.ingest_status = 'ready'
+                      AND (
+                        t.visibility = 'release_safe'
+                        OR ($3::uuid IS NOT NULL AND t.visibility = 'personal' AND t.owner_profile_id = $3)
+                      )
+                )
+            "#,
         )
         .bind(profile_uuid)
         .bind(track_uuid)
+        .bind(owner_uuid)
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(db_err)?;
@@ -1341,13 +1465,26 @@ impl PgLikeRepository {
 
 #[async_trait]
 impl LikeRepository for PgLikeRepository {
-    async fn like_track(&self, profile_id: &str, track_id: &str) -> CanopyResult<TrackLike> {
+    async fn like_track(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<TrackLike> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let row = sqlx::query(
             r#"
                 INSERT INTO profile_track_likes (profile_id, track_id)
-                VALUES ($1, $2)
+                SELECT $1, $2
+                FROM tracks t
+                WHERE t.id = $2
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR ($3::uuid IS NOT NULL AND t.visibility = 'personal' AND t.owner_profile_id = $3)
+                  )
                 ON CONFLICT (profile_id, track_id) DO UPDATE SET updated_at = NOW()
                 RETURNING
                     profile_id::text,
@@ -1357,9 +1494,11 @@ impl LikeRepository for PgLikeRepository {
         )
         .bind(profile_uuid)
         .bind(track_uuid)
-        .fetch_one(self.pool.as_ref())
+        .bind(owner_uuid)
+        .fetch_optional(self.pool.as_ref())
         .await
         .map_err(|err| map_track_write_err(err, track_id))?;
+        let row = row.ok_or_else(|| CanopyError::not_found("track", track_id))?;
 
         Ok(TrackLike {
             profile_id: row.try_get("profile_id").unwrap_or_default(),
@@ -1383,9 +1522,11 @@ impl LikeRepository for PgLikeRepository {
     async fn list_liked_tracks(
         &self,
         profile_id: &str,
+        scope: &TrackAccessScope,
         page: Page,
     ) -> CanopyResult<LikedTrackPage> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let sql = format!(
             r#"
             SELECT
@@ -1405,23 +1546,48 @@ impl LikeRepository for PgLikeRepository {
             JOIN albums al     ON t.album_id = al.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE ptl.profile_id = $1
+              AND t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR (
+                    $2::uuid IS NOT NULL
+                    AND t.visibility = 'personal'
+                    AND t.owner_profile_id = $2
+                )
+              )
             ORDER BY ptl.liked_at DESC, t.title
-            LIMIT $2 OFFSET $3
+            LIMIT $3 OFFSET $4
         "#
         );
         let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(profile_uuid)
+            .bind(owner_uuid)
             .bind(page.limit as i64)
             .bind(page.offset as i64)
             .fetch_all(self.pool.as_ref())
             .await
             .map_err(db_err)?;
-        let total_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM profile_track_likes WHERE profile_id = $1")
-                .bind(profile_uuid)
-                .fetch_one(self.pool.as_ref())
-                .await
-                .map_err(db_err)?;
+        let total_count: i64 = sqlx::query_scalar(
+            r#"
+                SELECT COUNT(*) FROM profile_track_likes ptl
+                JOIN tracks t ON ptl.track_id = t.id
+                WHERE ptl.profile_id = $1
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR (
+                        $2::uuid IS NOT NULL
+                        AND t.visibility = 'personal'
+                        AND t.owner_profile_id = $2
+                    )
+                  )
+            "#,
+        )
+        .bind(profile_uuid)
+        .bind(owner_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
         Ok(LikedTrackPage {
             items: rows
                 .iter()
@@ -1435,14 +1601,34 @@ impl LikeRepository for PgLikeRepository {
         })
     }
 
-    async fn is_liked(&self, profile_id: &str, track_id: &str) -> CanopyResult<bool> {
+    async fn is_liked(
+        &self,
+        profile_id: &str,
+        track_id: &str,
+        scope: &TrackAccessScope,
+    ) -> CanopyResult<bool> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let track_uuid = parse_uuid_arg(track_id, "track_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM profile_track_likes WHERE profile_id = $1 AND track_id = $2)",
+            r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM profile_track_likes ptl
+                    JOIN tracks t ON ptl.track_id = t.id
+                    WHERE ptl.profile_id = $1
+                      AND ptl.track_id = $2
+                      AND t.ingest_status = 'ready'
+                      AND (
+                        t.visibility = 'release_safe'
+                        OR ($3::uuid IS NOT NULL AND t.visibility = 'personal' AND t.owner_profile_id = $3)
+                      )
+                )
+            "#,
         )
         .bind(profile_uuid)
         .bind(track_uuid)
+        .bind(owner_uuid)
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(db_err)?;
