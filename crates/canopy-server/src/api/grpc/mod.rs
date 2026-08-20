@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use canopy_core::{CanopyError, CanopyResult, MediaItem, Page, PageTokenCodec, UserIdentity};
+use canopy_core::{
+    CanopyError, CanopyResult, MediaItem, Page, PageTokenCodec, TrackAccessScope, UserIdentity,
+};
 use canopy_proto::{
     AlbumSummary, ArtistSummary, ArtworkRef, PageInfo, PageRequest, Track, TrackSummary,
 };
@@ -216,6 +218,43 @@ pub(crate) fn extract_optional_metadata_identity(
     extract_metadata_identity(metadata, auth).map(Some)
 }
 
+fn optional_native_bearer_token(
+    metadata: &tonic::metadata::MetadataMap,
+) -> CanopyResult<Option<&str>> {
+    if metadata.get("authorization").is_some() {
+        return extract_bearer_token(metadata).map(Some);
+    }
+    if metadata.get("x-canopy-auth-token").is_some() {
+        return Err(CanopyError::unauthenticated(
+            "bounded APIs require authorization Bearer metadata",
+        ));
+    }
+    Ok(None)
+}
+
+pub(crate) async fn extract_optional_track_scope(
+    metadata: &tonic::metadata::MetadataMap,
+    services: &GrpcServices,
+) -> CanopyResult<TrackAccessScope> {
+    let Some(access_token) = optional_native_bearer_token(metadata)? else {
+        return Ok(TrackAccessScope::Public);
+    };
+    let identity_service = services
+        .identity
+        .as_ref()
+        .ok_or_else(|| CanopyError::unauthenticated("native identity is not configured"))?;
+    let access = identity_service
+        .authenticate_access_token(access_token)
+        .await?;
+    let identity = UserIdentity {
+        user_id: access.account_id,
+    };
+    services
+        .principal
+        .track_scope_for_identity(Some(&identity))
+        .await
+}
+
 // Kept out of the module tree while behavior is migrated service by service.
 // Remove after every bounded adapter reaches parity.
 #[allow(dead_code)]
@@ -308,6 +347,27 @@ mod tests {
 
         assert!(matches!(
             extract_optional_metadata_identity(request.metadata(), &auth),
+            Err(CanopyError::Unauthenticated(_))
+        ));
+    }
+
+    #[test]
+    fn optional_native_bearer_is_absent_only_when_all_auth_metadata_is_absent() {
+        let metadata = tonic::metadata::MetadataMap::new();
+
+        assert_eq!(optional_native_bearer_token(&metadata).unwrap(), None);
+    }
+
+    #[test]
+    fn optional_native_bearer_rejects_legacy_header_on_bounded_service() {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert(
+            "x-canopy-auth-token",
+            tonic::metadata::MetadataValue::from_static("legacy-token"),
+        );
+
+        assert!(matches!(
+            optional_native_bearer_token(&metadata),
             Err(CanopyError::Unauthenticated(_))
         ));
     }
