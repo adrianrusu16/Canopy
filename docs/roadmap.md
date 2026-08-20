@@ -1,6 +1,6 @@
 # Project Status and Roadmap
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 This page records Canopy's current backend capabilities, known limitations, and
 next engineering priorities. Historical designs and implementation plans are
@@ -17,11 +17,14 @@ kept in the [documentation archive](archive/README.md).
   rotating device sessions, revocation, Google login/linking, and account
   lifecycle operations.
 - Profiles, opt-in history, library entries, likes, preferences, and private
-  playlists require verified identity.
+  playlists require verified identity. Track relationships use the same current
+  access scope as catalog and playback, hide revoked items, and retain cleanup.
 - Search uses PostgreSQL trigram matching in persistent mode, with a lightweight
   in-memory implementation for tests and demonstrations.
-- Discovery, For You, and recommendations endpoints currently share the same
-  release-safe discovery selector and diversity rules.
+- Catalog browse and search plus Discovery, For You, and recommendations apply
+  one caller scope before pagination: public-ready tracks for anonymous and
+  non-owner callers, plus personal-ready tracks for the configured owner. The
+  discovery feed names still share the same diversity rules and ranking.
 - The configured instance owner receives personal-ready playback first with
   release-safe public fallback. Other callers receive public media only.
 - canopy-admin imports MP3 files and artwork into content-addressed managed

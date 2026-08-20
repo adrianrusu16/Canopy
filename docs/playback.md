@@ -1,8 +1,8 @@
 # Playback and Streaming
 
 Canopy resolves what a caller may play; Nginx serves the authorized bytes.
-Every client uses the same ResolvePlayback gRPC operation. Policy remains on
-the server, and storage keys never enter client-visible contracts.
+Every client uses the same `PlaybackService.ResolvePlayback` gRPC operation
+for every returned track. Policy remains on the server, and storage keys never enter client-visible contracts.
 
 ## Resolution Policy
 
@@ -15,6 +15,13 @@ instance-owner setting:
 | Authenticated non-owner | Ready, release-safe public media only |
 | Configured owner | Ready personal media owned by that profile first, then ready release-safe public media |
 
+The same access rule governs catalog, search, discovery, playback, saved tracks,
+likes, history, and playlist tracks. Adding an inaccessible track to a
+relationship returns `NOT_FOUND`. If policy later makes an existing
+relationship inaccessible, Canopy hides it but retains it so removal, unlike,
+history cleanup, playlist-track removal, and playlist deletion still work.
+Access filtering occurs before counting and pagination.
+
 The owner fallback occurs only after a successful personal lookup returns no
 asset. Repository failures propagate; they are not interpreted as absence and
 do not relax visibility policy.
@@ -24,8 +31,12 @@ FLAC, and otherwise uses the first available codec.
 
 ## Privacy and Error Semantics
 
-If authorization metadata is present but invalid, ResolvePlayback returns
-Unauthenticated. It never retries anonymously.
+`ResolvePlayback` accepts optional native authentication only as
+`authorization: Bearer <access-token>` metadata. Canopy revalidates the
+native device session for each call. If supplied authorization is invalid,
+expired, malformed, or revoked, the RPC returns `UNAUTHENTICATED` and never
+retries anonymously. The `x-canopy-auth-token` header is legacy-only and is
+rejected by bounded services.
 
 The following cases share the same NotFound shape:
 

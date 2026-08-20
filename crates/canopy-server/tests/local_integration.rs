@@ -208,7 +208,7 @@ async fn local_environment_auth_and_playback_smoke() {
 
     let logged_in = auth
         .login_password(LoginPasswordRequest {
-            email,
+            email: email.clone(),
             password: PASSWORD.into(),
             device_label: "local-integration-login".into(),
         })
@@ -258,10 +258,66 @@ async fn local_environment_auth_and_playback_smoke() {
 
     let mut playback = PlaybackServiceClient::new(channel);
     let source = playback
-        .resolve_playback(ResolvePlaybackRequest { track_id: track.id })
+        .resolve_playback(ResolvePlaybackRequest {
+            track_id: track.id.clone(),
+        })
         .await
         .expect("playback resolution should succeed")
         .into_inner();
+
+    let playback_session = auth
+        .login_password(LoginPasswordRequest {
+            email: email.clone(),
+            password: PASSWORD.into(),
+            device_label: "local-integration-playback".into(),
+        })
+        .await
+        .expect("playback login should succeed")
+        .into_inner();
+    let authenticated_search = catalog
+        .search(authorized(
+            SearchRequest {
+                query: "Moonlight Sonata".into(),
+                page: None,
+            },
+            &playback_session.access_token,
+        ))
+        .await
+        .expect("durable access token should authorize catalog search")
+        .into_inner();
+    assert!(!authenticated_search.tracks.is_empty());
+    playback
+        .resolve_playback(authorized(
+            ResolvePlaybackRequest {
+                track_id: track.id.clone(),
+            },
+            &playback_session.access_token,
+        ))
+        .await
+        .expect("durable access token should authorize release-safe playback");
+
+    auth.logout(authorized(LogoutRequest {}, &playback_session.access_token))
+        .await
+        .expect("playback session logout should succeed");
+    let search_error = catalog
+        .search(authorized(
+            SearchRequest {
+                query: "Moonlight Sonata".into(),
+                page: None,
+            },
+            &playback_session.access_token,
+        ))
+        .await
+        .expect_err("revoked session must not authorize catalog search");
+    assert_eq!(search_error.code(), Code::Unauthenticated);
+    let playback_error = playback
+        .resolve_playback(authorized(
+            ResolvePlaybackRequest { track_id: track.id },
+            &playback_session.access_token,
+        ))
+        .await
+        .expect_err("revoked session must not authorize playback");
+    assert_eq!(playback_error.code(), Code::Unauthenticated);
     let public_stream_endpoint = endpoint("CANOPY_STREAM_PUBLIC_BASE_URL", "http://127.0.0.1:8080");
     assert!(
         source

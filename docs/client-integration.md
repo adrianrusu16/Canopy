@@ -144,11 +144,53 @@ credentials are never client handoff values.
 See [Authentication](authentication.md) for the server-side identity, session,
 outbox, and durable-state model.
 
+## Track Access and Optional Authentication
+
+Canopy computes track visibility from the current caller and current
+instance-owner configuration on every bounded request:
+
+| Caller | Track results |
+| --- | --- |
+| No `authorization` metadata | `release_safe` + `ready` tracks |
+| Valid non-owner native access token | `release_safe` + `ready` tracks |
+| Valid token for the configured instance owner | Public tracks plus that profile's `personal` + `ready` tracks |
+| Invalid, expired, malformed, or revoked supplied token | `UNAUTHENTICATED`; never anonymous fallback |
+
+Bounded optional-auth RPCs accept only lowercase
+`authorization: Bearer <access-token>` metadata. Canopy validates the native
+device session on each request. `x-canopy-auth-token` belongs only to the
+excluded legacy adapter and must not be sent to bounded services.
+
+Canopy applies the same track-access rule to catalog, search, discovery,
+playback, saved tracks, likes, history, and playlist tracks. Adding a
+relationship to an inaccessible track returns `NOT_FOUND`. Existing
+relationships to a track that becomes inaccessible are hidden but retained;
+removal, unlike, history cleanup, playlist-track removal, and playlist deletion
+remain available. Access filtering happens before counting and pagination.
+Clients must not fetch public and personal pages separately or merge them.
+
+## Pagination
+
+For `Browse`, `Search`, discovery-family feeds, saved tracks, likes,
+history, playlist lists, and playlist tracks:
+
+1. Send `page_size`; `0` means 20 and values above 100 are clamped to 100.
+2. Render the returned page.
+3. If `page_info.next_page_token` is non-empty, pass it unchanged as the
+   next request's `page_token`.
+4. Stop only when `next_page_token` is empty.
+5. Start again without a token when authentication, query, parent, genres,
+   exclusions, playlist, or another result-shaping input changes.
+
+Page tokens are opaque. Clients must not parse, alter, synthesize, persist them
+as durable offsets, or reuse them across users or changed request inputs.
+
 ## Playback
 
-Call `PlaybackService.ResolvePlayback` over gRPC and use the returned
-`PlaybackSource.stream_url` verbatim until its expiry. Do not construct stream
-paths, parse capabilities, derive storage paths, or call private authorization
+Call `PlaybackService.ResolvePlayback` for every returned track and use the
+returned `PlaybackSource.stream_url` verbatim until its expiry. Canopy
+rechecks track access when resolving playback and again when authorizing the
+stream capability. Do not construct stream paths, parse capabilities, derive storage paths, or call private authorization
 routes. Streaming range behavior and capability revalidation belong to the
 public streaming endpoint. See [Playback and Streaming](playback.md) for the
 owner-aware selection and authorization policy.
