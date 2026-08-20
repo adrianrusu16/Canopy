@@ -257,8 +257,8 @@ Preserve exact owner/import commands, database/media requirements, 2 GiB and 20 
 Run:
 
 ~~~bash
-cargo run -p canopy-server --bin canopy-admin -- --help
-cargo run -p canopy-server --bin canopy-admin -- media import --help
+cargo run -p canopy-server --features pg --bin canopy-admin -- --help
+cargo run -p canopy-server --features pg --bin canopy-admin -- media import --help
 ~~~
 
 Then compare documented variables against Select-String results from config.rs and .env.example. Expected: command shapes match Clap output and every documented setting has a source.

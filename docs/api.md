@@ -1,4 +1,4 @@
-# Canopy API Consumption
+# API Consumption
 
 This document records the exact released contract implemented by the Canopy
 backend. Product-neutral RPC and message semantics live in the canonical
@@ -57,7 +57,7 @@ the contract repository owns product-neutral protocol promises.
 4. Refresh `Cargo.lock` with authenticated registry access.
 5. Run the facade and generated-client compile tests.
 6. Run every Canopy verification gate below.
-7. Update the supported release and commit recorded in this document and the README.
+7. Update the supported release and commit recorded in this document.
 
 ## Verification
 
@@ -72,3 +72,6 @@ cargo clippy --workspace --all-features --tests --locked -- -D warnings
 The HTTP OpenAPI document at `docs/openapi.json` covers only actual Canopy
 HTTP routes. Protobuf and BSR-generated documentation remain authoritative for
 the gRPC API.
+
+See [Development](development.md) for the complete local and CI verification
+workflows.

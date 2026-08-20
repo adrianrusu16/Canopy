@@ -193,7 +193,7 @@ fn client_connection_reference_is_public_versioned_and_consistent() {
 fn client_integration_docs_track_the_reference_contract() {
     let reference = load_reference();
     let handoff = include_str!("../../../docs/client-integration.md");
-    let server_consumption = include_str!("../../../docs/canopy-api-consumption.md");
+    let server_consumption = include_str!("../../../docs/api.md");
 
     for expected in [
         reference.contract.bsr_module.as_str(),

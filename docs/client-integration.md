@@ -17,7 +17,7 @@ here.
 - Tonic SDK: `=0.5.0-00000000000000-af019e2d7fa2.4`
 
 Generated SDK versions are immutable dependency pins. Release labels are for
-discovery and communication. See [Canopy API Consumption](canopy-api-consumption.md)
+discovery and communication. See [API Consumption](api.md)
 for the backend's dependency-upgrade procedure.
 
 ## Public Surfaces
@@ -74,8 +74,8 @@ Canopy authentication requires the PostgreSQL build:
 cargo run -p canopy-server --features pg --bin canopy
 ```
 
-The operator must satisfy all server configuration and migration requirements
-in the README before sharing the public endpoints.
+The operator must satisfy the server [configuration](configuration.md) and
+[deployment](deployment.md) requirements before sharing public endpoints.
 
 ## Production Transport
 
@@ -141,13 +141,17 @@ When Google login is enabled, the deployment operator also provides the
 accepted public OAuth client IDs. Google client secrets and provider-validation
 credentials are never client handoff values.
 
+See [Authentication](authentication.md) for the server-side identity, session,
+outbox, and durable-state model.
+
 ## Playback
 
 Call `PlaybackService.ResolvePlayback` over gRPC and use the returned
 `PlaybackSource.stream_url` verbatim until its expiry. Do not construct stream
 paths, parse capabilities, derive storage paths, or call private authorization
 routes. Streaming range behavior and capability revalidation belong to the
-public streaming endpoint.
+public streaming endpoint. See [Playback and Streaming](playback.md) for the
+owner-aware selection and authorization policy.
 
 ## Errors And Recovery
 
