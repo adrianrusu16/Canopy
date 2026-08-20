@@ -5,6 +5,7 @@
 //! dependency on `tonic`, `sqlx`, or any other transport / storage backend so
 //! that it can be unit-tested in isolation and reused across adapters.
 
+pub mod access;
 pub mod auth_outbox_repository;
 pub mod error;
 pub mod identity;
@@ -12,6 +13,7 @@ pub mod identity_repository;
 pub mod model;
 pub mod repository;
 
+pub use access::TrackAccessScope;
 pub use auth_outbox_repository::{
     AuthOutboxFailureKind, AuthOutboxRepository, ClaimAuthOutboxBatch, ClaimedAuthOutbox,
     MarkAuthOutboxFailed,

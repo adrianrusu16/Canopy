@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use canopy_core::{CanopyResult, InstanceSettingsRepository, ProfileRepository, UserIdentity};
+use canopy_core::{
+    CanopyResult, InstanceSettingsRepository, ProfileRepository, TrackAccessScope, UserIdentity,
+};
 
 /// Access class used by playback and future personalized APIs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,12 +57,46 @@ impl PrincipalService {
             Ok(PlaybackPrincipal::Authenticated)
         }
     }
+
+    /// Derives the current track scope for an optional verified identity.
+    pub async fn track_scope_for_identity(
+        &self,
+        identity: Option<&UserIdentity>,
+    ) -> CanopyResult<TrackAccessScope> {
+        let Some(identity) = identity else {
+            return Ok(TrackAccessScope::Public);
+        };
+        let Some(profile) = self
+            .profiles
+            .get_by_external_user_id(&identity.user_id)
+            .await?
+        else {
+            return Ok(TrackAccessScope::Public);
+        };
+        self.track_scope_for_profile(&profile.id).await
+    }
+
+    /// Derives the current track scope for a verified durable profile.
+    pub async fn track_scope_for_profile(
+        &self,
+        profile_id: &str,
+    ) -> CanopyResult<TrackAccessScope> {
+        if self.settings.owner_profile_id().await?.as_deref() == Some(profile_id) {
+            Ok(TrackAccessScope::Owner {
+                profile_id: profile_id.to_string(),
+            })
+        } else {
+            Ok(TrackAccessScope::Public)
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use canopy_core::{InstanceSettingsRepository, ProfileRepository, UserIdentity};
+    use canopy_core::{
+        InstanceSettingsRepository, ProfileRepository, TrackAccessScope, UserIdentity,
+    };
 
     use super::*;
     use crate::jade_store::{InMemoryInstanceSettingsStore, InMemoryProfileStore};
@@ -124,6 +160,36 @@ mod tests {
             PlaybackPrincipal::Owner {
                 profile_id: profile.id,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_owner_receives_owner_scope_until_ownership_changes() {
+        let (service, profiles, settings) = service_with_stores();
+        let owner = profiles
+            .upsert_profile("owner-user", Some("Owner"), true)
+            .await
+            .unwrap();
+        let replacement = profiles
+            .upsert_profile("replacement-user", Some("Replacement"), true)
+            .await
+            .unwrap();
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+
+        assert_eq!(
+            service.track_scope_for_profile(&owner.id).await.unwrap(),
+            TrackAccessScope::Owner {
+                profile_id: owner.id.clone(),
+            }
+        );
+
+        settings
+            .set_owner_profile_id(&replacement.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            service.track_scope_for_profile(&owner.id).await.unwrap(),
+            TrackAccessScope::Public
         );
     }
 }
