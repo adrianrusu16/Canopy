@@ -10,10 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use canopy_core::{
     CanopyError, CanopyResult, PlayableAsset, PlayableAssetRepository, PlaybackSource,
-    StreamAudience,
+    StreamAudience, TrackAccessScope,
 };
 
-use crate::principal::PlaybackPrincipal;
 use crate::stream::StreamTokenCodec;
 
 /// Configuration for the playback resolver.
@@ -66,19 +65,19 @@ impl ResolverService {
 
     /// Resolves a track for an anonymous caller using the current time.
     pub async fn resolve(&self, track_id: &str) -> CanopyResult<PlaybackSource> {
-        self.resolve_at(&PlaybackPrincipal::Anonymous, track_id, now_epoch_ms())
+        self.resolve_at(&TrackAccessScope::Public, track_id, now_epoch_ms())
             .await
     }
 
-    /// Resolves a track for the principal using an explicit epoch time.
+    /// Resolves a track for the access scope using an explicit epoch time.
     pub async fn resolve_at(
         &self,
-        principal: &PlaybackPrincipal,
+        scope: &TrackAccessScope,
         track_id: &str,
         now_epoch_ms: u64,
     ) -> CanopyResult<PlaybackSource> {
-        let (assets, audience) = match principal {
-            PlaybackPrincipal::Owner { profile_id } => {
+        let (assets, audience) = match scope {
+            TrackAccessScope::Owner { profile_id } => {
                 let personal = self
                     .assets
                     .assets_for_personal_playback(profile_id, track_id)
@@ -92,7 +91,7 @@ impl ResolverService {
                     (personal, StreamAudience::Personal)
                 }
             }
-            PlaybackPrincipal::Anonymous | PlaybackPrincipal::Authenticated => (
+            TrackAccessScope::Public => (
                 self.assets.assets_for_public_playback(track_id).await?,
                 StreamAudience::Public,
             ),
@@ -160,7 +159,6 @@ fn now_epoch_ms() -> u64 {
 mod tests {
     use super::*;
 
-    use crate::principal::PlaybackPrincipal;
     use crate::stream::StreamTokenCodec;
     use async_trait::async_trait;
     use canopy_core::{
@@ -259,7 +257,7 @@ mod tests {
 
         let source = resolver
             .resolve_at(
-                &PlaybackPrincipal::Owner {
+                &TrackAccessScope::Owner {
                     profile_id: "owner-a".into(),
                 },
                 "trk_1",
@@ -287,7 +285,7 @@ mod tests {
 
         let source = resolver
             .resolve_at(
-                &PlaybackPrincipal::Owner {
+                &TrackAccessScope::Owner {
                     profile_id: "owner-a".into(),
                 },
                 "trk_1",
@@ -316,7 +314,7 @@ mod tests {
         );
 
         let error = resolver
-            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", 1_000)
+            .resolve_at(&TrackAccessScope::Public, "trk_1", 1_000)
             .await
             .unwrap_err();
 
@@ -330,7 +328,7 @@ mod tests {
 
         let error = resolver
             .resolve_at(
-                &PlaybackPrincipal::Owner {
+                &TrackAccessScope::Owner {
                     profile_id: "owner-a".into(),
                 },
                 "trk_1",
@@ -352,7 +350,7 @@ mod tests {
         ]);
 
         let source = resolver
-            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", 1_000_000)
+            .resolve_at(&TrackAccessScope::Public, "trk_1", 1_000_000)
             .await
             .unwrap();
         // `opus` outranks `mp3` in the default preference list.
@@ -367,7 +365,7 @@ mod tests {
 
         let now = 1_000_000;
         let source = resolver
-            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", now)
+            .resolve_at(&TrackAccessScope::Public, "trk_1", now)
             .await
             .unwrap();
 
@@ -389,7 +387,7 @@ mod tests {
     async fn resolve_falls_back_when_no_preferred_codec() {
         let resolver = resolver(vec![asset("trk_1", "wav", "audio/tracks/trk_1.wav")]);
         let source = resolver
-            .resolve_at(&PlaybackPrincipal::Anonymous, "trk_1", 0)
+            .resolve_at(&TrackAccessScope::Public, "trk_1", 0)
             .await
             .unwrap();
         assert_eq!(source.codec, "wav");
@@ -399,7 +397,7 @@ mod tests {
     async fn resolve_missing_track_is_not_found() {
         let resolver = resolver(vec![]);
         let err = resolver
-            .resolve_at(&PlaybackPrincipal::Anonymous, "missing", 0)
+            .resolve_at(&TrackAccessScope::Public, "missing", 0)
             .await
             .unwrap_err();
         assert!(matches!(err, CanopyError::NotFound { entity, .. } if entity == "audio_asset"));

@@ -7,7 +7,7 @@ use canopy_proto::{PlaybackSource, ResolvePlaybackRequest};
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
-use super::{GrpcServices, extract_optional_metadata_identity};
+use super::{GrpcServices, extract_optional_track_scope};
 use crate::api::to_status;
 
 pub struct PlaybackGrpc(pub Arc<GrpcServices>);
@@ -20,22 +20,13 @@ impl PlaybackService for PlaybackGrpc {
     ) -> Result<Response<PlaybackSource>, Status> {
         let metadata = request.metadata().clone();
         let track_id = request.into_inner().track_id;
-        let identity =
-            extract_optional_metadata_identity(&metadata, &self.0.auth).map_err(to_status)?;
-        let principal = self
-            .0
-            .principal
-            .classify(identity.as_ref())
+        let scope = extract_optional_track_scope(&metadata, &self.0)
             .await
             .map_err(to_status)?;
         let source = self
             .0
             .resolver
-            .resolve_at(
-                &principal,
-                &track_id,
-                current_epoch_ms().map_err(to_status)?,
-            )
+            .resolve_at(&scope, &track_id, current_epoch_ms().map_err(to_status)?)
             .await
             .map_err(to_status)?;
 
