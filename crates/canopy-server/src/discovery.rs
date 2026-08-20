@@ -14,7 +14,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use canopy_core::{CanopyResult, DiscoveryRepository, MediaItem, MediaPage, Page};
+use canopy_core::{
+    CanopyResult, DiscoveryRepository, MediaItem, MediaPage, Page, TrackAccessScope,
+};
 
 /// Application service for the discovery shuffle channel.
 #[derive(Clone)]
@@ -39,19 +41,30 @@ impl DiscoveryService {
     /// listening history). The result excludes those tracks, is reordered so
     /// no two consecutive items share an artist where avoidable, and is capped
     /// at a clamped page size.
-    pub async fn next(&self, recently_played: &[String], limit: u32) -> CanopyResult<MediaPage> {
-        self.feed(recently_played, Page { limit, offset: 0 }).await
+    pub async fn next(
+        &self,
+        scope: &TrackAccessScope,
+        recently_played: &[String],
+        limit: u32,
+    ) -> CanopyResult<MediaPage> {
+        self.feed(scope, recently_played, Page { limit, offset: 0 })
+            .await
     }
 
     /// Returns an offset page from the diversified discovery pool.
-    pub async fn feed(&self, recently_played: &[String], page: Page) -> CanopyResult<MediaPage> {
+    pub async fn feed(
+        &self,
+        scope: &TrackAccessScope,
+        recently_played: &[String],
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
         let limit = Self::clamp_limit(page.limit) as usize;
         let offset = page.offset as usize;
         let excluded: HashSet<&str> = recently_played.iter().map(String::as_str).collect();
 
         let candidates: Vec<MediaItem> = self
             .repo
-            .shuffle_pool()
+            .shuffle_pool(scope)
             .await?
             .into_iter()
             .filter(|item| !excluded.contains(item.id.as_str()))
@@ -66,7 +79,7 @@ impl DiscoveryService {
         let has_more = total > offset.saturating_add(items.len());
 
         Ok(MediaPage {
-            total_count: items.len() as i32,
+            total_count: total.min(i32::MAX as usize) as i32,
             has_more,
             items,
         })

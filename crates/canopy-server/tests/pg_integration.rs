@@ -946,7 +946,7 @@ async fn postgres_discovery_fallback_preserves_public_visibility_policy() {
         .await
         .expect("one restored row should become explicit");
 
-    let fallback_result = catalog.shuffle_pool().await;
+    let fallback_result = catalog.shuffle_pool(&TrackAccessScope::Public).await;
 
     sqlx::query("DELETE FROM tracks WHERE id::text = ANY($1)")
         .bind(vec![explicit_id.clone(), eligible_id.clone()])
@@ -1354,6 +1354,24 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
             .iter()
             .any(|item| item.id == quarantined_id)
     );
+
+    let public_discovery = catalog
+        .shuffle_pool(&TrackAccessScope::Public)
+        .await
+        .unwrap();
+    assert!(public_discovery.iter().any(|item| item.id == public_id));
+    assert!(!public_discovery.iter().any(|item| item.id == personal_a_id));
+
+    let owner_discovery = catalog.shuffle_pool(&owner_scope).await.unwrap();
+    assert!(owner_discovery.iter().any(|item| item.id == public_id));
+    assert!(owner_discovery.iter().any(|item| item.id == personal_a_id));
+    assert!(!owner_discovery.iter().any(|item| item.id == personal_b_id));
+    assert!(
+        !owner_discovery
+            .iter()
+            .any(|item| item.id == owner_pending_id)
+    );
+    assert!(!owner_discovery.iter().any(|item| item.id == quarantined_id));
 
     let owner_search = catalog
         .search(

@@ -710,7 +710,46 @@ impl CatalogIngest for PgCatalogRepository {
 
 #[async_trait]
 impl DiscoveryRepository for PgCatalogRepository {
-    async fn shuffle_pool(&self) -> CanopyResult<Vec<MediaItem>> {
+    async fn shuffle_pool(&self, scope: &TrackAccessScope) -> CanopyResult<Vec<MediaItem>> {
+        if let TrackAccessScope::Owner { profile_id } = scope {
+            let owner_uuid = parse_uuid_arg(profile_id, "owner_profile_id")?;
+            let sql = format!(
+                r#"
+                WITH accessible AS (
+                    SELECT t.*, md5(t.id::text || CURRENT_DATE::text) AS daily_rank
+                    FROM tracks t
+                    WHERE t.is_explicit = FALSE
+                      AND t.ingest_status = 'ready'
+                      AND (
+                        t.visibility = 'release_safe'
+                        OR (t.visibility = 'personal' AND t.owner_profile_id = $1)
+                      )
+                )
+                SELECT
+                    t.id AS track_id,
+                    t.title AS track_title,
+                    a.name AS artist_name,
+                    al.title AS album_title,
+                    t.duration_ms AS track_duration_ms,
+                    t.is_explicit AS track_explicit,
+                    COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                    aa.content_type AS asset_content_type,
+                    aa.size_bytes AS asset_size_bytes
+                FROM accessible t
+                JOIN artists a ON t.artist_id = a.id
+                JOIN albums al ON t.album_id = al.id
+                {REPRESENTATIVE_ASSET_JOIN}
+                ORDER BY t.daily_rank, t.id
+                "#
+            );
+            let rows = sqlx::query(AssertSqlSafe(sql))
+                .bind(owner_uuid)
+                .fetch_all(self.pool.as_ref())
+                .await
+                .map_err(db_err)?;
+            return Ok(rows.iter().map(media_item_from_row).collect());
+        }
+
         let sql = r#"
             SELECT
                 track_id,

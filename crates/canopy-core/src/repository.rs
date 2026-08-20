@@ -52,7 +52,7 @@ pub trait CatalogRepository: Send + Sync {
 #[async_trait]
 pub trait DiscoveryRepository: Send + Sync {
     /// Returns the current shuffle pool in materialized-view order.
-    async fn shuffle_pool(&self) -> CanopyResult<Vec<MediaItem>>;
+    async fn shuffle_pool(&self, scope: &TrackAccessScope) -> CanopyResult<Vec<MediaItem>>;
 }
 
 /// Read access to the encoded audio assets backing a track.

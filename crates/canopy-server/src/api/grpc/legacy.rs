@@ -841,7 +841,11 @@ impl Canopy for GrpcApi {
         let req = request.into_inner();
         let page = self
             .discovery
-            .next(&req.recently_played, req.limit as u32)
+            .next(
+                &TrackAccessScope::Public,
+                &req.recently_played,
+                req.limit as u32,
+            )
             .await
             .map_err(to_status)?;
         let item = page

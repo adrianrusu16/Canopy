@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use canopy_core::PageTokenCodec;
 use canopy_proto::discovery_service_server::DiscoveryService;
 use canopy_proto::{
     GetDiscoveryFeedRequest, GetDiscoveryFeedResponse, GetForYouFeedRequest, GetForYouFeedResponse,
@@ -8,13 +7,12 @@ use canopy_proto::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{page_from_request, page_info, to_track_summary};
+use super::{
+    GrpcServices, extract_optional_track_scope, page_from_request, page_info, to_track_summary,
+};
 use crate::api::to_status;
 
-pub struct DiscoveryGrpc {
-    discovery: crate::discovery::DiscoveryService,
-    page_tokens: Arc<PageTokenCodec>,
-}
+pub struct DiscoveryGrpc(pub Arc<GrpcServices>);
 
 struct FeedPayload {
     tracks: Vec<TrackSummary>,
@@ -22,29 +20,29 @@ struct FeedPayload {
 }
 
 impl DiscoveryGrpc {
-    pub fn new(
-        discovery: crate::discovery::DiscoveryService,
-        page_tokens: Arc<PageTokenCodec>,
-    ) -> Self {
-        Self {
-            discovery,
-            page_tokens,
-        }
-    }
-
     async fn feed(
         &self,
+        metadata: tonic::metadata::MetadataMap,
         exclude_track_ids: Vec<String>,
         page_request: Option<PageRequest>,
     ) -> Result<FeedPayload, Status> {
-        let page = page_from_request(page_request, &self.page_tokens).map_err(to_status)?;
-        let result = self
-            .discovery
-            .feed(&exclude_track_ids, page)
+        let scope = extract_optional_track_scope(&metadata, &self.0)
             .await
             .map_err(to_status)?;
-        let page_info = page_info(page, result.items.len(), result.has_more, &self.page_tokens)
+        let page = page_from_request(page_request, &self.0.page_tokens).map_err(to_status)?;
+        let result = self
+            .0
+            .discovery
+            .feed(&scope, &exclude_track_ids, page)
+            .await
             .map_err(to_status)?;
+        let page_info = page_info(
+            page,
+            result.items.len(),
+            result.has_more,
+            &self.0.page_tokens,
+        )
+        .map_err(to_status)?;
 
         Ok(FeedPayload {
             tracks: result.items.into_iter().map(to_track_summary).collect(),
@@ -59,8 +57,11 @@ impl DiscoveryService for DiscoveryGrpc {
         &self,
         request: Request<GetDiscoveryFeedRequest>,
     ) -> Result<Response<GetDiscoveryFeedResponse>, Status> {
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let feed = self.feed(request.exclude_track_ids, request.page).await?;
+        let feed = self
+            .feed(metadata, request.exclude_track_ids, request.page)
+            .await?;
 
         Ok(Response::new(GetDiscoveryFeedResponse {
             tracks: feed.tracks,
@@ -72,8 +73,11 @@ impl DiscoveryService for DiscoveryGrpc {
         &self,
         request: Request<GetForYouFeedRequest>,
     ) -> Result<Response<GetForYouFeedResponse>, Status> {
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let feed = self.feed(request.exclude_track_ids, request.page).await?;
+        let feed = self
+            .feed(metadata, request.exclude_track_ids, request.page)
+            .await?;
 
         Ok(Response::new(GetForYouFeedResponse {
             tracks: feed.tracks,
@@ -85,8 +89,11 @@ impl DiscoveryService for DiscoveryGrpc {
         &self,
         request: Request<GetRecommendationsRequest>,
     ) -> Result<Response<GetRecommendationsResponse>, Status> {
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
-        let feed = self.feed(request.exclude_track_ids, request.page).await?;
+        let feed = self
+            .feed(metadata, request.exclude_track_ids, request.page)
+            .await?;
 
         Ok(Response::new(GetRecommendationsResponse {
             tracks: feed.tracks,
@@ -98,10 +105,28 @@ impl DiscoveryService for DiscoveryGrpc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canopy_core::{MediaItem, PageTokenCodec};
+    use canopy_core::{CatalogRepository, MediaItem, PageTokenCodec};
     use canopy_proto::PageRequest;
 
-    use crate::jade_store::InMemoryCatalog;
+    use crate::auth::AuthService;
+    use crate::catalog::CatalogService as DomainCatalogService;
+    use crate::discovery::DiscoveryService as DomainDiscoveryService;
+    use crate::health::HealthService;
+    use crate::history::HistoryService;
+    use crate::jade_store::{
+        InMemoryAudioAssetStore, InMemoryCatalog, InMemoryInstanceSettingsStore,
+        InMemoryLibraryStore, InMemoryLikeStore, InMemoryPlaybackHistoryStore,
+        InMemoryPlaylistStore, InMemoryPreferencesStore, InMemoryProfileStore,
+    };
+    use crate::library::LibraryService;
+    use crate::likes::LikeService;
+    use crate::playback::{ResolverConfig, ResolverService};
+    use crate::playlists::PlaylistService;
+    use crate::preferences::PreferencesService;
+    use crate::principal::PrincipalService;
+    use crate::profile::ProfileService;
+    use crate::search::SearchService;
+    use crate::stream::StreamTokenCodec;
 
     fn adapter() -> DiscoveryGrpc {
         let catalog = InMemoryCatalog::with_items(vec![
@@ -118,10 +143,43 @@ mod tests {
                 ..MediaItem::default()
             },
         ]);
-        DiscoveryGrpc::new(
-            crate::discovery::DiscoveryService::new(Arc::new(catalog)),
-            Arc::new(PageTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap()),
-        )
+        let catalog_repo: Arc<dyn CatalogRepository> = Arc::new(catalog.clone());
+        let profiles = Arc::new(InMemoryProfileStore::default());
+        let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+        let history_repo = Arc::new(InMemoryPlaybackHistoryStore::default());
+        let library_repo = Arc::new(InMemoryLibraryStore::default());
+        let like_repo = Arc::new(InMemoryLikeStore::default());
+        let preferences_repo = Arc::new(InMemoryPreferencesStore::default());
+        let playlist_repo = Arc::new(InMemoryPlaylistStore::default());
+        let resolver = ResolverService::new(
+            Arc::new(InMemoryAudioAssetStore::default().with_instance_settings(settings.clone())),
+            Arc::new(StreamTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap()),
+            ResolverConfig {
+                public_base_url: "https://media.test".into(),
+                ..ResolverConfig::default()
+            },
+        );
+        let services = GrpcServices {
+            catalog: DomainCatalogService::new(catalog_repo.clone()),
+            search: SearchService::new(catalog_repo.clone()),
+            profile: ProfileService::new(profiles.clone(), history_repo.clone())
+                .with_deletion_policy(settings.clone(), catalog_repo),
+            history: HistoryService::new(profiles.clone(), history_repo),
+            library: LibraryService::new(profiles.clone(), library_repo),
+            likes: LikeService::new(profiles.clone(), like_repo),
+            preferences: PreferencesService::new(profiles.clone(), preferences_repo),
+            playlists: PlaylistService::new(profiles.clone(), playlist_repo),
+            health: HealthService::new(),
+            resolver,
+            discovery: DomainDiscoveryService::new(Arc::new(catalog)),
+            auth: AuthService::new(b"0123456789abcdef0123456789abcdef".to_vec()),
+            identity: None,
+            principal: PrincipalService::new(profiles, settings),
+            page_tokens: Arc::new(
+                PageTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap(),
+            ),
+        };
+        DiscoveryGrpc(Arc::new(services))
     }
 
     #[tokio::test]

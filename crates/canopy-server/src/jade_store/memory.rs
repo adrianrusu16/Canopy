@@ -51,17 +51,6 @@ impl InMemoryCatalog {
         Self { entries }
     }
 
-    fn public_items(&self) -> Vec<MediaItem> {
-        self.entries
-            .iter()
-            .filter(|entry| {
-                entry.visibility == MediaVisibility::ReleaseSafe
-                    && entry.ingest_status == IngestStatus::Ready
-            })
-            .map(|entry| entry.item.clone())
-            .collect()
-    }
-
     fn accessible_items(&self, scope: &TrackAccessScope) -> Vec<MediaItem> {
         let mut items: Vec<_> = self
             .entries
@@ -161,8 +150,8 @@ impl CatalogRepository for InMemoryCatalog {
 
 #[async_trait]
 impl DiscoveryRepository for InMemoryCatalog {
-    async fn shuffle_pool(&self) -> CanopyResult<Vec<MediaItem>> {
-        Ok(self.public_items())
+    async fn shuffle_pool(&self, scope: &TrackAccessScope) -> CanopyResult<Vec<MediaItem>> {
+        Ok(self.accessible_items(scope))
     }
 }
 

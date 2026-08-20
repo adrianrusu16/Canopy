@@ -213,6 +213,34 @@ async fn public_scope_conceals_every_non_public_partition() {
 }
 
 #[tokio::test]
+async fn owner_discovery_includes_public_and_owned_personal_tracks() {
+    let discovery = DiscoveryService::new(Arc::new(InMemoryCatalog::from_entries(
+        access_matrix_entries(),
+    )));
+    let feed = discovery
+        .feed(
+            &TrackAccessScope::Owner {
+                profile_id: "owner-a".into(),
+            },
+            &[],
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        feed.items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["owner-ready", "public-ready"]
+    );
+}
+
+#[tokio::test]
 async fn catalog_scope_public_hides_non_public_items() {
     let catalog = InMemoryCatalog::from_entries(vec![
         InMemoryCatalogEntry {
@@ -490,7 +518,10 @@ async fn discovery_excludes_recently_played() {
     let discovery = DiscoveryService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
     let recent = vec!["trk_1".to_string()];
-    let result = discovery.next(&recent, 10).await.unwrap();
+    let result = discovery
+        .next(&TrackAccessScope::Public, &recent, 10)
+        .await
+        .unwrap();
     assert_eq!(result.items.len(), 1);
     assert_eq!(result.items[0].id, "trk_2");
 }
@@ -518,7 +549,10 @@ async fn discovery_spreads_artists() {
     ];
     let discovery = DiscoveryService::new(Arc::new(InMemoryCatalog::with_items(items)));
 
-    let result = discovery.next(&[], 3).await.unwrap();
+    let result = discovery
+        .next(&TrackAccessScope::Public, &[], 3)
+        .await
+        .unwrap();
     assert_eq!(result.items.len(), 3);
     for pair in result.items.windows(2) {
         // Where an alternative exists, neighbours differ in artist.
@@ -532,7 +566,10 @@ async fn discovery_spreads_artists() {
 async fn discovery_feed_applies_offset_after_diversification() {
     let discovery = DiscoveryService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
-    let result = discovery.feed(&[], page(1, 1)).await.unwrap();
+    let result = discovery
+        .feed(&TrackAccessScope::Public, &[], page(1, 1))
+        .await
+        .unwrap();
 
     assert_eq!(result.items[0].id, "trk_2");
     assert!(!result.has_more);

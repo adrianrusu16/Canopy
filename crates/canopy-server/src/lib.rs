@@ -399,10 +399,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             .timeout(std::time::Duration::from_secs(15))
             .add_service(CatalogServiceServer::new(CatalogGrpc(services.clone())))
             .add_service(PlaybackServiceServer::new(PlaybackGrpc(services.clone())))
-            .add_service(DiscoveryServiceServer::new(DiscoveryGrpc::new(
-                services.discovery.clone(),
-                services.page_tokens.clone(),
-            )))
+            .add_service(DiscoveryServiceServer::new(DiscoveryGrpc(services.clone())))
             .add_service(ProfileServiceServer::new(ProfileGrpc(services.clone())))
             .add_service(HistoryServiceServer::new(HistoryGrpc(services.clone())))
             .add_service(LibraryServiceServer::new(LibraryGrpc(services.clone())))
