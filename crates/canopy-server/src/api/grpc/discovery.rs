@@ -150,7 +150,7 @@ mod tests {
         let library_repo = Arc::new(InMemoryLibraryStore::new(catalog_repo.clone()));
         let like_repo = Arc::new(InMemoryLikeStore::new(catalog_repo.clone()));
         let preferences_repo = Arc::new(InMemoryPreferencesStore::default());
-        let playlist_repo = Arc::new(InMemoryPlaylistStore::default());
+        let playlist_repo = Arc::new(InMemoryPlaylistStore::new(catalog_repo.clone()));
         let resolver = ResolverService::new(
             Arc::new(InMemoryAudioAssetStore::default().with_instance_settings(settings.clone())),
             Arc::new(StreamTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap()),
@@ -169,7 +169,7 @@ mod tests {
             library: LibraryService::new(profiles.clone(), library_repo, principal.clone()),
             likes: LikeService::new(profiles.clone(), like_repo, principal.clone()),
             preferences: PreferencesService::new(profiles.clone(), preferences_repo),
-            playlists: PlaylistService::new(profiles.clone(), playlist_repo),
+            playlists: PlaylistService::new(profiles.clone(), playlist_repo, principal.clone()),
             health: HealthService::new(),
             resolver,
             discovery: DomainDiscoveryService::new(Arc::new(catalog)),

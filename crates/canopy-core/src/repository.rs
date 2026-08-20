@@ -283,6 +283,7 @@ pub trait PlaylistRepository: Send + Sync {
         playlist_id: &str,
         track_id: &str,
         position: Option<i32>,
+        scope: &TrackAccessScope,
     ) -> CanopyResult<PlaylistTrackItem>;
 
     /// Removes a track from a playlist. Removing an absent track succeeds.
@@ -299,6 +300,7 @@ pub trait PlaylistRepository: Send + Sync {
         profile_id: &str,
         playlist_id: &str,
         track_ids: &[String],
+        scope: &TrackAccessScope,
     ) -> CanopyResult<Playlist>;
 
     /// Lists playlist tracks as renderable media items in playlist order.
@@ -306,6 +308,7 @@ pub trait PlaylistRepository: Send + Sync {
         &self,
         profile_id: &str,
         playlist_id: &str,
+        scope: &TrackAccessScope,
         page: Page,
     ) -> CanopyResult<PlaylistTrackPage>;
 }

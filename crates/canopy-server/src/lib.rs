@@ -308,7 +308,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         library_repo = Arc::new(InMemoryLibraryStore::new(catalog_repo.clone()));
         like_repo = Arc::new(InMemoryLikeStore::new(catalog_repo.clone()));
         preferences_repo = Arc::new(InMemoryPreferencesStore::default());
-        playlist_repo = Arc::new(InMemoryPlaylistStore::default());
+        playlist_repo = Arc::new(InMemoryPlaylistStore::new(catalog_repo.clone()));
         health = HealthService::new()
             .with_media_root(config.media_root.clone())
             .with_email_delivery(identity::EmailDeliveryReadiness::disabled());
@@ -325,7 +325,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let library = LibraryService::new(profile_repo.clone(), library_repo, principal.clone());
     let likes = LikeService::new(profile_repo.clone(), like_repo, principal.clone());
     let preferences = PreferencesService::new(profile_repo.clone(), preferences_repo);
-    let playlists = PlaylistService::new(profile_repo, playlist_repo);
+    let playlists = PlaylistService::new(profile_repo, playlist_repo, principal.clone());
     let discovery = DiscoveryService::new(discovery_repo);
 
     // Public playback resolves only Canopy-managed assets into opaque capabilities.

@@ -647,10 +647,16 @@ impl Default for InMemoryLikeStore {
 
 #[cfg(test)]
 fn test_catalog() -> Arc<dyn CatalogRepository> {
-    Arc::new(InMemoryCatalog::with_items(vec![MediaItem {
-        id: "track-1".into(),
-        ..MediaItem::default()
-    }]))
+    Arc::new(InMemoryCatalog::with_items(vec![
+        MediaItem {
+            id: "track-1".into(),
+            ..MediaItem::default()
+        },
+        MediaItem {
+            id: "track-2".into(),
+            ..MediaItem::default()
+        },
+    ]))
 }
 
 #[async_trait]
@@ -793,13 +799,21 @@ fn playlist_tracks_match(existing: &[PlaylistTrack], requested: &[String]) -> bo
 }
 
 /// In-memory playlist store for tests and standalone prototype mode.
-#[derive(Default)]
 pub struct InMemoryPlaylistStore {
+    catalog: Arc<dyn CatalogRepository>,
     playlists: Mutex<HashMap<String, Playlist>>,
     tracks: Mutex<HashMap<String, Vec<PlaylistTrack>>>,
 }
 
 impl InMemoryPlaylistStore {
+    pub fn new(catalog: Arc<dyn CatalogRepository>) -> Self {
+        Self {
+            catalog,
+            playlists: Mutex::new(HashMap::new()),
+            tracks: Mutex::new(HashMap::new()),
+        }
+    }
+
     fn get_owned_playlist(&self, profile_id: &str, playlist_id: &str) -> CanopyResult<Playlist> {
         let playlist = self
             .playlists
@@ -812,6 +826,13 @@ impl InMemoryPlaylistStore {
             return Err(playlist_not_found(playlist_id));
         }
         Ok(playlist)
+    }
+}
+
+#[cfg(test)]
+impl Default for InMemoryPlaylistStore {
+    fn default() -> Self {
+        Self::new(test_catalog())
     }
 }
 
@@ -908,8 +929,14 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         playlist_id: &str,
         track_id: &str,
         position: Option<i32>,
+        scope: &TrackAccessScope,
     ) -> CanopyResult<PlaylistTrackItem> {
         self.get_owned_playlist(profile_id, playlist_id)?;
+        let item = self
+            .catalog
+            .get_media(scope, track_id)
+            .await?
+            .ok_or_else(|| CanopyError::not_found("track", track_id))?;
         if let Some(position) = position
             && position < 0
         {
@@ -951,10 +978,7 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         }
         Ok(PlaylistTrackItem {
             playlist_id: track.playlist_id,
-            item: MediaItem {
-                id: track.track_id,
-                ..MediaItem::default()
-            },
+            item,
             position: track.position,
             added_at_epoch_ms: track.added_at_epoch_ms,
         })
@@ -981,6 +1005,7 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         profile_id: &str,
         playlist_id: &str,
         track_ids: &[String],
+        scope: &TrackAccessScope,
     ) -> CanopyResult<Playlist> {
         self.get_owned_playlist(profile_id, playlist_id)?;
         let mut seen = std::collections::HashSet::new();
@@ -992,27 +1017,44 @@ impl PlaylistRepository for InMemoryPlaylistStore {
                 "reorder track_ids must be unique".into(),
             ));
         }
-        let mut tracks = self.tracks.lock().unwrap();
-        let entry = tracks.entry(playlist_id.to_string()).or_default();
-        if !playlist_tracks_match(entry, track_ids) {
+
+        let current = self
+            .tracks
+            .lock()
+            .unwrap()
+            .get(playlist_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut visible = Vec::new();
+        for track in current {
+            if self
+                .catalog
+                .get_media(scope, &track.track_id)
+                .await?
+                .is_some()
+            {
+                visible.push(track);
+            }
+        }
+        if !playlist_tracks_match(&visible, track_ids) {
             return Err(CanopyError::InvalidArgument(
-                "reorder must include exactly the playlist track_ids".into(),
+                "reorder must include exactly the visible playlist track_ids".into(),
             ));
         }
-        let mut reordered = Vec::with_capacity(entry.len());
+
+        let mut tracks = self.tracks.lock().unwrap();
+        let entry = tracks.entry(playlist_id.to_string()).or_default();
         for (position, track_id) in track_ids.iter().enumerate() {
-            let mut track = entry
-                .iter()
+            let position = i32::try_from(position)
+                .map_err(|_| CanopyError::InvalidArgument("playlist is too large".into()))?;
+            let track = entry
+                .iter_mut()
                 .find(|track| track.track_id == *track_id)
-                .cloned()
                 .ok_or_else(|| {
                     CanopyError::InvalidArgument("unknown track_id in reorder".into())
                 })?;
-            track.position = i32::try_from(position)
-                .map_err(|_| CanopyError::InvalidArgument("playlist is too large".into()))?;
-            reordered.push(track);
+            track.position = position;
         }
-        *entry = reordered;
         drop(tracks);
 
         let mut playlists = self.playlists.lock().unwrap();
@@ -1027,6 +1069,7 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         &self,
         profile_id: &str,
         playlist_id: &str,
+        scope: &TrackAccessScope,
         page: Page,
     ) -> CanopyResult<PlaylistTrackPage> {
         self.get_owned_playlist(profile_id, playlist_id)?;
@@ -1037,17 +1080,27 @@ impl PlaylistRepository for InMemoryPlaylistStore {
             .get(playlist_id)
             .cloned()
             .unwrap_or_default();
-        let total_count = tracks.len() as i32;
-        let start = (page.offset as usize).min(tracks.len());
-        let end = (start + page.limit as usize).min(tracks.len());
-        let items = tracks[start..end]
+        let mut visible = Vec::new();
+        for track in tracks {
+            if let Some(item) = self.catalog.get_media(scope, &track.track_id).await? {
+                visible.push((track, item));
+            }
+        }
+        visible.sort_by(|(left, _), (right, _)| {
+            (left.position, left.added_at_epoch_ms, &left.track_id).cmp(&(
+                right.position,
+                right.added_at_epoch_ms,
+                &right.track_id,
+            ))
+        });
+        let total_count = visible.len() as i32;
+        let start = (page.offset as usize).min(visible.len());
+        let end = (start + page.limit as usize).min(visible.len());
+        let items = visible[start..end]
             .iter()
-            .map(|track| PlaylistTrackItem {
+            .map(|(track, item)| PlaylistTrackItem {
                 playlist_id: track.playlist_id.clone(),
-                item: MediaItem {
-                    id: track.track_id.clone(),
-                    ..MediaItem::default()
-                },
+                item: item.clone(),
                 position: track.position,
                 added_at_epoch_ms: track.added_at_epoch_ms,
             })
@@ -1055,7 +1108,7 @@ impl PlaylistRepository for InMemoryPlaylistStore {
         Ok(PlaylistTrackPage {
             items,
             total_count,
-            has_more: end < tracks.len(),
+            has_more: end < visible.len(),
         })
     }
 }

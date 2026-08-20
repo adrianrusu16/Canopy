@@ -2222,6 +2222,20 @@ async fn postgres_repositories_support_profile_owned_playlists() {
     .await
     .expect("second track should be inserted");
 
+    for track_id in [&track_id, &track_id_2] {
+        sqlx::query(
+            "UPDATE tracks SET visibility = 'personal', ingest_status = 'ready', owner_profile_id = $2::uuid WHERE id = $1::uuid",
+        )
+        .bind(track_id)
+        .bind(&profile.id)
+        .execute(&pool)
+        .await
+        .expect("playlist track should become owner-visible");
+    }
+    let owner_scope = TrackAccessScope::Owner {
+        profile_id: profile.id.clone(),
+    };
+
     let created = playlists
         .create_playlist(&profile.id, "Road Mix", "For drives")
         .await
@@ -2247,15 +2261,15 @@ async fn postgres_repositories_support_profile_owned_playlists() {
     assert_eq!(playlist_page.total_count, 1);
 
     playlists
-        .add_track(&profile.id, &created.id, &track_id, None)
+        .add_track(&profile.id, &created.id, &track_id, None, &owner_scope)
         .await
         .expect("track should add");
     playlists
-        .add_track(&profile.id, &created.id, &track_id, None)
+        .add_track(&profile.id, &created.id, &track_id, None, &owner_scope)
         .await
         .expect("duplicate track add should be idempotent");
     playlists
-        .add_track(&profile.id, &created.id, &track_id_2, Some(0))
+        .add_track(&profile.id, &created.id, &track_id_2, Some(0), &owner_scope)
         .await
         .expect("second track should add");
 
@@ -2263,6 +2277,7 @@ async fn postgres_repositories_support_profile_owned_playlists() {
         .list_tracks(
             &profile.id,
             &created.id,
+            &owner_scope,
             Page {
                 limit: 10,
                 offset: 0,
@@ -2277,6 +2292,7 @@ async fn postgres_repositories_support_profile_owned_playlists() {
             &profile.id,
             &created.id,
             &[track_id.clone(), track_id_2.clone()],
+            &owner_scope,
         )
         .await
         .expect("playlist tracks should reorder");
@@ -2294,6 +2310,7 @@ async fn postgres_repositories_support_profile_owned_playlists() {
         .list_tracks(
             &other_profile.id,
             &created.id,
+            &TrackAccessScope::Public,
             Page {
                 limit: 10,
                 offset: 0,

@@ -1857,6 +1857,7 @@ impl PlaylistRepository for PgPlaylistRepository {
         playlist_id: &str,
         track_id: &str,
         position: Option<i32>,
+        scope: &TrackAccessScope,
     ) -> CanopyResult<PlaylistTrackItem> {
         if let Some(position) = position
             && position < 0
@@ -1868,8 +1869,20 @@ impl PlaylistRepository for PgPlaylistRepository {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
         let track_uuid = parse_uuid_arg(track_id, "track_id")?;
-        self.ensure_owned_playlist(profile_uuid, playlist_uuid, playlist_id)
-            .await?;
+        let owner_uuid = owner_scope_uuid(scope)?;
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        let owned = sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT id FROM profile_playlists WHERE id = $1 AND profile_id = $2 FOR UPDATE",
+        )
+        .bind(playlist_uuid)
+        .bind(profile_uuid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if owned.is_none() {
+            return Err(CanopyError::not_found("playlist", playlist_id));
+        }
 
         let position = if let Some(position) = position {
             position
@@ -1878,31 +1891,47 @@ impl PlaylistRepository for PgPlaylistRepository {
                 "SELECT MAX(position) + 1 FROM profile_playlist_tracks WHERE playlist_id = $1",
             )
             .bind(playlist_uuid)
-            .fetch_one(self.pool.as_ref())
+            .fetch_one(&mut *tx)
             .await
             .map_err(db_err)?
             .unwrap_or(0)
         };
 
-        sqlx::query(
+        let inserted = sqlx::query_scalar::<_, uuid::Uuid>(
             r#"
                 INSERT INTO profile_playlist_tracks (playlist_id, track_id, position)
-                VALUES ($1, $2, $3)
+                SELECT $1, t.id, $3
+                FROM tracks t
+                WHERE t.id = $2
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR (
+                        $4::uuid IS NOT NULL
+                        AND t.visibility = 'personal'
+                        AND t.owner_profile_id = $4
+                    )
+                  )
                 ON CONFLICT (playlist_id, track_id) DO UPDATE SET
                     position = EXCLUDED.position,
                     updated_at = NOW()
+                RETURNING track_id
             "#,
         )
         .bind(playlist_uuid)
         .bind(track_uuid)
         .bind(position)
-        .execute(self.pool.as_ref())
+        .bind(owner_uuid)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|err| map_track_write_err(err, track_id))?;
+        if inserted.is_none() {
+            return Err(CanopyError::not_found("track", track_id));
+        }
 
         sqlx::query("UPDATE profile_playlists SET updated_at = NOW() WHERE id = $1")
             .bind(playlist_uuid)
-            .execute(self.pool.as_ref())
+            .execute(&mut *tx)
             .await
             .map_err(db_err)?;
 
@@ -1927,16 +1956,25 @@ impl PlaylistRepository for PgPlaylistRepository {
             JOIN albums al     ON t.album_id = al.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE ppt.playlist_id = $1 AND ppt.track_id = $2
+              AND t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR ($3::uuid IS NOT NULL AND t.visibility = 'personal' AND t.owner_profile_id = $3)
+              )
             "#
         );
         let row = sqlx::query(AssertSqlSafe(sql))
             .bind(playlist_uuid)
             .bind(track_uuid)
-            .fetch_one(self.pool.as_ref())
+            .bind(owner_uuid)
+            .fetch_optional(&mut *tx)
             .await
-            .map_err(db_err)?;
+            .map_err(db_err)?
+            .ok_or_else(|| CanopyError::not_found("track", track_id))?;
+        let item = playlist_track_item_from_row(&row);
 
-        Ok(playlist_track_item_from_row(&row))
+        tx.commit().await.map_err(db_err)?;
+        Ok(item)
     }
 
     async fn remove_track(
@@ -1972,9 +2010,11 @@ impl PlaylistRepository for PgPlaylistRepository {
         profile_id: &str,
         playlist_id: &str,
         track_ids: &[String],
+        scope: &TrackAccessScope,
     ) -> CanopyResult<Playlist> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         let mut requested = Vec::with_capacity(track_ids.len());
         let mut seen = std::collections::HashSet::new();
         for track_id in track_ids {
@@ -1987,22 +2027,38 @@ impl PlaylistRepository for PgPlaylistRepository {
         }
 
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        let owned: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM profile_playlists WHERE id = $1 AND profile_id = $2)",
+        let owned = sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT id FROM profile_playlists WHERE id = $1 AND profile_id = $2 FOR UPDATE",
         )
         .bind(playlist_uuid)
         .bind(profile_uuid)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?;
-        if !owned {
+        if owned.is_none() {
             return Err(CanopyError::not_found("playlist", playlist_id));
         }
 
         let current: Vec<uuid::Uuid> = sqlx::query_scalar(
-            "SELECT track_id FROM profile_playlist_tracks WHERE playlist_id = $1 ORDER BY position",
+            r#"
+                SELECT ppt.track_id
+                FROM profile_playlist_tracks ppt
+                JOIN tracks t ON t.id = ppt.track_id
+                WHERE ppt.playlist_id = $1
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR (
+                        $2::uuid IS NOT NULL
+                        AND t.visibility = 'personal'
+                        AND t.owner_profile_id = $2
+                    )
+                  )
+                ORDER BY ppt.position, ppt.added_at, ppt.track_id
+            "#,
         )
         .bind(playlist_uuid)
+        .bind(owner_uuid)
         .fetch_all(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -2013,7 +2069,7 @@ impl PlaylistRepository for PgPlaylistRepository {
         requested_sorted.sort();
         if current_sorted != requested_sorted {
             return Err(CanopyError::InvalidArgument(
-                "reorder must include exactly the playlist track_ids".into(),
+                "reorder must include exactly the visible playlist track_ids".into(),
             ));
         }
 
@@ -2059,10 +2115,12 @@ impl PlaylistRepository for PgPlaylistRepository {
         &self,
         profile_id: &str,
         playlist_id: &str,
+        scope: &TrackAccessScope,
         page: Page,
     ) -> CanopyResult<PlaylistTrackPage> {
         let profile_uuid = parse_uuid_arg(profile_id, "profile_id")?;
         let playlist_uuid = parse_uuid_arg(playlist_id, "playlist_id")?;
+        let owner_uuid = owner_scope_uuid(scope)?;
         self.ensure_owned_playlist(profile_uuid, playlist_uuid, playlist_id)
             .await?;
 
@@ -2087,12 +2145,22 @@ impl PlaylistRepository for PgPlaylistRepository {
             JOIN albums al     ON t.album_id = al.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE ppt.playlist_id = $1
+              AND t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR (
+                    $2::uuid IS NOT NULL
+                    AND t.visibility = 'personal'
+                    AND t.owner_profile_id = $2
+                )
+              )
             ORDER BY ppt.position, ppt.added_at, t.title
-            LIMIT $2 OFFSET $3
+            LIMIT $3 OFFSET $4
         "#
         );
         let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(playlist_uuid)
+            .bind(owner_uuid)
             .bind(page.limit as i64)
             .bind(page.offset as i64)
             .fetch_all(self.pool.as_ref())
@@ -2100,9 +2168,24 @@ impl PlaylistRepository for PgPlaylistRepository {
             .map_err(db_err)?;
 
         let total_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM profile_playlist_tracks WHERE playlist_id = $1",
+            r#"
+                SELECT COUNT(*)
+                FROM profile_playlist_tracks ppt
+                JOIN tracks t ON t.id = ppt.track_id
+                WHERE ppt.playlist_id = $1
+                  AND t.ingest_status = 'ready'
+                  AND (
+                    t.visibility = 'release_safe'
+                    OR (
+                        $2::uuid IS NOT NULL
+                        AND t.visibility = 'personal'
+                        AND t.owner_profile_id = $2
+                    )
+                  )
+            "#,
         )
         .bind(playlist_uuid)
+        .bind(owner_uuid)
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(db_err)?;

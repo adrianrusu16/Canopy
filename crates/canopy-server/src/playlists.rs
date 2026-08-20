@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::principal::PrincipalService;
 use canopy_core::{
     CanopyError, CanopyResult, Page, Playlist, PlaylistPage, PlaylistRepository, PlaylistTrackItem,
     PlaylistTrackPage, ProfileRepository, UserIdentity,
@@ -15,6 +16,7 @@ use canopy_core::{
 pub struct PlaylistService {
     profiles: Arc<dyn ProfileRepository>,
     playlists: Arc<dyn PlaylistRepository>,
+    principal: PrincipalService,
 }
 
 impl PlaylistService {
@@ -22,10 +24,12 @@ impl PlaylistService {
     pub fn new(
         profiles: Arc<dyn ProfileRepository>,
         playlists: Arc<dyn PlaylistRepository>,
+        principal: PrincipalService,
     ) -> Self {
         Self {
             profiles,
             playlists,
+            principal,
         }
     }
 
@@ -109,8 +113,9 @@ impl PlaylistService {
         let profile_id = self.profile_id(identity).await?;
         let playlist_id = validate_playlist_id(playlist_id)?;
         let track_id = validate_track_id(track_id)?;
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
         self.playlists
-            .add_track(&profile_id, playlist_id, track_id, position)
+            .add_track(&profile_id, playlist_id, track_id, position, &scope)
             .await
     }
 
@@ -142,8 +147,9 @@ impl PlaylistService {
             .into_iter()
             .map(|track_id| validate_track_id(&track_id).map(str::to_string))
             .collect::<CanopyResult<Vec<_>>>()?;
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
         self.playlists
-            .reorder_tracks(&profile_id, playlist_id, &track_ids)
+            .reorder_tracks(&profile_id, playlist_id, &track_ids, &scope)
             .await
     }
 
@@ -156,8 +162,9 @@ impl PlaylistService {
     ) -> CanopyResult<PlaylistTrackPage> {
         let profile_id = self.profile_id(identity).await?;
         let playlist_id = validate_playlist_id(playlist_id)?;
+        let scope = self.principal.track_scope_for_profile(&profile_id).await?;
         self.playlists
-            .list_tracks(&profile_id, playlist_id, page)
+            .list_tracks(&profile_id, playlist_id, &scope, page)
             .await
     }
 
@@ -202,7 +209,13 @@ fn validate_track_id(track_id: &str) -> CanopyResult<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jade_store::{InMemoryPlaylistStore, InMemoryProfileStore};
+    use crate::jade_store::{
+        InMemoryCatalog, InMemoryCatalogEntry, InMemoryInstanceSettingsStore,
+        InMemoryPlaylistStore, InMemoryProfileStore,
+    };
+    use canopy_core::{
+        IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility, TrackAccessScope,
+    };
 
     fn identity() -> UserIdentity {
         UserIdentity {
@@ -214,7 +227,9 @@ mod tests {
         profiles: Arc<InMemoryProfileStore>,
         playlists: Arc<InMemoryPlaylistStore>,
     ) -> PlaylistService {
-        PlaylistService::new(profiles, playlists)
+        let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+        let principal = PrincipalService::new(profiles.clone(), settings);
+        PlaylistService::new(profiles, playlists, principal)
     }
 
     async fn profile_store() -> Arc<InMemoryProfileStore> {
@@ -408,5 +423,171 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, CanopyError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn playlist_access_revocation_hides_but_does_not_block_cleanup() {
+        let profiles = Arc::new(InMemoryProfileStore::default());
+        let owner = profiles
+            .upsert_profile("user-123", Some("Ada"), true)
+            .await
+            .unwrap();
+        let replacement = profiles
+            .upsert_profile("replacement", Some("Grace"), true)
+            .await
+            .unwrap();
+        let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+        settings.set_owner_profile_id(&owner.id).await.unwrap();
+        let catalog = Arc::new(InMemoryCatalog::from_entries(vec![InMemoryCatalogEntry {
+            item: MediaItem {
+                id: "owner-ready".into(),
+                ..MediaItem::default()
+            },
+            visibility: MediaVisibility::Personal,
+            ingest_status: IngestStatus::Ready,
+            owner_profile_id: Some(owner.id.clone()),
+        }]));
+        let playlists = Arc::new(InMemoryPlaylistStore::new(catalog));
+        let principal = PrincipalService::new(profiles.clone(), settings.clone());
+        let service = PlaylistService::new(profiles, playlists, principal);
+        let playlist = service
+            .create_playlist(&identity(), "Private Mix", "")
+            .await
+            .unwrap();
+
+        service
+            .add_track(&identity(), &playlist.id, "owner-ready", None)
+            .await
+            .unwrap();
+        settings
+            .set_owner_profile_id(&replacement.id)
+            .await
+            .unwrap();
+
+        let add_error = service
+            .add_track(&identity(), &playlist.id, "owner-ready", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(add_error, CanopyError::NotFound { .. }));
+
+        let visible = service
+            .list_tracks(
+                &identity(),
+                &playlist.id,
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(visible.items.is_empty());
+        assert_eq!(visible.total_count, 0);
+        service
+            .reorder_tracks(&identity(), &playlist.id, vec![])
+            .await
+            .unwrap();
+        service
+            .remove_track(&identity(), &playlist.id, "owner-ready")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reorder_requires_only_visible_membership() {
+        let catalog = Arc::new(InMemoryCatalog::from_entries(vec![
+            InMemoryCatalogEntry {
+                item: MediaItem {
+                    id: "public-a".into(),
+                    ..MediaItem::default()
+                },
+                visibility: MediaVisibility::ReleaseSafe,
+                ingest_status: IngestStatus::Ready,
+                owner_profile_id: None,
+            },
+            InMemoryCatalogEntry {
+                item: MediaItem {
+                    id: "public-b".into(),
+                    ..MediaItem::default()
+                },
+                visibility: MediaVisibility::ReleaseSafe,
+                ingest_status: IngestStatus::Ready,
+                owner_profile_id: None,
+            },
+            InMemoryCatalogEntry {
+                item: MediaItem {
+                    id: "owner-ready".into(),
+                    ..MediaItem::default()
+                },
+                visibility: MediaVisibility::Personal,
+                ingest_status: IngestStatus::Ready,
+                owner_profile_id: Some("owner".into()),
+            },
+        ]));
+        let store = InMemoryPlaylistStore::new(catalog);
+        let owner_scope = TrackAccessScope::Owner {
+            profile_id: "owner".into(),
+        };
+        let playlist = store
+            .create_playlist("profile", "Mixed Mix", "")
+            .await
+            .unwrap();
+        for track_id in ["public-a", "public-b", "owner-ready"] {
+            store
+                .add_track("profile", &playlist.id, track_id, None, &owner_scope)
+                .await
+                .unwrap();
+        }
+
+        store
+            .reorder_tracks(
+                "profile",
+                &playlist.id,
+                &["public-b".into(), "public-a".into()],
+                &TrackAccessScope::Public,
+            )
+            .await
+            .unwrap();
+        let visible = store
+            .list_tracks(
+                "profile",
+                &playlist.id,
+                &TrackAccessScope::Public,
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            visible
+                .items
+                .iter()
+                .map(|track| track.item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["public-b", "public-a"]
+        );
+
+        let restored = store
+            .list_tracks(
+                "profile",
+                &playlist.id,
+                &owner_scope,
+                Page {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            restored
+                .items
+                .iter()
+                .map(|track| (track.item.id.as_str(), track.position))
+                .collect::<Vec<_>>(),
+            vec![("public-b", 0), ("public-a", 1), ("owner-ready", 2)]
+        );
     }
 }
