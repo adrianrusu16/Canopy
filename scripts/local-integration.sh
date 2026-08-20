@@ -53,6 +53,10 @@ compose_project_ids() {
   docker ps --all --filter "label=com.docker.compose.project=$compose_project" --quiet
 }
 
+compose_volume_exists() {
+  docker volume inspect "${compose_project}_postgres_data" >/dev/null 2>&1
+}
+
 read_recorded_pid() {
   [[ -f "$pid_file" ]] || return 1
   read -r recorded_pid recorded_start <"$pid_file"
@@ -77,9 +81,8 @@ environment_active() {
 }
 
 state_present() {
-  [[ -e "$runtime_env" || -e "$pid_file" ]] || [[ -n "$(compose_project_ids)" ]]
+  [[ -e "$runtime_env" || -e "$pid_file" ]] || [[ -n "$(compose_project_ids)" ]] || compose_volume_exists
 }
-
 assert_ports_available() {
   local port
   for port in 50051 18081 55434 1025 8025 8080; do
@@ -276,6 +279,8 @@ start_environment() {
   assert_ports_available
   if [[ -f "$runtime_env" ]]; then
     load_runtime
+  elif compose_volume_exists; then
+    die "orphaned PostgreSQL volume exists but runtime state is missing; refusing to overwrite persistent data"
   elif state_present; then
     die "persistent runtime state is incomplete; run reset before starting"
   else

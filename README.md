@@ -94,12 +94,23 @@ dependencies. The public local endpoints are:
 - gRPC: `http://127.0.0.1:50051`
 - streaming: `http://127.0.0.1:8080`
 - HTTP OpenAPI: `http://127.0.0.1:8080/openapi.json`
+- operator Mailpit inbox: `http://127.0.0.1:8025`
 
 Run the clean authentication and playback smoke flow with:
 
 ```bash
 ./scripts/local-integration.sh test
 ```
+
+Stop the local environment with:
+
+```bash
+./scripts/local-integration.sh down
+```
+
+A private or local SMTP relay can add a PEM trust root with
+`CANOPY_SMTP_CA_CERT_PATH`; certificate and hostname verification remain
+enabled.
 
 Use [Development](docs/development.md) for prerequisites, manual server modes,
 database/streaming harnesses, and CI commands. Review

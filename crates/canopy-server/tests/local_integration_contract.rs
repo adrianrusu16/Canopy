@@ -45,8 +45,8 @@ fn local_compose_is_scoped_tls_only_and_loopback_bound() {
 }
 
 #[test]
-fn local_nginx_keeps_public_and_private_listeners_on_host_loopback() {
-    assert!(LOCAL_NGINX.contains("listen 127.0.0.1:8080"));
+fn local_nginx_exposes_streaming_to_the_emulator_and_keeps_authorization_private() {
+    assert!(LOCAL_NGINX.contains("listen 0.0.0.0:8080"));
     assert!(LOCAL_NGINX.contains("proxy_pass http://127.0.0.1:18081"));
 }
 
@@ -101,6 +101,20 @@ fn lifecycle_script_exposes_only_the_supported_commands() {
         assert!(
             SCRIPT.contains(required),
             "lifecycle script is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_refuses_to_replace_an_orphaned_postgres_volume() {
+    for required in [
+        "compose_volume_exists()",
+        "orphaned PostgreSQL volume",
+        "runtime state is missing",
+    ] {
+        assert!(
+            SCRIPT.contains(required),
+            "lifecycle script is missing orphaned-volume protection: {required}"
         );
     }
 }
