@@ -12,7 +12,7 @@ use canopy_core::{
     PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository, Playlist, PlaylistPage,
     PlaylistRepository, PlaylistTrack, PlaylistTrackItem, PlaylistTrackPage, PreferencesRepository,
     ProfilePreferences, ProfileRepository, SavedTrackItem, SavedTrackPage, StreamAudience,
-    TrackLike, UserProfile,
+    TrackAccessScope, TrackLike, UserProfile,
 };
 
 /// Catalog item together with its mandatory access policy.
@@ -62,6 +62,27 @@ impl InMemoryCatalog {
             .collect()
     }
 
+    fn accessible_items(&self, scope: &TrackAccessScope) -> Vec<MediaItem> {
+        let mut items: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.ingest_status == IngestStatus::Ready
+                    && (entry.visibility == MediaVisibility::ReleaseSafe
+                        || matches!(
+                            scope,
+                            TrackAccessScope::Owner { profile_id }
+                                if entry.visibility == MediaVisibility::Personal
+                                    && entry.owner_profile_id.as_deref()
+                                        == Some(profile_id.as_str())
+                        ))
+            })
+            .map(|entry| entry.item.clone())
+            .collect();
+        items.sort_by(|left, right| left.id.cmp(&right.id));
+        items
+    }
+
     fn personal_items(&self, owner_profile_id: &str) -> Vec<MediaItem> {
         self.entries
             .iter()
@@ -103,52 +124,38 @@ fn search_items(items: Vec<MediaItem>, query: &str, page: Page) -> MediaPage {
 
 #[async_trait]
 impl CatalogRepository for InMemoryCatalog {
-    async fn browse_public(
+    async fn browse(
         &self,
+        scope: &TrackAccessScope,
         _parent_id: Option<&str>,
         _genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage> {
-        Ok(page_items(self.public_items(), page))
+        Ok(page_items(self.accessible_items(scope), page))
     }
 
-    async fn search_public(&self, query: &str, page: Page) -> CanopyResult<MediaPage> {
-        Ok(search_items(self.public_items(), query, page))
+    async fn search(
+        &self,
+        scope: &TrackAccessScope,
+        query: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
+        Ok(search_items(self.accessible_items(scope), query, page))
     }
 
-    async fn get_public_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>> {
+    async fn get_media(
+        &self,
+        scope: &TrackAccessScope,
+        media_id: &str,
+    ) -> CanopyResult<Option<MediaItem>> {
         Ok(self
-            .public_items()
+            .accessible_items(scope)
             .into_iter()
             .find(|item| item.id == media_id))
     }
 
     async fn list_personal(&self, owner_profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
         Ok(page_items(self.personal_items(owner_profile_id), page))
-    }
-
-    async fn search_personal(
-        &self,
-        owner_profile_id: &str,
-        query: &str,
-        page: Page,
-    ) -> CanopyResult<MediaPage> {
-        Ok(search_items(
-            self.personal_items(owner_profile_id),
-            query,
-            page,
-        ))
-    }
-
-    async fn get_personal_media(
-        &self,
-        owner_profile_id: &str,
-        media_id: &str,
-    ) -> CanopyResult<Option<MediaItem>> {
-        Ok(self
-            .personal_items(owner_profile_id)
-            .into_iter()
-            .find(|item| item.id == media_id))
     }
 }
 

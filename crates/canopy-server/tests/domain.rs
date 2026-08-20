@@ -7,7 +7,7 @@ use canopy_core::{
     AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CanopyError, CatalogRepository,
     IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility, Page, PageTokenCodec,
     PendingImportOutcome, PendingMediaImport, PlayableAsset, PlayableAssetRepository,
-    StreamAudience,
+    StreamAudience, TrackAccessScope,
 };
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
@@ -120,6 +120,98 @@ fn scoped_item(id: &str, title: &str) -> MediaItem {
     }
 }
 
+fn access_entry(
+    id: &str,
+    artist: &str,
+    visibility: MediaVisibility,
+    ingest_status: IngestStatus,
+    owner_profile_id: Option<&str>,
+) -> InMemoryCatalogEntry {
+    InMemoryCatalogEntry {
+        item: MediaItem {
+            id: id.into(),
+            title: id.into(),
+            artist: artist.into(),
+            ..MediaItem::default()
+        },
+        visibility,
+        ingest_status,
+        owner_profile_id: owner_profile_id.map(str::to_owned),
+    }
+}
+
+fn access_matrix_entries() -> Vec<InMemoryCatalogEntry> {
+    vec![
+        access_entry(
+            "public-ready",
+            "Artist Public",
+            MediaVisibility::ReleaseSafe,
+            IngestStatus::Ready,
+            None,
+        ),
+        access_entry(
+            "owner-ready",
+            "Artist Owner",
+            MediaVisibility::Personal,
+            IngestStatus::Ready,
+            Some("owner-a"),
+        ),
+        access_entry(
+            "other-ready",
+            "Artist Other",
+            MediaVisibility::Personal,
+            IngestStatus::Ready,
+            Some("owner-b"),
+        ),
+        access_entry(
+            "owner-pending",
+            "Artist Pending",
+            MediaVisibility::Personal,
+            IngestStatus::Pending,
+            Some("owner-a"),
+        ),
+        access_entry(
+            "quarantined",
+            "Artist Quarantined",
+            MediaVisibility::Quarantined,
+            IngestStatus::Quarantined,
+            None,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn owner_catalog_pages_over_public_and_owned_personal_tracks_only() {
+    let catalog = InMemoryCatalog::from_entries(access_matrix_entries());
+    let scope = TrackAccessScope::Owner {
+        profile_id: "owner-a".into(),
+    };
+
+    let first = catalog.browse(&scope, None, &[], page(1, 0)).await.unwrap();
+    let second = catalog.browse(&scope, None, &[], page(1, 1)).await.unwrap();
+
+    assert_eq!(first.total_count, 2);
+    assert_eq!(second.total_count, 2);
+    assert_eq!(
+        vec![first.items[0].id.as_str(), second.items[0].id.as_str()],
+        vec!["owner-ready", "public-ready"]
+    );
+    assert!(!second.has_more);
+}
+
+#[tokio::test]
+async fn public_scope_conceals_every_non_public_partition() {
+    let catalog = InMemoryCatalog::from_entries(access_matrix_entries());
+
+    assert!(
+        catalog
+            .get_media(&TrackAccessScope::Public, "owner-ready")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn catalog_scope_public_hides_non_public_items() {
     let catalog = InMemoryCatalog::from_entries(vec![
@@ -149,12 +241,15 @@ async fn catalog_scope_public_hides_non_public_items() {
         },
     ]);
 
-    let page = catalog.browse_public(None, &[], page(10, 0)).await.unwrap();
+    let page = catalog
+        .browse(&TrackAccessScope::Public, None, &[], page(10, 0))
+        .await
+        .unwrap();
     assert_eq!(page.items, vec![scoped_item("public", "Public Track")]);
     assert_eq!(page.total_count, 1);
     assert!(
         catalog
-            .get_public_media("personal")
+            .get_media(&TrackAccessScope::Public, "personal")
             .await
             .unwrap()
             .is_none()
@@ -183,9 +278,12 @@ async fn catalog_scope_personal_is_owner_scoped() {
         page.items,
         vec![scoped_item("owner-a-track", "Owner A Track")]
     );
+    let scope = TrackAccessScope::Owner {
+        profile_id: "owner-a".to_string(),
+    };
     assert!(
         catalog
-            .get_personal_media("owner-a", "owner-b-track")
+            .get_media(&scope, "owner-b-track")
             .await
             .unwrap()
             .is_none()
@@ -292,12 +390,18 @@ async fn catalog_scope_public_assets_hide_personal_tracks() {
 async fn browse_paginates() {
     let catalog = CatalogService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
-    let first = catalog.browse(None, &[], page(1, 0)).await.unwrap();
+    let first = catalog
+        .browse(&TrackAccessScope::Public, None, &[], page(1, 0))
+        .await
+        .unwrap();
     assert_eq!(first.items.len(), 1);
     assert_eq!(first.total_count, 2);
     assert!(first.has_more);
 
-    let second = catalog.browse(None, &[], page(1, 1)).await.unwrap();
+    let second = catalog
+        .browse(&TrackAccessScope::Public, None, &[], page(1, 1))
+        .await
+        .unwrap();
     assert_eq!(second.items[0].id, "trk_2");
     assert!(!second.has_more);
 }
@@ -306,14 +410,23 @@ async fn browse_paginates() {
 async fn search_matches_title_and_artist() {
     let catalog = CatalogService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
-    let by_title = catalog.search("moonlight", page(10, 0)).await.unwrap();
+    let by_title = catalog
+        .search(&TrackAccessScope::Public, "moonlight", page(10, 0))
+        .await
+        .unwrap();
     assert_eq!(by_title.items.len(), 1);
     assert_eq!(by_title.items[0].id, "trk_1");
 
-    let by_artist = catalog.search("debussy", page(10, 0)).await.unwrap();
+    let by_artist = catalog
+        .search(&TrackAccessScope::Public, "debussy", page(10, 0))
+        .await
+        .unwrap();
     assert_eq!(by_artist.items[0].id, "trk_2");
 
-    let empty = catalog.search("", page(10, 0)).await.unwrap();
+    let empty = catalog
+        .search(&TrackAccessScope::Public, "", page(10, 0))
+        .await
+        .unwrap();
     assert!(empty.items.is_empty());
 }
 
@@ -322,12 +435,18 @@ async fn search_service_normalizes_query() {
     let search = SearchService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
     // Mixed case and noisy whitespace still match.
-    let hit = search.search("  MoonLight  ", page(10, 0)).await.unwrap();
+    let hit = search
+        .search(&TrackAccessScope::Public, "  MoonLight  ", page(10, 0))
+        .await
+        .unwrap();
     assert_eq!(hit.items.len(), 1);
     assert_eq!(hit.items[0].id, "trk_1");
 
     // Whitespace-only queries short-circuit to an empty page.
-    let empty = search.search("   \t ", page(10, 0)).await.unwrap();
+    let empty = search
+        .search(&TrackAccessScope::Public, "   \t ", page(10, 0))
+        .await
+        .unwrap();
     assert!(empty.items.is_empty());
     assert_eq!(empty.total_count, 0);
 }
@@ -338,7 +457,10 @@ async fn search_service_defaults_zero_limit() {
 
     // A limit of 0 must not silently drop all results; it falls back to the
     // service default page size.
-    let result = search.search("beethoven", page(0, 0)).await.unwrap();
+    let result = search
+        .search(&TrackAccessScope::Public, "beethoven", page(0, 0))
+        .await
+        .unwrap();
     assert_eq!(result.items.len(), 1);
     assert_eq!(result.items[0].id, "trk_1");
 }
@@ -347,8 +469,20 @@ async fn search_service_defaults_zero_limit() {
 async fn get_media_returns_none_for_unknown() {
     let catalog = CatalogService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
-    assert!(catalog.get_media("trk_1").await.unwrap().is_some());
-    assert!(catalog.get_media("missing").await.unwrap().is_none());
+    assert!(
+        catalog
+            .get_media(&TrackAccessScope::Public, "trk_1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        catalog
+            .get_media(&TrackAccessScope::Public, "missing")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

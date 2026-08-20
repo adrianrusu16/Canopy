@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 
+use crate::access::TrackAccessScope;
 use crate::error::CanopyResult;
 use crate::model::{
     AudioAsset, AuthorizedStreamAsset, LibraryItem, LikedTrackPage, MediaItem, MediaPage, Page,
@@ -17,32 +18,29 @@ use crate::model::{
 /// Read access to public and owner-scoped catalog partitions.
 #[async_trait]
 pub trait CatalogRepository: Send + Sync {
-    /// Returns release-safe, ready catalog items.
-    async fn browse_public(
+    /// Returns ready catalog items accessible to the supplied scope.
+    async fn browse(
         &self,
+        scope: &TrackAccessScope,
         parent_id: Option<&str>,
         genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage>;
-    /// Searches release-safe, ready catalog items.
-    async fn search_public(&self, query: &str, page: Page) -> CanopyResult<MediaPage>;
-    /// Fetches one release-safe, ready item.
-    async fn get_public_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>>;
-    /// Lists ready personal media owned by the profile.
-    async fn list_personal(&self, owner_profile_id: &str, page: Page) -> CanopyResult<MediaPage>;
-    /// Searches ready personal media owned by the profile.
-    async fn search_personal(
+    /// Searches ready catalog items accessible to the supplied scope.
+    async fn search(
         &self,
-        owner_profile_id: &str,
+        scope: &TrackAccessScope,
         query: &str,
         page: Page,
     ) -> CanopyResult<MediaPage>;
-    /// Fetches one ready personal item owned by the profile.
-    async fn get_personal_media(
+    /// Fetches one ready catalog item when it is accessible to the supplied scope.
+    async fn get_media(
         &self,
-        owner_profile_id: &str,
+        scope: &TrackAccessScope,
         media_id: &str,
     ) -> CanopyResult<Option<MediaItem>>;
+    /// Lists ready personal media owned by the profile.
+    async fn list_personal(&self, owner_profile_id: &str, page: Page) -> CanopyResult<MediaPage>;
 }
 
 /// Source of the discovery shuffle channel.

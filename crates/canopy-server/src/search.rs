@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use canopy_core::{CanopyResult, CatalogRepository, MediaPage, Page};
+use canopy_core::{CanopyResult, CatalogRepository, MediaPage, Page, TrackAccessScope};
 
 /// Application service for catalog search.
 #[derive(Clone)]
@@ -34,12 +34,17 @@ impl SearchService {
     /// lower-cased) and the page size is clamped to a sane range before the
     /// request reaches the backend. An empty query short-circuits to an empty
     /// page without touching the repository.
-    pub async fn search(&self, raw_query: &str, page: Page) -> CanopyResult<MediaPage> {
+    pub async fn search(
+        &self,
+        scope: &TrackAccessScope,
+        raw_query: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
         let query = normalize_query(raw_query);
         if query.is_empty() {
             return Ok(MediaPage::default());
         }
-        self.repo.search_public(&query, self.clamp_page(page)).await
+        self.repo.search(scope, &query, self.clamp_page(page)).await
     }
 
     /// Clamps a requested page to the service's supported limits.

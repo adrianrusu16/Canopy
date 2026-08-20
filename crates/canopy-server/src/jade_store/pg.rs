@@ -30,7 +30,7 @@ use canopy_core::{
     PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository,
     Playlist, PlaylistPage, PlaylistRepository, PlaylistTrackItem, PlaylistTrackPage,
     PreferencesRepository, ProfilePreferences, ProfileRepository, ProviderTrack, SavedTrackItem,
-    SavedTrackPage, TrackLike, UserProfile,
+    SavedTrackPage, TrackAccessScope, TrackLike, UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
 
@@ -116,6 +116,13 @@ fn invalid_arg(message: impl Into<String>) -> CanopyError {
 fn parse_uuid_arg(value: &str, field: &str) -> CanopyResult<uuid::Uuid> {
     uuid::Uuid::parse_str(value)
         .map_err(|e| CanopyError::InvalidArgument(format!("invalid {field}: {e}")))
+}
+
+fn owner_scope_uuid(scope: &TrackAccessScope) -> CanopyResult<Option<uuid::Uuid>> {
+    scope
+        .owner_profile_id()
+        .map(|id| parse_uuid_arg(id, "owner_profile_id"))
+        .transpose()
 }
 
 fn epoch_ms_i64(row: &sqlx::postgres::PgRow, column: &str) -> u64 {
@@ -329,77 +336,18 @@ impl PgCatalogRepository {
             .map_err(db_err)?;
         Ok(())
     }
-
-    async fn public_media_item_by_id(&self, id: &str) -> CanopyResult<Option<MediaItem>> {
-        let track_uuid = parse_uuid_arg(id, "media_id")?;
-        let sql = format!(
-            r#"
-            SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
-                al.title AS album_title, t.duration_ms AS track_duration_ms,
-                t.is_explicit AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
-                aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes
-            FROM tracks t
-            JOIN artists a ON t.artist_id = a.id
-            JOIN albums al ON t.album_id = al.id
-            {REPRESENTATIVE_ASSET_JOIN}
-            WHERE t.id = $1
-              AND t.visibility = 'release_safe'
-              AND t.ingest_status = 'ready'
-            LIMIT 1
-        "#
-        );
-        let row = sqlx::query(AssertSqlSafe(sql))
-            .bind(track_uuid)
-            .fetch_optional(self.pool.as_ref())
-            .await
-            .map_err(db_err)?;
-        Ok(row.as_ref().map(media_item_from_row))
-    }
-
-    async fn personal_media_item_by_id(
-        &self,
-        owner_profile_id: &str,
-        id: &str,
-    ) -> CanopyResult<Option<MediaItem>> {
-        let owner_uuid = parse_uuid_arg(owner_profile_id, "owner_profile_id")?;
-        let track_uuid = parse_uuid_arg(id, "media_id")?;
-        let sql = format!(
-            r#"
-            SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
-                al.title AS album_title, t.duration_ms AS track_duration_ms,
-                t.is_explicit AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
-                aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes
-            FROM tracks t
-            JOIN artists a ON t.artist_id = a.id
-            JOIN albums al ON t.album_id = al.id
-            {REPRESENTATIVE_ASSET_JOIN}
-            WHERE t.id = $1
-              AND t.owner_profile_id = $2
-              AND t.visibility = 'personal'
-              AND t.ingest_status = 'ready'
-            LIMIT 1
-        "#
-        );
-        let row = sqlx::query(AssertSqlSafe(sql))
-            .bind(track_uuid)
-            .bind(owner_uuid)
-            .fetch_optional(self.pool.as_ref())
-            .await
-            .map_err(db_err)?;
-        Ok(row.as_ref().map(media_item_from_row))
-    }
 }
 
 #[async_trait]
 impl CatalogRepository for PgCatalogRepository {
-    async fn browse_public(
+    async fn browse(
         &self,
+        scope: &TrackAccessScope,
         _parent_id: Option<&str>,
         _genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage> {
+        let owner_uuid = owner_scope_uuid(scope)?;
         let sql = format!(
             r#"
             SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
@@ -411,24 +359,50 @@ impl CatalogRepository for PgCatalogRepository {
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
             {REPRESENTATIVE_ASSET_JOIN}
-            WHERE t.visibility = 'release_safe' AND t.ingest_status = 'ready'
-            ORDER BY t.created_at
-            LIMIT $1 OFFSET $2
+            WHERE t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR (
+                    $1::uuid IS NOT NULL
+                    AND t.visibility = 'personal'
+                    AND t.owner_profile_id = $1
+                )
+              )
+            ORDER BY t.created_at, t.id
+            LIMIT $2 OFFSET $3
         "#
         );
         let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(owner_uuid)
             .bind(page.limit as i64)
             .bind(page.offset as i64)
             .fetch_all(self.pool.as_ref())
             .await
             .map_err(db_err)?;
         let total_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM tracks WHERE visibility = 'release_safe' AND ingest_status = 'ready'"
-        ).fetch_one(self.pool.as_ref()).await.map_err(db_err)?;
+            r#"
+            SELECT COUNT(*) FROM tracks t
+            WHERE t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR ($1::uuid IS NOT NULL AND t.visibility = 'personal' AND t.owner_profile_id = $1)
+              )
+            "#,
+        )
+        .bind(owner_uuid)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
         Ok(media_page(rows, page, total_count))
     }
 
-    async fn search_public(&self, query: &str, page: Page) -> CanopyResult<MediaPage> {
+    async fn search(
+        &self,
+        scope: &TrackAccessScope,
+        query: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
+        let owner_uuid = owner_scope_uuid(scope)?;
         let sql = format!(
             r#"
             SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
@@ -436,19 +410,27 @@ impl CatalogRepository for PgCatalogRepository {
                 t.is_explicit AS track_explicit,
                 COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
                 aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes,
-                GREATEST(similarity(t.title, $1), similarity(a.name, $1), similarity(al.title, $1)) AS rank
+                GREATEST(similarity(t.title, $2), similarity(a.name, $2), similarity(al.title, $2)) AS rank
             FROM tracks t
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
             {REPRESENTATIVE_ASSET_JOIN}
-            WHERE (t.title % $1 OR a.name % $1 OR al.title % $1)
-              AND t.visibility = 'release_safe'
+            WHERE (t.title % $2 OR a.name % $2 OR al.title % $2)
               AND t.ingest_status = 'ready'
-            ORDER BY rank DESC, t.title
-            LIMIT $2 OFFSET $3
+              AND (
+                t.visibility = 'release_safe'
+                OR (
+                    $1::uuid IS NOT NULL
+                    AND t.visibility = 'personal'
+                    AND t.owner_profile_id = $1
+                )
+              )
+            ORDER BY rank DESC, t.title, t.id
+            LIMIT $3 OFFSET $4
         "#
         );
         let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(owner_uuid)
             .bind(query)
             .bind(page.limit as i64)
             .bind(page.offset as i64)
@@ -460,10 +442,19 @@ impl CatalogRepository for PgCatalogRepository {
             SELECT COUNT(DISTINCT t.id) FROM tracks t
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
-            WHERE (t.title % $1 OR a.name % $1 OR al.title % $1)
-              AND t.visibility = 'release_safe' AND t.ingest_status = 'ready'
+            WHERE (t.title % $2 OR a.name % $2 OR al.title % $2)
+              AND t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR (
+                    $1::uuid IS NOT NULL
+                    AND t.visibility = 'personal'
+                    AND t.owner_profile_id = $1
+                )
+              )
         "#,
         )
+        .bind(owner_uuid)
         .bind(query)
         .fetch_one(self.pool.as_ref())
         .await
@@ -471,8 +462,44 @@ impl CatalogRepository for PgCatalogRepository {
         Ok(media_page(rows, page, total_count))
     }
 
-    async fn get_public_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>> {
-        self.public_media_item_by_id(media_id).await
+    async fn get_media(
+        &self,
+        scope: &TrackAccessScope,
+        media_id: &str,
+    ) -> CanopyResult<Option<MediaItem>> {
+        let owner_uuid = owner_scope_uuid(scope)?;
+        let track_uuid = parse_uuid_arg(media_id, "media_id")?;
+        let sql = format!(
+            r#"
+            SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
+                al.title AS album_title, t.duration_ms AS track_duration_ms,
+                t.is_explicit AS track_explicit,
+                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes
+            FROM tracks t
+            JOIN artists a ON t.artist_id = a.id
+            JOIN albums al ON t.album_id = al.id
+            {REPRESENTATIVE_ASSET_JOIN}
+            WHERE t.id = $2
+              AND t.ingest_status = 'ready'
+              AND (
+                t.visibility = 'release_safe'
+                OR (
+                    $1::uuid IS NOT NULL
+                    AND t.visibility = 'personal'
+                    AND t.owner_profile_id = $1
+                )
+              )
+            LIMIT 1
+        "#
+        );
+        let row = sqlx::query(AssertSqlSafe(sql))
+            .bind(owner_uuid)
+            .bind(track_uuid)
+            .fetch_optional(self.pool.as_ref())
+            .await
+            .map_err(db_err)?;
+        Ok(row.as_ref().map(media_item_from_row))
     }
 
     async fn list_personal(&self, owner_profile_id: &str, page: Page) -> CanopyResult<MediaPage> {
@@ -505,67 +532,6 @@ impl CatalogRepository for PgCatalogRepository {
             "SELECT COUNT(*) FROM tracks WHERE owner_profile_id = $1 AND visibility = 'personal' AND ingest_status = 'ready'"
         ).bind(owner_uuid).fetch_one(self.pool.as_ref()).await.map_err(db_err)?;
         Ok(media_page(rows, page, total_count))
-    }
-
-    async fn search_personal(
-        &self,
-        owner_profile_id: &str,
-        query: &str,
-        page: Page,
-    ) -> CanopyResult<MediaPage> {
-        let owner_uuid = parse_uuid_arg(owner_profile_id, "owner_profile_id")?;
-        let sql = format!(
-            r#"
-            SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
-                al.title AS album_title, t.duration_ms AS track_duration_ms,
-                t.is_explicit AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
-                aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes,
-                GREATEST(similarity(t.title, $2), similarity(a.name, $2), similarity(al.title, $2)) AS rank
-            FROM tracks t
-            JOIN artists a ON t.artist_id = a.id
-            JOIN albums al ON t.album_id = al.id
-            {REPRESENTATIVE_ASSET_JOIN}
-            WHERE t.owner_profile_id = $1
-              AND (t.title % $2 OR a.name % $2 OR al.title % $2)
-              AND t.visibility = 'personal' AND t.ingest_status = 'ready'
-            ORDER BY rank DESC, t.title
-            LIMIT $3 OFFSET $4
-        "#
-        );
-        let rows = sqlx::query(AssertSqlSafe(sql))
-            .bind(owner_uuid)
-            .bind(query)
-            .bind(page.limit as i64)
-            .bind(page.offset as i64)
-            .fetch_all(self.pool.as_ref())
-            .await
-            .map_err(db_err)?;
-        let total_count: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(DISTINCT t.id) FROM tracks t
-            JOIN artists a ON t.artist_id = a.id
-            JOIN albums al ON t.album_id = al.id
-            WHERE t.owner_profile_id = $1
-              AND (t.title % $2 OR a.name % $2 OR al.title % $2)
-              AND t.visibility = 'personal' AND t.ingest_status = 'ready'
-        "#,
-        )
-        .bind(owner_uuid)
-        .bind(query)
-        .fetch_one(self.pool.as_ref())
-        .await
-        .map_err(db_err)?;
-        Ok(media_page(rows, page, total_count))
-    }
-
-    async fn get_personal_media(
-        &self,
-        owner_profile_id: &str,
-        media_id: &str,
-    ) -> CanopyResult<Option<MediaItem>> {
-        self.personal_media_item_by_id(owner_profile_id, media_id)
-            .await
     }
 }
 

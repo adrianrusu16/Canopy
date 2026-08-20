@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use canopy_core::{
     CanopyError, CanopyResult, MediaItem as DomainMediaItem, MediaPage, Page, UserIdentity,
+    TrackAccessScope,
 };
 use canopy_proto::canopy_server::Canopy;
 use canopy_proto::{
@@ -247,7 +248,7 @@ impl Canopy for GrpcApi {
         };
         let result = self
             .catalog
-            .browse(parent_id, &req.genres, page)
+            .browse(&TrackAccessScope::Public, parent_id, &req.genres, page)
             .await
             .map_err(to_status)?;
         Ok(Response::new(BrowseResponse {
@@ -268,7 +269,7 @@ impl Canopy for GrpcApi {
         };
         let result = self
             .search
-            .search(&req.query, page)
+            .search(&TrackAccessScope::Public, &req.query, page)
             .await
             .map_err(to_status)?;
         Ok(Response::new(SearchResponse {
@@ -284,7 +285,7 @@ impl Canopy for GrpcApi {
         let req = request.into_inner();
         let item = self
             .catalog
-            .get_media(&req.media_id)
+            .get_media(&TrackAccessScope::Public, &req.media_id)
             .await
             .map_err(to_status)?;
         Ok(Response::new(GetMediaResponse {

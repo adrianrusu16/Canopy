@@ -8,7 +8,7 @@ use canopy_core::{
     MarkAuthOutboxFailed, MediaImportRepository, Page, PendingImportOutcome, PendingMediaImport,
     PlayableAssetRepository, PlaybackHistoryEvent, PlaybackHistoryRepository, PlaylistRepository,
     PreferencesRepository, ProfileRepository, ProviderAudioAsset, ProviderLicense, ProviderTrack,
-    RegisterPasswordRecord, RotateRefreshTokenRecord, StreamAudience,
+    RegisterPasswordRecord, RotateRefreshTokenRecord, StreamAudience, TrackAccessScope,
 };
 use canopy_server::jade_store::{
     PgAudioAssetRepository, PgAuthOutboxRepository, PgCatalogRepository, PgIdentityRepository,
@@ -782,7 +782,7 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
 
     assert!(
         catalog
-            .get_public_media(&first_id)
+            .get_media(&TrackAccessScope::Public, &first_id)
             .await
             .expect("public media lookup should succeed")
             .is_none()
@@ -796,7 +796,8 @@ async fn postgres_migrations_support_idempotent_provider_ingest() {
     );
 
     let page = catalog
-        .browse_public(
+        .browse(
+            &TrackAccessScope::Public,
             None,
             &[],
             Page {
@@ -1211,7 +1212,7 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
         &artist_id,
         &album_id,
         PolicyTrackFixture {
-            title: format!("Public Policy Track {unique}"),
+            title: format!("Access Matrix {unique}"),
             visibility: "release_safe",
             ingest_status: "ready",
             owner_profile_id: None,
@@ -1225,7 +1226,7 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
         &artist_id,
         &album_id,
         PolicyTrackFixture {
-            title: format!("Owner A Policy Track {unique}"),
+            title: format!("Access Matrix {unique}"),
             visibility: "personal",
             ingest_status: "ready",
             owner_profile_id: Some(&owner_a.id),
@@ -1239,7 +1240,7 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
         &artist_id,
         &album_id,
         PolicyTrackFixture {
-            title: format!("Owner B Policy Track {unique}"),
+            title: format!("Access Matrix {unique}"),
             visibility: "personal",
             ingest_status: "ready",
             owner_profile_id: Some(&owner_b.id),
@@ -1248,11 +1249,43 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
         },
     )
     .await;
+    let owner_pending_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Access Matrix {unique}"),
+            visibility: "personal",
+            ingest_status: "pending",
+            owner_profile_id: Some(&owner_a.id),
+            composition_license_id: None,
+            recording_license_id: None,
+        },
+    )
+    .await;
+    let quarantined_id = insert_policy_track(
+        &pool,
+        &artist_id,
+        &album_id,
+        PolicyTrackFixture {
+            title: format!("Access Matrix {unique}"),
+            visibility: "quarantined",
+            ingest_status: "quarantined",
+            owner_profile_id: None,
+            composition_license_id: None,
+            recording_license_id: None,
+        },
+    )
+    .await;
+    let owner_scope = TrackAccessScope::Owner {
+        profile_id: owner_a.id.clone(),
+    };
 
     let catalog = PgCatalogRepository::new(pool.clone());
     let assets = PgAudioAssetRepository::new(pool.clone());
     let public = catalog
-        .browse_public(
+        .browse(
+            &TrackAccessScope::Public,
             None,
             &[],
             Page {
@@ -1264,6 +1297,93 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
         .unwrap();
     assert!(public.items.iter().any(|item| item.id == public_id));
     assert!(!public.items.iter().any(|item| item.id == personal_a_id));
+    let public_search = catalog
+        .search(
+            &TrackAccessScope::Public,
+            &format!("Access Matrix {unique}"),
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(public_search.total_count, 1);
+    assert_eq!(
+        public_search
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![public_id.as_str()]
+    );
+    let owner_catalog = catalog
+        .browse(
+            &owner_scope,
+            None,
+            &[],
+            Page {
+                limit: 100,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(owner_catalog.items.iter().any(|item| item.id == public_id));
+    assert!(
+        owner_catalog
+            .items
+            .iter()
+            .any(|item| item.id == personal_a_id)
+    );
+    assert!(
+        !owner_catalog
+            .items
+            .iter()
+            .any(|item| item.id == personal_b_id)
+    );
+    assert!(
+        !owner_catalog
+            .items
+            .iter()
+            .any(|item| item.id == owner_pending_id)
+    );
+    assert!(
+        !owner_catalog
+            .items
+            .iter()
+            .any(|item| item.id == quarantined_id)
+    );
+
+    let owner_search = catalog
+        .search(
+            &owner_scope,
+            &format!("Access Matrix {unique}"),
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let mut expected_search_ids = vec![public_id.clone(), personal_a_id.clone()];
+    expected_search_ids.sort();
+    assert_eq!(
+        owner_search
+            .items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>(),
+        expected_search_ids
+    );
+    assert_eq!(owner_search.total_count, 2);
+    assert!(
+        catalog
+            .get_media(&owner_scope, &personal_a_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
     let owner_a_page = catalog
         .list_personal(
             &owner_a.id,
@@ -1288,7 +1408,7 @@ async fn postgres_catalog_scopes_and_license_revocation_are_enforced() {
     );
     assert!(
         catalog
-            .get_public_media(&personal_a_id)
+            .get_media(&TrackAccessScope::Public, &personal_a_id)
             .await
             .unwrap()
             .is_none()
@@ -2258,14 +2378,17 @@ async fn postgres_local_import_is_deduplicated_and_hidden_until_ready() {
 
     assert!(
         catalog
-            .get_public_media(&pending.track_id)
+            .get_media(&TrackAccessScope::Public, &pending.track_id)
             .await
             .unwrap()
             .is_none()
     );
+    let owner_scope = TrackAccessScope::Owner {
+        profile_id: owner.id.clone(),
+    };
     assert!(
         catalog
-            .get_personal_media(&owner.id, &pending.track_id)
+            .get_media(&owner_scope, &pending.track_id)
             .await
             .unwrap()
             .is_none()
@@ -2284,14 +2407,14 @@ async fn postgres_local_import_is_deduplicated_and_hidden_until_ready() {
         .expect("pending import should become ready");
     assert!(
         catalog
-            .get_public_media(&pending.track_id)
+            .get_media(&TrackAccessScope::Public, &pending.track_id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         catalog
-            .get_personal_media(&owner.id, &pending.track_id)
+            .get_media(&owner_scope, &pending.track_id)
             .await
             .unwrap()
             .is_some()

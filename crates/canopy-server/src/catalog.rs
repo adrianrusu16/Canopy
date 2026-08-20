@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use canopy_core::{CanopyResult, CatalogRepository, MediaItem, MediaPage, Page};
+use canopy_core::{CanopyResult, CatalogRepository, MediaItem, MediaPage, Page, TrackAccessScope};
 
 /// Application service for catalog browsing and lookup.
 #[derive(Clone)]
@@ -23,20 +23,30 @@ impl CatalogService {
     /// Returns a hierarchical browse page.
     pub async fn browse(
         &self,
+        scope: &TrackAccessScope,
         parent_id: Option<&str>,
         genres: &[String],
         page: Page,
     ) -> CanopyResult<MediaPage> {
-        self.repo.browse_public(parent_id, genres, page).await
+        self.repo.browse(scope, parent_id, genres, page).await
     }
 
     /// Searches the catalog.
-    pub async fn search(&self, query: &str, page: Page) -> CanopyResult<MediaPage> {
-        self.repo.search_public(query, page).await
+    pub async fn search(
+        &self,
+        scope: &TrackAccessScope,
+        query: &str,
+        page: Page,
+    ) -> CanopyResult<MediaPage> {
+        self.repo.search(scope, query, page).await
     }
 
     /// Fetches a single media item by identifier.
-    pub async fn get_media(&self, media_id: &str) -> CanopyResult<Option<MediaItem>> {
-        self.repo.get_public_media(media_id).await
+    pub async fn get_media(
+        &self,
+        scope: &TrackAccessScope,
+        media_id: &str,
+    ) -> CanopyResult<Option<MediaItem>> {
+        self.repo.get_media(scope, media_id).await
     }
 }

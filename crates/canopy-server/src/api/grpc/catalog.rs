@@ -6,7 +6,10 @@ use canopy_proto::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{GrpcServices, page_from_request, page_info, to_track, to_track_summary};
+use super::{
+    GrpcServices, extract_optional_track_scope, page_from_request, page_info, to_track,
+    to_track_summary,
+};
 use crate::api::to_status;
 
 pub struct CatalogGrpc(pub Arc<GrpcServices>);
@@ -17,12 +20,16 @@ impl CatalogService for CatalogGrpc {
         &self,
         request: Request<BrowseRequest>,
     ) -> Result<Response<BrowseResponse>, Status> {
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
+        let scope = extract_optional_track_scope(&metadata, &self.0)
+            .await
+            .map_err(to_status)?;
         let page = page_from_request(request.page, &self.0.page_tokens).map_err(to_status)?;
         let result = self
             .0
             .catalog
-            .browse(request.parent_id.as_deref(), &request.genres, page)
+            .browse(&scope, request.parent_id.as_deref(), &request.genres, page)
             .await
             .map_err(to_status)?;
         let page_info = page_info(
@@ -43,12 +50,16 @@ impl CatalogService for CatalogGrpc {
         &self,
         request: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
+        let scope = extract_optional_track_scope(&metadata, &self.0)
+            .await
+            .map_err(to_status)?;
         let page = page_from_request(request.page, &self.0.page_tokens).map_err(to_status)?;
         let result = self
             .0
             .search
-            .search(&request.query, page)
+            .search(&scope, &request.query, page)
             .await
             .map_err(to_status)?;
         let page_info = page_info(
@@ -69,11 +80,15 @@ impl CatalogService for CatalogGrpc {
         &self,
         request: Request<GetMediaRequest>,
     ) -> Result<Response<Track>, Status> {
+        let metadata = request.metadata().clone();
         let track_id = request.into_inner().track_id;
+        let scope = extract_optional_track_scope(&metadata, &self.0)
+            .await
+            .map_err(to_status)?;
         let item = self
             .0
             .catalog
-            .get_media(&track_id)
+            .get_media(&scope, &track_id)
             .await
             .map_err(to_status)?
             .ok_or_else(|| Status::not_found(format!("track not found: {track_id}")))?;
