@@ -62,7 +62,6 @@ use api::grpc::{
     CatalogGrpc, DiscoveryGrpc, GrpcServices, HistoryGrpc, LibraryGrpc, PlaybackGrpc, PlaylistGrpc,
     ProfileGrpc, SystemGrpc,
 };
-use auth::AuthService;
 use catalog::CatalogService;
 use discovery::DiscoveryService;
 use health::HealthService;
@@ -317,7 +316,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Domain services over the ports.
     let catalog = CatalogService::new(catalog_repo.clone());
     let search = SearchService::new(catalog_repo.clone());
-    let auth = AuthService::new(config.auth_token_secret.clone());
     let principal = PrincipalService::new(profile_repo.clone(), instance_settings_repo.clone());
     let profile = ProfileService::new(profile_repo.clone(), history_repo.clone())
         .with_deletion_policy(instance_settings_repo, catalog_repo);
@@ -361,7 +359,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         health,
         resolver,
         discovery,
-        auth,
         identity: {
             #[cfg(feature = "pg")]
             {

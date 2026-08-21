@@ -108,7 +108,6 @@ mod tests {
     use canopy_core::{CatalogRepository, MediaItem, PageTokenCodec};
     use canopy_proto::PageRequest;
 
-    use crate::auth::AuthService;
     use crate::catalog::CatalogService as DomainCatalogService;
     use crate::discovery::DiscoveryService as DomainDiscoveryService;
     use crate::health::HealthService;
@@ -173,7 +172,6 @@ mod tests {
             health: HealthService::new(),
             resolver,
             discovery: DomainDiscoveryService::new(Arc::new(catalog)),
-            auth: AuthService::new(b"0123456789abcdef0123456789abcdef".to_vec()),
             identity: None,
             principal,
             page_tokens: Arc::new(

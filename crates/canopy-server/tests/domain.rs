@@ -7,16 +7,23 @@ use canopy_core::{
     AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CanopyError, CatalogRepository,
     IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility, Page, PageTokenCodec,
     PendingImportOutcome, PendingMediaImport, PlayableAsset, PlayableAssetRepository,
-    StreamAudience, TrackAccessScope,
+    LibraryRepository, PlaylistRepository, ProfileRepository, StreamAudience, TrackAccessScope,
+    UserIdentity,
 };
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::DiscoveryService;
 use canopy_server::jade_store::{
     InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
-    InMemoryInstanceSettingsStore,
+    InMemoryInstanceSettingsStore, InMemoryLibraryStore, InMemoryPlaylistStore,
+    InMemoryProfileStore,
 };
+use canopy_server::library::LibraryService;
+use canopy_server::playback::{ResolverConfig, ResolverService};
+use canopy_server::playlists::PlaylistService;
+use canopy_server::principal::PrincipalService;
 use canopy_server::providers::{ProviderAdapter, TestFixtureProvider};
 use canopy_server::search::SearchService;
+use canopy_server::stream::StreamTokenCodec;
 
 fn sample_items() -> Vec<MediaItem> {
     vec![
@@ -178,6 +185,295 @@ fn access_matrix_entries() -> Vec<InMemoryCatalogEntry> {
             None,
         ),
     ]
+}
+
+fn access_asset(
+    track_id: &str,
+    visibility: MediaVisibility,
+    ingest_status: IngestStatus,
+    owner_profile_id: Option<&str>,
+) -> InMemoryAudioAssetEntry {
+    InMemoryAudioAssetEntry {
+        asset: AudioAsset {
+            track_id: track_id.into(),
+            codec: "mp3".into(),
+            content_type: "audio/mpeg".into(),
+            storage_key: format!("audio/{track_id}.mp3"),
+            size_bytes: 1_024,
+            checksum_sha256: "a".repeat(64),
+            duration_ms: 1_000,
+        },
+        visibility,
+        ingest_status,
+        owner_profile_id: owner_profile_id.map(str::to_owned),
+    }
+}
+
+async fn save_visible_tracks_and_create_playlist(
+    library: &LibraryService,
+    playlists: &PlaylistService,
+    identity: &UserIdentity,
+    visible_track_ids: &[&str],
+) -> String {
+    let playlist = playlists
+        .create_playlist(identity, "Access invariant", "")
+        .await
+        .unwrap();
+
+    for track_id in visible_track_ids {
+        library.save_track(identity, track_id).await.unwrap();
+        playlists
+            .add_track(identity, &playlist.id, track_id, None)
+            .await
+            .unwrap();
+    }
+
+    playlist.id
+}
+
+#[tokio::test]
+async fn track_visibility_is_consistent_across_every_read_and_playback_surface() {
+    const OWNER: &str = "owner-a";
+    const LISTENER: &str = "listener";
+    const PAGE_SIZE: u32 = 100;
+
+    let profiles = Arc::new(InMemoryProfileStore::default());
+    let owner_profile = profiles
+        .upsert_profile(OWNER, Some("Owner"), true)
+        .await
+        .unwrap();
+    let listener_profile = profiles
+        .upsert_profile(LISTENER, Some("Listener"), true)
+        .await
+        .unwrap();
+    let settings = Arc::new(InMemoryInstanceSettingsStore::default());
+    settings
+        .set_owner_profile_id(&owner_profile.id)
+        .await
+        .unwrap();
+    let principal = PrincipalService::new(profiles.clone(), settings);
+
+    let catalog = Arc::new(InMemoryCatalog::from_entries(vec![
+        access_entry(
+            "public-ready",
+            "Artist Public",
+            MediaVisibility::ReleaseSafe,
+            IngestStatus::Ready,
+            None,
+        ),
+        access_entry(
+            "owner-ready",
+            "Artist Owner",
+            MediaVisibility::Personal,
+            IngestStatus::Ready,
+            Some(&owner_profile.id),
+        ),
+        access_entry(
+            "other-ready",
+            "Artist Other",
+            MediaVisibility::Personal,
+            IngestStatus::Ready,
+            Some("owner-b"),
+        ),
+        access_entry(
+            "owner-pending",
+            "Artist Pending",
+            MediaVisibility::Personal,
+            IngestStatus::Pending,
+            Some(&owner_profile.id),
+        ),
+        access_entry(
+            "quarantined",
+            "Artist Quarantined",
+            MediaVisibility::Quarantined,
+            IngestStatus::Quarantined,
+            None,
+        ),
+    ]));
+    let catalog_service = CatalogService::new(catalog.clone());
+    let search = SearchService::new(catalog.clone());
+    let discovery = DiscoveryService::new(catalog.clone());
+    let library_store = Arc::new(InMemoryLibraryStore::new(catalog.clone()));
+    let library = LibraryService::new(
+        profiles.clone(),
+        library_store.clone(),
+        principal.clone(),
+    );
+    let playlist_store = Arc::new(InMemoryPlaylistStore::new(catalog.clone()));
+    let playlists = PlaylistService::new(
+        profiles,
+        playlist_store.clone(),
+        principal,
+    );
+    let owner = UserIdentity {
+        user_id: OWNER.into(),
+    };
+    let listener = UserIdentity {
+        user_id: LISTENER.into(),
+    };
+    let owner_playlist_id = save_visible_tracks_and_create_playlist(
+        &library,
+        &playlists,
+        &owner,
+        &["public-ready", "owner-ready"],
+    )
+    .await;
+    let listener_playlist_id =
+        save_visible_tracks_and_create_playlist(&library, &playlists, &listener, &["public-ready"])
+            .await;
+    let personal_scopes = [
+        TrackAccessScope::Owner {
+            profile_id: owner_profile.id.clone(),
+        },
+        TrackAccessScope::Owner {
+            profile_id: "owner-b".into(),
+        },
+    ];
+    let saved_personal_tracks = [
+        ("owner-ready", &personal_scopes[0]),
+        ("other-ready", &personal_scopes[1]),
+    ];
+    for (profile_id, playlist_id) in [
+        (owner_profile.id.as_str(), owner_playlist_id.as_str()),
+        (listener_profile.id.as_str(), listener_playlist_id.as_str()),
+    ] {
+        for (track_id, scope) in saved_personal_tracks {
+            library_store
+                .save_track(profile_id, track_id, scope)
+                .await
+                .unwrap();
+            playlist_store
+                .add_track(profile_id, playlist_id, track_id, None, scope)
+                .await
+                .unwrap();
+        }
+    }
+
+    let assets = Arc::new(InMemoryAudioAssetStore::from_entries(vec![
+        access_asset(
+            "public-ready",
+            MediaVisibility::ReleaseSafe,
+            IngestStatus::Ready,
+            None,
+        ),
+        access_asset(
+            "owner-ready",
+            MediaVisibility::Personal,
+            IngestStatus::Ready,
+            Some(&owner_profile.id),
+        ),
+        access_asset(
+            "other-ready",
+            MediaVisibility::Personal,
+            IngestStatus::Ready,
+            Some("owner-b"),
+        ),
+        access_asset(
+            "owner-pending",
+            MediaVisibility::Personal,
+            IngestStatus::Pending,
+            Some(&owner_profile.id),
+        ),
+        access_asset(
+            "quarantined",
+            MediaVisibility::Quarantined,
+            IngestStatus::Quarantined,
+            None,
+        ),
+    ]));
+    let playback = ResolverService::new(
+        assets,
+        Arc::new(StreamTokenCodec::new(b"0123456789abcdef0123456789abcdef").unwrap()),
+        ResolverConfig::default(),
+    );
+
+    let cases = [
+        (
+            "listener",
+            &listener,
+            TrackAccessScope::Public,
+            &listener_playlist_id,
+            [true, false, false, false, false],
+        ),
+        (
+            "owner",
+            &owner,
+            TrackAccessScope::Owner {
+                profile_id: owner_profile.id.clone(),
+            },
+            &owner_playlist_id,
+            [true, true, false, false, false],
+        ),
+    ];
+    let tracks = [
+        ("public-ready", "Artist Public"),
+        ("owner-ready", "Artist Owner"),
+        ("other-ready", "Artist Other"),
+        ("owner-pending", "Artist Pending"),
+        ("quarantined", "Artist Quarantined"),
+    ];
+
+    for (principal_name, identity, scope, playlist_id, expectations) in cases {
+        let browse = catalog_service
+            .browse(&scope, None, &[], page(PAGE_SIZE, 0))
+            .await
+            .unwrap();
+        let discovery_page = discovery.next(&scope, &[], PAGE_SIZE).await.unwrap();
+        let library_page = library
+            .list_tracks(identity, page(PAGE_SIZE, 0))
+            .await
+            .unwrap();
+        let playlist_page = playlists
+            .list_tracks(identity, playlist_id, page(PAGE_SIZE, 0))
+            .await
+            .unwrap();
+
+        for ((track_id, query), expected_visible) in tracks.iter().zip(expectations) {
+            let search_page = search
+                .search(&scope, query, page(PAGE_SIZE, 0))
+                .await
+                .unwrap();
+            let outcomes = [
+                (
+                    "browse",
+                    browse.items.iter().any(|item| item.id == *track_id),
+                ),
+                (
+                    "search",
+                    search_page.items.iter().any(|item| item.id == *track_id),
+                ),
+                (
+                    "discovery",
+                    discovery_page.items.iter().any(|item| item.id == *track_id),
+                ),
+                (
+                    "library",
+                    library_page
+                        .items
+                        .iter()
+                        .any(|item| item.item.id == *track_id),
+                ),
+                (
+                    "playlist",
+                    playlist_page
+                        .items
+                        .iter()
+                        .any(|item| item.item.id == *track_id),
+                ),
+                (
+                    "playback",
+                    playback.resolve_at(&scope, track_id, 1_000).await.is_ok(),
+                ),
+            ];
+
+            for (surface, visible) in outcomes {
+                assert_eq!(
+                    visible, expected_visible,
+                    "{surface} disagreed for track {track_id} and {principal_name} scope"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -9,7 +9,6 @@ use canopy_proto::{
     AlbumSummary, ArtistSummary, ArtworkRef, PageInfo, PageRequest, Track, TrackSummary,
 };
 
-use crate::auth::AuthService;
 use crate::catalog::CatalogService;
 use crate::discovery::DiscoveryService;
 use crate::health::HealthService;
@@ -57,7 +56,6 @@ pub struct GrpcServices {
     pub health: HealthService,
     pub resolver: ResolverService,
     pub discovery: DiscoveryService,
-    pub auth: AuthService,
     pub identity: Option<Arc<IdentityService>>,
     pub principal: PrincipalService,
     pub page_tokens: Arc<PageTokenCodec>,
@@ -189,35 +187,6 @@ fn extract_bearer_token(metadata: &tonic::metadata::MetadataMap) -> CanopyResult
     Ok(token)
 }
 
-pub(crate) fn extract_metadata_identity(
-    metadata: &tonic::metadata::MetadataMap,
-    auth: &AuthService,
-) -> CanopyResult<UserIdentity> {
-    if metadata.get("authorization").is_some() {
-        return auth.verify(extract_bearer_token(metadata)?);
-    }
-
-    if let Some(raw) = metadata.get("x-canopy-auth-token") {
-        let token = raw
-            .to_str()
-            .map_err(|_| CanopyError::unauthenticated("invalid x-canopy-auth-token metadata"))?;
-        return auth.verify(token.trim());
-    }
-
-    Err(CanopyError::unauthenticated("missing auth token"))
-}
-
-pub(crate) fn extract_optional_metadata_identity(
-    metadata: &tonic::metadata::MetadataMap,
-    auth: &AuthService,
-) -> CanopyResult<Option<UserIdentity>> {
-    if metadata.get("authorization").is_none() && metadata.get("x-canopy-auth-token").is_none() {
-        return Ok(None);
-    }
-
-    extract_metadata_identity(metadata, auth).map(Some)
-}
-
 fn optional_native_bearer_token(
     metadata: &tonic::metadata::MetadataMap,
 ) -> CanopyResult<Option<&str>> {
@@ -262,8 +231,6 @@ const LEGACY_ADAPTER_PATH: &str = "legacy.rs";
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use canopy_core::MediaItem;
     use canopy_proto::PageRequest;
 
@@ -306,49 +273,6 @@ mod tests {
 
         assert_eq!(page.offset, 40);
         assert_eq!(codec.decode(&info.next_page_token).unwrap(), 60);
-    }
-
-    #[test]
-    fn optional_identity_is_anonymous_only_when_metadata_is_absent() {
-        let auth = AuthService::new("secret");
-        let metadata = tonic::metadata::MetadataMap::new();
-
-        assert!(
-            extract_optional_metadata_identity(&metadata, &auth)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn optional_identity_verifies_bearer_metadata() {
-        let auth = AuthService::new("secret");
-        let token = auth.mint("owner-user", Duration::from_secs(60)).unwrap();
-        let mut request = tonic::Request::new(());
-        request.metadata_mut().insert(
-            "authorization",
-            tonic::metadata::MetadataValue::try_from(format!("Bearer {token}")).unwrap(),
-        );
-
-        let identity = extract_optional_metadata_identity(request.metadata(), &auth)
-            .unwrap()
-            .unwrap();
-        assert_eq!(identity.user_id, "owner-user");
-    }
-
-    #[test]
-    fn optional_identity_rejects_malformed_present_metadata() {
-        let auth = AuthService::new("secret");
-        let mut request = tonic::Request::new(());
-        request.metadata_mut().insert(
-            "authorization",
-            tonic::metadata::MetadataValue::from_static("not-bearer"),
-        );
-
-        assert!(matches!(
-            extract_optional_metadata_identity(request.metadata(), &auth),
-            Err(CanopyError::Unauthenticated(_))
-        ));
     }
 
     #[test]
