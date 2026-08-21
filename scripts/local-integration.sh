@@ -316,6 +316,7 @@ fi
 case "$1" in
   up)
     validate_prerequisites
+    environment_active && die "local integration environment is already active"
     cleanup_on_exit=1
     start_environment
     cleanup_on_exit=0

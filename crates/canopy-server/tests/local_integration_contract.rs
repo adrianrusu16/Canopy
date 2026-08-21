@@ -120,6 +120,28 @@ fn lifecycle_refuses_to_replace_an_orphaned_postgres_volume() {
 }
 
 #[test]
+fn lifecycle_up_checks_for_an_active_environment_before_arming_cleanup() {
+    let (_, after_up) = SCRIPT
+        .split_once("  up)")
+        .expect("lifecycle script must define an up handler");
+    let (up_handler, _) = after_up
+        .split_once("  test)")
+        .expect("lifecycle script must define a test handler");
+
+    let active_check = up_handler
+        .find("environment_active && die \"local integration environment is already active\"")
+        .expect("up must reject an active environment");
+    let arm_cleanup = up_handler
+        .find("cleanup_on_exit=1")
+        .expect("up must clean up only a startup it began");
+
+    assert!(
+        active_check < arm_cleanup,
+        "up must reject an active environment before arming cleanup"
+    );
+}
+
+#[test]
 fn generated_media_is_readable_by_unprivileged_nginx_workers() {
     assert!(SCRIPT.contains("chmod -R a+rX \"$state_root/media\""));
 }
