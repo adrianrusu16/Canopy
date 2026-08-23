@@ -7,6 +7,11 @@ compose_project="${CANOPY_TEST_COMPOSE_PROJECT:-canopy-pg-test}"
 postgres_port="${CANOPY_TEST_POSTGRES_PORT:-55432}"
 managed_stack=0
 
+
+if [[ "$compose_project" == "canopy" ]]; then
+  echo "CANOPY_TEST_COMPOSE_PROJECT must not target the persistent Canopy stack" >&2
+  exit 2
+fi
 compose() {
   docker compose -p "$compose_project" -f "$compose_file" "$@"
 }
@@ -21,7 +26,8 @@ cleanup() {
       compose ps
       compose logs --no-color postgres
     fi
-    compose down --volumes --remove-orphans
+    # PostgreSQL uses tmpfs here; no Docker volumes need to be removed.
+    compose down --remove-orphans
   fi
 
   exit "$status"

@@ -21,7 +21,8 @@ cleanup() {
       compose ps
       compose logs --no-color postgres nginx
     fi
-    compose down --volumes --remove-orphans
+    # PostgreSQL uses tmpfs here; no Docker volumes need to be removed.
+    compose down --remove-orphans
   fi
   rm -rf -- "$media_root"
   exit "$status"

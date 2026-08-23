@@ -10,12 +10,8 @@
 #   rustfs    — inactive, future-reserved S3-compatible service
 #   adminer   — database management UI (optional, dev-only)
 #
-# To start:
-#   docker compose up -d
-# To stop:
-#   docker compose down
-# To wipe all data (⚠️ destructive):
-#   docker compose down -v
+# Use ./scripts/canopy.sh to manage this stack. It retains the existing
+# canonical volumes and makes them external so Compose cannot delete them.
 
 services:
   postgres:
@@ -138,11 +134,16 @@ services:
 
 volumes:
   postgres_data:
-    driver: local
+    # Preserve the existing default Compose volume rather than creating a
+    # replacement: it contains accounts, profiles, and catalogue metadata.
+    external: true
+    name: canopy-postgres-data
   redis_data:
-    driver: local
+    external: true
+    name: canopy_redis_data
   rustfs_data:
-    driver: local
+    external: true
+    name: canopy_rustfs_data
 
 networks:
   canopy-net:

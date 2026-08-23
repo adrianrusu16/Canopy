@@ -26,7 +26,8 @@ emulator_openapi_endpoint="http://10.0.2.2:8080/openapi.json"
 cd "$repo_root"
 
 usage() {
-  echo "usage: ./scripts/local-integration.sh up|test|status|down|reset" >&2
+  echo "usage: ./scripts/local-integration.sh up|test|status|down" >&2
+  echo "       ./scripts/local-integration.sh reset --confirm-delete-local-integration-data" >&2
 }
 
 die() {
@@ -308,7 +309,7 @@ start_environment() {
   compose exec -T postgres psql --username canopy_local --dbname canopy_local --no-psqlrc --set ON_ERROR_STOP=1 <"$local_seed_sql"
 }
 
-if [[ "$#" -ne 1 ]]; then
+if [[ "$#" -lt 1 || "$#" -gt 2 ]]; then
   usage
   exit 2
 fi
@@ -374,6 +375,8 @@ case "$1" in
     stop_managed
     ;;
   reset)
+    [[ "$#" == "2" && "$2" == "--confirm-delete-local-integration-data" ]] || die \
+      "reset destroys the disposable integration database; rerun with --confirm-delete-local-integration-data"
     require_command docker
     if ! state_present; then
       echo "local integration: already reset"
