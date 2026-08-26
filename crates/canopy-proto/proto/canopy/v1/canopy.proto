@@ -8,387 +8,871 @@ import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 // Public catalog browsing, search, and metadata.
+// Calls accept anonymous access; valid bearer metadata may add identity context, and invalid supplied metadata returns UNAUTHENTICATED.
 service CatalogService {
+  // Browse lists catalog tracks with opaque pagination for an anonymous caller or optional authenticated context.
   rpc Browse(BrowseRequest) returns (BrowseResponse);
+  // Search finds catalog tracks with opaque pagination for an anonymous caller or optional authenticated context.
   rpc Search(SearchRequest) returns (SearchResponse);
+  // GetMedia returns complete track metadata or NOT_FOUND when the track identifier is unavailable.
   rpc GetMedia(GetMediaRequest) returns (Track);
 }
 
 // Playback-source capability issuance. Device control remains local.
+// ResolvePlayback accepts anonymous access, returns an opaque expiring stream URL, and rejects invalid supplied bearer metadata with UNAUTHENTICATED.
 service PlaybackService {
+  // ResolvePlayback returns an opaque stream URL usable until its expiry; invalid supplied authorization returns UNAUTHENTICATED.
   rpc ResolvePlayback(ResolvePlaybackRequest) returns (PlaybackSource);
 }
 
 // Batched discovery-family feeds.
+// Calls accept anonymous access, return batched opaque pagination, and apply requested track exclusions on a best-effort basis.
+// GetForYouFeed and GetRecommendations initially share GetDiscoveryFeed ordering.
 service DiscoveryService {
+  // GetDiscoveryFeed returns a batched paginated feed and excludes requested track identifiers on a best-effort basis.
   rpc GetDiscoveryFeed(GetDiscoveryFeedRequest) returns (GetDiscoveryFeedResponse);
+  // GetForYouFeed returns the current discovery feed through a stable endpoint reserved for future personalization.
   rpc GetForYouFeed(GetForYouFeedRequest) returns (GetForYouFeedResponse);
+  // GetRecommendations returns the current discovery feed through a stable endpoint reserved for future recommendation ranking.
   rpc GetRecommendations(GetRecommendationsRequest) returns (GetRecommendationsResponse);
 }
 
 // Logged-in profile lifecycle and ordinary UI preferences.
+// Every call requires bearer metadata and an existing profile; update masks select mutations and protected ownership may block deletion.
 service ProfileService {
+  // UpsertProfile creates or returns the bearer principal profile and requires authenticated profile context.
   rpc UpsertProfile(UpsertProfileRequest) returns (Profile);
+  // GetProfile returns the bearer principal profile and requires authenticated profile context.
   rpc GetProfile(GetProfileRequest) returns (Profile);
+  // UpdateProfile mutates only lower_snake_case protobuf paths selected by the update mask.
   rpc UpdateProfile(UpdateProfileRequest) returns (Profile);
+  // DeleteProfile removes the bearer principal profile or returns FAILED_PRECONDITION while protected ownership state remains.
   rpc DeleteProfile(DeleteProfileRequest) returns (google.protobuf.Empty);
+  // GetPreferences returns application-defined preferences for the bearer principal profile.
   rpc GetPreferences(GetPreferencesRequest) returns (Preferences);
+  // UpdatePreferences replaces application-defined preferences while preserving unknown object keys.
   rpc UpdatePreferences(UpdatePreferencesRequest) returns (Preferences);
 }
 
 // Explicit playback-history consent and lifecycle.
+// Every call requires bearer metadata and an existing profile; disabling history purges existing entries.
 service HistoryService {
+  // GetHistorySettings returns durable history consent for the bearer principal profile.
   rpc GetHistorySettings(GetHistorySettingsRequest) returns (HistorySettings);
+  // UpdateHistorySettings changes history consent and atomically purges history when disabling it.
   rpc UpdateHistorySettings(UpdateHistorySettingsRequest) returns (UpdateHistorySettingsResponse);
+  // RecordPlayback records a playback event when history is enabled and otherwise returns recorded=false.
   rpc RecordPlayback(RecordPlaybackRequest) returns (RecordPlaybackResponse);
+  // ListHistory returns profile-owned history entries with opaque pagination.
   rpc ListHistory(ListHistoryRequest) returns (ListHistoryResponse);
+  // DeleteHistoryEntry idempotently removes a profile-owned history entry.
   rpc DeleteHistoryEntry(DeleteHistoryEntryRequest) returns (google.protobuf.Empty);
+  // ClearHistory idempotently removes all history entries for the bearer principal profile.
   rpc ClearHistory(ClearHistoryRequest) returns (ClearHistoryResponse);
 }
 
 // Profile-owned saved tracks and likes.
+// Every call requires bearer metadata and an existing profile; save, like, remove, and unlike operations are idempotent.
 service LibraryService {
+  // SaveTrack idempotently saves a track and returns its renderable relationship resource.
   rpc SaveTrack(SaveTrackRequest) returns (SavedTrack);
+  // RemoveSavedTrack idempotently removes a saved-track relationship.
   rpc RemoveSavedTrack(RemoveSavedTrackRequest) returns (google.protobuf.Empty);
+  // ListSavedTracks returns renderable saved-track resources with opaque pagination.
   rpc ListSavedTracks(ListSavedTracksRequest) returns (ListSavedTracksResponse);
+  // LikeTrack idempotently likes a track and returns its renderable relationship resource.
   rpc LikeTrack(LikeTrackRequest) returns (LikedTrack);
+  // UnlikeTrack idempotently removes a liked-track relationship.
   rpc UnlikeTrack(UnlikeTrackRequest) returns (google.protobuf.Empty);
+  // ListLikedTracks returns renderable liked-track resources with opaque pagination.
   rpc ListLikedTracks(ListLikedTracksRequest) returns (ListLikedTracksResponse);
 }
 
 // Profile-owned playlist resources and ordered membership.
+// Every call requires bearer metadata and an existing profile; cross-owner identifiers are concealed as NOT_FOUND.
 service PlaylistService {
+  // CreatePlaylist creates a profile-owned playlist.
   rpc CreatePlaylist(CreatePlaylistRequest) returns (Playlist);
+  // GetPlaylist returns a profile-owned playlist and conceals cross-owner identifiers as NOT_FOUND.
   rpc GetPlaylist(GetPlaylistRequest) returns (Playlist);
+  // UpdatePlaylist mutates selected playlist fields and conceals cross-owner identifiers as NOT_FOUND.
   rpc UpdatePlaylist(UpdatePlaylistRequest) returns (Playlist);
+  // DeletePlaylist idempotently removes a profile-owned playlist and conceals cross-owner identifiers as NOT_FOUND.
   rpc DeletePlaylist(DeletePlaylistRequest) returns (google.protobuf.Empty);
+  // ListPlaylists returns profile-owned playlists with opaque pagination.
   rpc ListPlaylists(ListPlaylistsRequest) returns (ListPlaylistsResponse);
+  // AddPlaylistTrack idempotently adds a member and returns the resulting playlist-track resource.
   rpc AddPlaylistTrack(AddPlaylistTrackRequest) returns (PlaylistTrack);
+  // RemovePlaylistTrack idempotently removes a playlist member.
   rpc RemovePlaylistTrack(RemovePlaylistTrackRequest) returns (google.protobuf.Empty);
+  // ReorderPlaylistTracks replaces the complete member order; a stale expected revision returns ABORTED.
   rpc ReorderPlaylistTracks(ReorderPlaylistTracksRequest) returns (Playlist);
+  // ListPlaylistTracks returns ordered renderable membership resources with opaque pagination.
   rpc ListPlaylistTracks(ListPlaylistTracksRequest) returns (ListPlaylistTracksResponse);
 }
 
+// Account identity, credentials, verification, and per-device sessions.
+// Bootstrap calls are public, account and session management calls require bearer metadata, and generic responses resist account enumeration.
+service AuthService {
+  // RegisterPassword accepts a native credential registration request and returns a generic non-enumerating acceptance response.
+  rpc RegisterPassword(RegisterPasswordRequest) returns (GenericAuthResponse);
+  // ResendVerification requests another out-of-band verification challenge and returns a generic non-enumerating response.
+  rpc ResendVerification(ResendVerificationRequest) returns (GenericAuthResponse);
+  // VerifyEmail consumes a verification token, activates the account, and returns a new device session.
+  rpc VerifyEmail(VerifyEmailRequest) returns (SessionEnvelope);
+  // LoginPassword authenticates a native credential and returns a new device session.
+  rpc LoginPassword(LoginPasswordRequest) returns (SessionEnvelope);
+  // RequestPasswordReset requests an out-of-band reset challenge and returns a generic non-enumerating response.
+  rpc RequestPasswordReset(RequestPasswordResetRequest) returns (GenericAuthResponse);
+  // CompletePasswordReset consumes a reset token, changes the credential, and invalidates existing sessions.
+  rpc CompletePasswordReset(CompletePasswordResetRequest) returns (GenericAuthResponse);
+  // ChangePassword requires bearer metadata, verifies the current credential, changes it, and invalidates other sessions.
+  rpc ChangePassword(ChangePasswordRequest) returns (GenericAuthResponse);
+  // BeginGoogleLogin starts a public provider login challenge with a nonce.
+  rpc BeginGoogleLogin(BeginGoogleLoginRequest) returns (BeginGoogleLoginResponse);
+  // CompleteGoogleLogin consumes the provider result and returns either a session or proof that explicit account linking is required.
+  rpc CompleteGoogleLogin(CompleteGoogleLoginRequest) returns (GoogleLoginResponse);
+  // LinkGoogle requires bearer metadata and consumes link proof to attach the provider identity.
+  rpc LinkGoogle(LinkGoogleRequest) returns (GenericAuthResponse);
+  // UnlinkGoogle requires bearer metadata and removes the linked provider identity when another sign-in method remains.
+  rpc UnlinkGoogle(UnlinkGoogleRequest) returns (GenericAuthResponse);
+  // RefreshSession rotates the refresh token; reuse of an old token can revoke the session family.
+  rpc RefreshSession(RefreshSessionRequest) returns (SessionEnvelope);
+  // Logout requires bearer metadata and idempotently revokes the current session.
+  rpc Logout(LogoutRequest) returns (GenericAuthResponse);
+  // LogoutAll requires bearer metadata and idempotently revokes every session for the account.
+  rpc LogoutAll(LogoutAllRequest) returns (GenericAuthResponse);
+  // ListSessions requires bearer metadata and returns account sessions with opaque pagination.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  // RevokeSession requires bearer metadata and idempotently revokes the selected account session.
+  rpc RevokeSession(RevokeSessionRequest) returns (GenericAuthResponse);
+  // GetAccount requires bearer metadata and returns the authenticated account.
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+  // DeleteAccount requires bearer metadata, deletes the account, and invalidates its sessions.
+  rpc DeleteAccount(DeleteAccountRequest) returns (GenericAuthResponse);
+}
+
 // Rich application and dependency status.
+// GetStatus is public; dependency names and status values are open to compatible extension.
 service SystemService {
+  // GetStatus publicly returns application and dependency status; consumers tolerate unknown dependency names.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
+// PageRequest selects an opaque result page.
 message PageRequest {
+  // Maximum desired results; zero selects the server default and larger values may be clamped.
   uint32 page_size = 1;
+  // Opaque continuation token returned by the previous page; consumers must not parse it.
   string page_token = 2;
 }
 
+// PageInfo describes how to continue a paginated result.
 message PageInfo {
+  // Opaque continuation token for the next page, or empty when no next page exists.
   string next_page_token = 1;
 }
 
+// ArtworkRef identifies artwork without prescribing a client URI.
+// Clients must treat both fields as opaque. Servers must not embed platform
+// URI schemes, filesystem paths, object-storage keys, or CDN hostnames here.
+// Display URLs are derived by the consumer from its configured media origin
+// plus these fields (for example `/artwork/{id}/{content_hash}`).
 message ArtworkRef {
+  // Opaque stable identifier for this artwork resource. Remains stable when
+  // artwork bytes are replaced for the same resource.
   string id = 1;
+  // Lowercase SHA-256 hex digest of the artwork bytes. Changes whenever the
+  // bytes behind `id` are replaced and is the client cache / URL version key.
+  string content_hash = 2;
 }
 
+// ArtistSummary is the renderable artist metadata embedded in track resources.
 message ArtistSummary {
+  // Opaque stable identifier for this resource.
   string id = 1;
+  // Human-readable name.
   string name = 2;
 }
 
+// AlbumSummary is optional renderable album metadata embedded in a track.
 message AlbumSummary {
+  // Opaque stable identifier for this resource.
   string id = 1;
+  // Human-readable title.
   string title = 2;
 }
 
+// TrackSummary contains renderable catalog metadata for a track.
 message TrackSummary {
+  // Opaque stable identifier for this resource.
   string id = 1;
+  // Human-readable title.
   string title = 2;
+  // Renderable primary artist metadata.
   ArtistSummary artist = 3;
+  // Optional renderable album metadata; absence means no album is supplied.
   optional AlbumSummary album = 4;
+  // Duration in milliseconds.
   uint64 duration_ms = 5;
+  // Whether the track is marked as explicit content.
   bool explicit = 6;
+  // Optional artwork reference; absence means no artwork is supplied.
   optional ArtworkRef artwork = 7;
 }
 
+// Track contains complete catalog metadata for one track.
 message Track {
+  // Renderable summary for this track.
   TrackSummary summary = 1;
+  // Genre labels associated with the track or used to filter results.
   repeated string genres = 2;
 }
 
+// BrowseRequest supplies parameters for its corresponding RPC.
 message BrowseRequest {
+  // Optional opaque catalog parent identifier; absence selects the root.
   optional string parent_id = 1;
+  // Genre labels associated with the track or used to filter results.
   repeated string genres = 2;
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 3;
 }
 
+// BrowseResponse contains results from its corresponding RPC.
 message BrowseResponse {
+  // Ordered renderable track resources in this result page.
   repeated TrackSummary tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// SearchRequest supplies parameters for its corresponding RPC.
 message SearchRequest {
+  // Consumer-supplied catalog search text.
   string query = 1;
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 2;
 }
 
+// SearchResponse contains results from its corresponding RPC.
 message SearchResponse {
+  // Ordered renderable track resources in this result page.
   repeated TrackSummary tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// GetMediaRequest supplies parameters for its corresponding RPC.
 message GetMediaRequest {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
 }
 
+// ResolvePlaybackRequest supplies parameters for its corresponding RPC.
 message ResolvePlaybackRequest {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
 }
 
+// PlaybackSource describes one opaque, expiring playback capability and its selected asset.
 message PlaybackSource {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
+  // Opaque playback URL used verbatim only until expires_at.
   string stream_url = 2;
+  // Media type of the selected playback asset.
   string content_type = 3;
+  // Codec identifier of the selected playback asset.
   string codec = 4;
+  // Duration in milliseconds.
   uint64 duration_ms = 5;
+  // UTC instant after which this resource or capability is no longer valid.
   google.protobuf.Timestamp expires_at = 6;
 }
 
+// GetDiscoveryFeedRequest supplies parameters for its corresponding RPC.
 message GetDiscoveryFeedRequest {
+  // Opaque track identifiers to exclude from the feed on a best-effort basis.
   repeated string exclude_track_ids = 1;
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 2;
 }
 
+// GetDiscoveryFeedResponse contains results from its corresponding RPC.
 message GetDiscoveryFeedResponse {
+  // Ordered renderable track resources in this result page.
   repeated TrackSummary tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
+
+// GetForYouFeedRequest supplies parameters for its corresponding RPC.
 message GetForYouFeedRequest {
+  // Opaque track identifiers to exclude from the feed on a best-effort basis.
   repeated string exclude_track_ids = 1;
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 2;
 }
 
+// GetForYouFeedResponse contains results from its corresponding RPC.
 message GetForYouFeedResponse {
+  // Ordered renderable track resources in this result page.
   repeated TrackSummary tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// GetRecommendationsRequest supplies parameters for its corresponding RPC.
 message GetRecommendationsRequest {
+  // Opaque track identifiers to exclude from the feed on a best-effort basis.
   repeated string exclude_track_ids = 1;
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 2;
 }
 
+// GetRecommendationsResponse contains results from its corresponding RPC.
 message GetRecommendationsResponse {
+  // Ordered renderable track resources in this result page.
   repeated TrackSummary tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
-
+// Profile is the durable user-facing profile associated with an authenticated account.
 message Profile {
+  // Opaque stable identifier for this resource.
   string id = 1;
+  // Opaque stable account identifier associated with this profile.
   string external_user_id = 2;
+  // Optional user-facing display name; absence is distinct from an empty value.
   optional string display_name = 3;
+  // UTC instant when the resource was created.
   google.protobuf.Timestamp created_at = 4;
+  // UTC instant when the resource was last updated.
   google.protobuf.Timestamp updated_at = 5;
 }
 
+// UpsertProfileRequest supplies parameters for its corresponding RPC.
 message UpsertProfileRequest {
+  // Optional user-facing display name; absence is distinct from an empty value.
   optional string display_name = 1;
 }
 
+// GetProfileRequest is empty because bearer metadata selects the required profile.
 message GetProfileRequest {}
 
+// UpdateProfileRequest supplies parameters for its corresponding RPC.
 message UpdateProfileRequest {
+  // Profile state carrying values selected for update.
   Profile profile = 1;
+  // Fields to mutate, expressed as lower_snake_case protobuf paths.
   google.protobuf.FieldMask update_mask = 2;
 }
 
+// DeleteProfileRequest is empty because bearer metadata selects the required profile.
 message DeleteProfileRequest {}
 
+// Preferences contains an application-defined object whose unknown keys must be preserved.
 message Preferences {
+  // Application-defined object; consumers preserve keys they do not understand.
   google.protobuf.Struct values = 1;
 }
 
+// GetPreferencesRequest is empty because bearer metadata selects the required profile.
 message GetPreferencesRequest {}
 
+// UpdatePreferencesRequest supplies parameters for its corresponding RPC.
 message UpdatePreferencesRequest {
+  // Application-defined preference object to persist.
   Preferences preferences = 1;
 }
 
+// HistorySettings represents durable playback-history consent.
 message HistorySettings {
+  // Whether durable history recording is enabled; false means recording is disabled.
   bool enabled = 1;
 }
 
+// GetHistorySettingsRequest is empty because bearer metadata selects the required profile.
 message GetHistorySettingsRequest {}
 
+// UpdateHistorySettingsRequest supplies parameters for its corresponding RPC.
 message UpdateHistorySettingsRequest {
+  // Requested durable history setting; false also purges existing history.
   bool enabled = 1;
 }
 
+// UpdateHistorySettingsResponse contains results from its corresponding RPC.
 message UpdateHistorySettingsResponse {
+  // Resulting durable history settings.
   HistorySettings settings = 1;
+  // Number of resources deleted by the operation.
   uint64 deleted_count = 2;
 }
 
+// RecordPlaybackRequest supplies parameters for its corresponding RPC.
 message RecordPlaybackRequest {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
+  // Duration in milliseconds.
   uint64 duration_ms = 2;
+  // Observed completion fraction in the inclusive range from 0.0 to 1.0.
   float completion_ratio = 3;
 }
 
+// RecordPlaybackResponse contains results from its corresponding RPC.
 message RecordPlaybackResponse {
+  // Whether the event was persisted; false when history recording is disabled.
   bool recorded = 1;
 }
 
+// HistoryEntry is one durable playback-history record with renderable track metadata.
 message HistoryEntry {
+  // Opaque stable identifier for this resource.
   string id = 1;
+  // UTC instant when playback was recorded.
   google.protobuf.Timestamp played_at = 2;
+  // Duration in milliseconds.
   uint64 duration_ms = 3;
+  // Recorded completion fraction in the inclusive range from 0.0 to 1.0.
   float completion_ratio = 4;
+  // Renderable track metadata for this relationship.
   TrackSummary track = 5;
 }
 
+// ListHistoryRequest supplies parameters for its corresponding RPC.
 message ListHistoryRequest {
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 1;
 }
 
+// ListHistoryResponse contains results from its corresponding RPC.
 message ListHistoryResponse {
+  // History entries in this result page.
   repeated HistoryEntry entries = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// DeleteHistoryEntryRequest supplies parameters for its corresponding RPC.
 message DeleteHistoryEntryRequest {
+  // Opaque stable identifier of the referenced history entry.
   string history_id = 1;
 }
 
+// ClearHistoryRequest is empty because bearer metadata selects the required profile.
 message ClearHistoryRequest {}
 
+// ClearHistoryResponse contains results from its corresponding RPC.
 message ClearHistoryResponse {
+  // Number of resources deleted by the operation.
   uint64 deleted_count = 1;
 }
 
+// SavedTrack combines renderable track metadata with the save relationship timestamp.
 message SavedTrack {
+  // Renderable track metadata for this relationship.
   TrackSummary track = 1;
+  // UTC instant when the track was saved.
   google.protobuf.Timestamp saved_at = 2;
 }
 
+// SaveTrackRequest supplies parameters for its corresponding RPC.
 message SaveTrackRequest {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
 }
 
+// RemoveSavedTrackRequest supplies parameters for its corresponding RPC.
 message RemoveSavedTrackRequest {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
 }
 
+// ListSavedTracksRequest supplies parameters for its corresponding RPC.
 message ListSavedTracksRequest {
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 1;
 }
 
+// ListSavedTracksResponse contains results from its corresponding RPC.
 message ListSavedTracksResponse {
+  // Ordered renderable track resources in this result page.
   repeated SavedTrack tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// LikedTrack combines renderable track metadata with the like relationship timestamp.
 message LikedTrack {
+  // Renderable track metadata for this relationship.
   TrackSummary track = 1;
+  // UTC instant when the track was liked.
   google.protobuf.Timestamp liked_at = 2;
 }
 
+// LikeTrackRequest supplies parameters for its corresponding RPC.
 message LikeTrackRequest {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
 }
 
+// UnlikeTrackRequest supplies parameters for its corresponding RPC.
 message UnlikeTrackRequest {
+  // Opaque stable identifier of the referenced track.
   string track_id = 1;
 }
 
+// ListLikedTracksRequest supplies parameters for its corresponding RPC.
 message ListLikedTracksRequest {
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 1;
 }
 
+// ListLikedTracksResponse contains results from its corresponding RPC.
 message ListLikedTracksResponse {
+  // Ordered renderable track resources in this result page.
   repeated LikedTrack tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// Playlist is a profile-owned ordered collection with a concurrency revision.
 message Playlist {
+  // Opaque stable identifier for this resource.
   string id = 1;
+  // Human-readable name.
   string name = 2;
+  // Optional human-readable description; absence is distinct from an empty value.
   optional string description = 3;
+  // Server-authoritative concurrency revision for complete membership reordering.
   uint64 revision = 4;
+  // UTC instant when the resource was created.
   google.protobuf.Timestamp created_at = 5;
+  // UTC instant when the resource was last updated.
   google.protobuf.Timestamp updated_at = 6;
 }
 
+// PlaylistTrack combines ordered membership metadata with a renderable track.
 message PlaylistTrack {
+  // Opaque stable identifier of the referenced playlist.
   string playlist_id = 1;
+  // Renderable track metadata for this relationship.
   TrackSummary track = 2;
+  // Zero-based position in the ordered playlist membership.
   uint32 position = 3;
+  // UTC instant when the track joined the playlist.
   google.protobuf.Timestamp added_at = 4;
 }
 
+// CreatePlaylistRequest supplies parameters for its corresponding RPC.
 message CreatePlaylistRequest {
+  // Human-readable name.
   string name = 1;
+  // Optional human-readable description; absence is distinct from an empty value.
   optional string description = 2;
 }
 
+// GetPlaylistRequest supplies parameters for its corresponding RPC.
 message GetPlaylistRequest {
+  // Opaque stable identifier of the referenced playlist.
   string playlist_id = 1;
 }
 
+// UpdatePlaylistRequest supplies parameters for its corresponding RPC.
 message UpdatePlaylistRequest {
+  // Playlist state carrying values selected for update.
   Playlist playlist = 1;
+  // Fields to mutate, expressed as lower_snake_case protobuf paths.
   google.protobuf.FieldMask update_mask = 2;
 }
 
+// DeletePlaylistRequest supplies parameters for its corresponding RPC.
 message DeletePlaylistRequest {
+  // Opaque stable identifier of the referenced playlist.
   string playlist_id = 1;
 }
 
+// ListPlaylistsRequest supplies parameters for its corresponding RPC.
 message ListPlaylistsRequest {
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 1;
 }
 
+// ListPlaylistsResponse contains results from its corresponding RPC.
 message ListPlaylistsResponse {
+  // Playlists in this result page.
   repeated Playlist playlists = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// AddPlaylistTrackRequest supplies parameters for its corresponding RPC.
 message AddPlaylistTrackRequest {
+  // Opaque stable identifier of the referenced playlist.
   string playlist_id = 1;
+  // Opaque stable identifier of the referenced track.
   string track_id = 2;
+  // Optional zero-based insertion position; absence lets the service append the track.
   optional uint32 position = 3;
 }
 
+// RemovePlaylistTrackRequest supplies parameters for its corresponding RPC.
 message RemovePlaylistTrackRequest {
+  // Opaque stable identifier of the referenced playlist.
   string playlist_id = 1;
+  // Opaque stable identifier of the referenced track.
   string track_id = 2;
 }
 
+// ReorderPlaylistTracksRequest supplies parameters for its corresponding RPC.
 message ReorderPlaylistTracksRequest {
+  // Opaque stable identifier of the referenced playlist.
   string playlist_id = 1;
+  // Complete ordered membership expressed as opaque track identifiers.
   repeated string track_ids = 2;
+  // Revision observed by the caller; a stale value returns ABORTED.
   uint64 expected_revision = 3;
 }
 
+// ListPlaylistTracksRequest supplies parameters for its corresponding RPC.
 message ListPlaylistTracksRequest {
+  // Opaque stable identifier of the referenced playlist.
   string playlist_id = 1;
+  // Opaque pagination parameters; zero and empty values select service defaults.
   PageRequest page = 2;
 }
 
+// ListPlaylistTracksResponse contains results from its corresponding RPC.
 message ListPlaylistTracksResponse {
+  // Ordered renderable track resources in this result page.
   repeated PlaylistTrack tracks = 1;
+  // Opaque pagination continuation information.
   PageInfo page_info = 2;
 }
 
+// GenericAuthResponse acknowledges accepted auth work without disclosing whether an account exists.
+message GenericAuthResponse {
+  // Generic acceptance signal that does not disclose whether an account exists.
+  bool accepted = 1;
+}
+
+// AccountSummary contains consumer-visible account identity and lifecycle state.
+message AccountSummary {
+  // Opaque stable identifier for this resource.
+  string id = 1;
+  // Normalized primary email address associated with the account.
+  string primary_email = 2;
+  // Open account lifecycle string; consumers tolerate unknown future values.
+  string status = 3;
+  // UTC instant when the resource was created.
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// SessionSummary describes one account session without exposing credentials.
+message SessionSummary {
+  // Opaque stable identifier for this resource.
+  string id = 1;
+  // Consumer-supplied label used to recognize a device session.
+  string device_label = 2;
+  // UTC instant when the resource was created.
+  google.protobuf.Timestamp created_at = 3;
+  // UTC instant when the session was last used.
+  google.protobuf.Timestamp last_used_at = 4;
+  // UTC instant after which this resource or capability is no longer valid.
+  google.protobuf.Timestamp expires_at = 5;
+  // Whether this is the session authenticating the current request.
+  bool current = 6;
+}
+
+// SessionEnvelope atomically returns credentials, expirations, account state, and the issuing session.
+message SessionEnvelope {
+  // Bearer access token for protected calls.
+  string access_token = 1;
+  // Opaque single-use refresh credential that rotates on refresh.
+  string refresh_token = 2;
+  // Access-token expiration as Unix epoch milliseconds.
+  int64 access_expires_at_epoch_ms = 3;
+  // Refresh-token expiration as Unix epoch milliseconds.
+  int64 refresh_expires_at_epoch_ms = 4;
+  // Consumer-visible state of the authenticated account.
+  AccountSummary account = 5;
+  // Session created by the successful authentication operation.
+  SessionSummary session = 6;
+}
+
+// RegisterPasswordRequest supplies parameters for its corresponding RPC.
+message RegisterPasswordRequest {
+  // Email address used for native account authentication.
+  string email = 1;
+  // New password credential containing 8 through 64 Unicode scalar values.
+  string password = 2;
+}
+
+// ResendVerificationRequest supplies parameters for its corresponding RPC.
+message ResendVerificationRequest {
+  // Email address used for native account authentication.
+  string email = 1;
+}
+
+// VerifyEmailRequest supplies parameters for its corresponding RPC.
+message VerifyEmailRequest {
+  // Opaque out-of-band verification token passed through unchanged.
+  string verification_token = 1;
+  // Consumer-supplied label used to recognize a device session.
+  string device_label = 2;
+}
+
+// LoginPasswordRequest supplies parameters for its corresponding RPC.
+message LoginPasswordRequest {
+  // Email address used for native account authentication.
+  string email = 1;
+  // Existing non-empty password credential. Consumers must not apply the new
+  // password creation-length policy when logging in.
+  string password = 2;
+  // Consumer-supplied label used to recognize a device session.
+  string device_label = 3;
+}
+
+// RequestPasswordResetRequest supplies parameters for its corresponding RPC.
+message RequestPasswordResetRequest {
+  // Email address used for native account authentication.
+  string email = 1;
+}
+
+// CompletePasswordResetRequest supplies parameters for its corresponding RPC.
+message CompletePasswordResetRequest {
+  // Opaque out-of-band password-reset token passed through unchanged.
+  string reset_token = 1;
+  // Replacement password credential containing 8 through 64 Unicode scalar values.
+  string new_password = 2;
+}
+
+// ChangePasswordRequest supplies parameters for its corresponding RPC.
+message ChangePasswordRequest {
+  // Existing non-empty password credential used to authorize the change.
+  string current_password = 1;
+  // Replacement password credential containing 8 through 64 Unicode scalar values.
+  string new_password = 2;
+}
+
+// BeginGoogleLoginRequest is empty because beginning a provider challenge is public.
+message BeginGoogleLoginRequest {}
+
+// BeginGoogleLoginResponse binds a short-lived challenge identifier to a provider nonce.
+message BeginGoogleLoginResponse {
+  // Opaque short-lived identifier of the provider login challenge.
+  string challenge_id = 1;
+  // Nonce that must be bound to the provider authentication request.
+  string nonce = 2;
+  // UTC instant after which this resource or capability is no longer valid.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// CompleteGoogleLoginRequest supplies parameters for its corresponding RPC.
+message CompleteGoogleLoginRequest {
+  // Opaque short-lived identifier of the provider login challenge.
+  string challenge_id = 1;
+  // Provider ID token returned for the bound challenge.
+  string id_token = 2;
+  // Consumer-supplied label used to recognize a device session.
+  string device_label = 3;
+}
+
+// AccountLinkRequired proves that a provider identity needs explicit linking to an existing account.
+message AccountLinkRequired {
+  // Opaque short-lived proof used for explicit provider-account linking.
+  string link_challenge_id = 1;
+}
+
+// GoogleLoginResponse contains exactly one provider-login outcome.
+message GoogleLoginResponse {
+  // result contains exactly one outcome; consumers fail closed on unknown future variants.
+  oneof result {
+    // Successful provider authentication outcome with a new session.
+    SessionEnvelope session = 1;
+    // Outcome requiring authenticated explicit linking to an existing account.
+    AccountLinkRequired account_link_required = 2;
+  }
+}
+
+// LinkGoogleRequest supplies parameters for its corresponding RPC.
+message LinkGoogleRequest {
+  // Opaque short-lived proof used for explicit provider-account linking.
+  string link_challenge_id = 1;
+}
+
+// UnlinkGoogleRequest is empty because bearer metadata selects the authenticated account.
+message UnlinkGoogleRequest {}
+
+// RefreshSessionRequest supplies parameters for its corresponding RPC.
+message RefreshSessionRequest {
+  // Opaque single-use refresh credential that rotates on refresh.
+  string refresh_token = 1;
+}
+
+// LogoutRequest is empty because bearer metadata selects the current session.
+message LogoutRequest {}
+
+// LogoutAllRequest is empty because bearer metadata selects the authenticated account.
+message LogoutAllRequest {}
+
+// ListSessionsRequest supplies parameters for its corresponding RPC.
+message ListSessionsRequest {
+  // Opaque pagination parameters; zero and empty values select service defaults.
+  PageRequest page = 1;
+}
+
+// ListSessionsResponse contains results from its corresponding RPC.
+message ListSessionsResponse {
+  // Account sessions in this result page.
+  repeated SessionSummary sessions = 1;
+  // Opaque pagination continuation information.
+  PageInfo page_info = 2;
+}
+
+// RevokeSessionRequest supplies parameters for its corresponding RPC.
+message RevokeSessionRequest {
+  // Opaque stable identifier of the referenced account session.
+  string session_id = 1;
+}
+
+// GetAccountRequest is empty because bearer metadata selects the authenticated account.
+message GetAccountRequest {}
+
+// GetAccountResponse contains results from its corresponding RPC.
+message GetAccountResponse {
+  // Consumer-visible state of the authenticated account.
+  AccountSummary account = 1;
+}
+
+// DeleteAccountRequest is empty because bearer metadata selects the authenticated account.
+message DeleteAccountRequest {}
+
+// GetStatusRequest is empty because application status is public.
 message GetStatusRequest {}
 
+// GetStatusResponse reports application health and implementation-defined dependency details.
 message GetStatusResponse {
+  // Whether the application reports aggregate health.
   bool healthy = 1;
+  // Implementation version string.
   string version = 2;
+  // Open aggregate status string; consumers tolerate unknown future values.
   string status = 3;
+  // Implementation-defined dependency statuses; consumers tolerate unknown names.
   repeated DependencyStatus dependencies = 4;
+  // UTC instant when status was evaluated.
   google.protobuf.Timestamp checked_at = 5;
 }
 
+// DependencyStatus reports one named dependency using open status strings.
 message DependencyStatus {
+  // Human-readable name.
   string name = 1;
+  // Open dependency status string; consumers tolerate unknown future values.
   string status = 2;
+  // Human-readable diagnostic text that consumers must not use for control flow.
   string message = 3;
 }

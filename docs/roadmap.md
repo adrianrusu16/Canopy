@@ -1,6 +1,6 @@
 # Project Status and Roadmap
 
-Last updated: 2026-08-20
+Last updated: 2026-08-26
 
 This page records Canopy's current backend capabilities, known limitations, and
 next engineering priorities. Historical designs and implementation plans are
@@ -40,8 +40,8 @@ kept in the [documentation archive](archive/README.md).
 - Search has not been benchmarked against a production-size catalog.
 - Media imports lack a reconciliation command for pending rows, missing files,
   finalized-but-unmarked files, and orphaned staging directories.
-- Managed artwork has no complete client-facing authorization and universal
-  fallback contract.
+- Managed artwork is served at `/artwork/{id}/{hash}` via Nginx auth_request;
+  a universal fallback image for tracks without artwork is still missing.
 - Tracing is local structured logging only; correlation propagation, metrics,
   distributed export, and service objectives are not implemented.
 - Backup, restore, secret rotation, resource limits, and disaster-recovery
@@ -54,9 +54,9 @@ kept in the [documentation archive](archive/README.md).
    command for pending database rows, staging directories, finalized files,
    missing files, and checksum-aware repair. Destructive cleanup must be
    explicit.
-2. **Artwork delivery and fallback.** Define a client-visible artwork
-   contract, authorize managed artwork without exposing storage keys, and
-   provide a stable fallback for tracks without embedded or sidecar artwork.
+2. **Artwork fallback.** Provide a stable fallback for tracks without
+   embedded or sidecar artwork once `ArtworkRef.content_hash` ships in the
+   published canopy-api SDK.
 3. **Contract compatibility gates.** Keep Buf breaking checks and publication
    policy in the canonical canopy-api repository while Canopy verifies the
    exact released SDK it consumes.

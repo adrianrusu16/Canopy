@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use canopy_core::{
-    AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CanopyError, CanopyResult,
-    CatalogRepository, DiscoveryRepository, IngestStatus, InstanceSettingsRepository, LibraryItem,
-    LibraryRepository, LikeRepository, LikedTrackItem, LikedTrackPage, MediaItem, MediaPage,
-    MediaVisibility, Page, PlayableAsset, PlayableAssetRepository, PlaybackHistoryEntry,
+    AudioAsset, AudioAssetRepository, AuthorizedArtworkAsset, AuthorizedStreamAsset, CanopyError,
+    CanopyResult, CatalogRepository, DiscoveryRepository, IngestStatus, InstanceSettingsRepository,
+    LibraryItem, LibraryRepository, LikeRepository, LikedTrackItem, LikedTrackPage, MediaItem,
+    MediaPage, MediaVisibility, Page, PlayableAsset, PlayableAssetRepository, PlaybackHistoryEntry,
     PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository, Playlist, PlaylistPage,
     PlaylistRepository, PlaylistTrack, PlaylistTrackItem, PlaylistTrackPage, PreferencesRepository,
     ProfilePreferences, ProfileRepository, SavedTrackItem, SavedTrackPage, StreamAudience,
@@ -323,6 +323,14 @@ impl PlayableAssetRepository for InMemoryAudioAssetStore {
                 storage_key: entry.asset.storage_key.clone(),
                 content_type: entry.asset.content_type.clone(),
             }))
+    }
+
+    async fn authorize_artwork(
+        &self,
+        _artwork_id: &str,
+        _content_hash: &str,
+    ) -> CanopyResult<Option<AuthorizedArtworkAsset>> {
+        Ok(None)
     }
 }
 

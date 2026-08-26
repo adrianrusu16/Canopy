@@ -9,6 +9,8 @@ mod memory;
 #[cfg(feature = "pg")]
 mod pg;
 #[cfg(feature = "pg")]
+mod pg_artwork;
+#[cfg(feature = "pg")]
 mod pg_auth_outbox;
 #[cfg(feature = "pg")]
 mod pg_identity;

@@ -11,10 +11,10 @@ here.
 
 - Protobuf package: `canopy.v1`
 - BSR module: `buf.build/pandawave/canopy-api`
-- Stable release: `v0.2.0`
-- Immutable BSR commit: `af019e2d7fa245a2a7d9fc21a4dd9afa`
-- Prost SDK: `=0.5.0-00000000000000-af019e2d7fa2.2`
-- Tonic SDK: `=0.5.0-00000000000000-af019e2d7fa2.4`
+- Stable release: `v0.3.0`
+- Immutable BSR commit: `ff8940d1a15b4034bb430fd47dd45cdc`
+- Prost SDK: `=0.5.0-00000000000000-ff8940d1a15b.2`
+- Tonic SDK: `=0.5.0-00000000000000-ff8940d1a15b.4`
 
 Generated SDK versions are immutable dependency pins. Release labels are for
 discovery and communication. See [API Consumption](api.md)

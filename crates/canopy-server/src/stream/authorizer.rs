@@ -104,6 +104,14 @@ mod tests {
             self.calls.lock().unwrap().push(audience);
             self.authorization.lock().unwrap().take().unwrap()
         }
+
+        async fn authorize_artwork(
+            &self,
+            _artwork_id: &str,
+            _content_hash: &str,
+        ) -> CanopyResult<Option<canopy_core::AuthorizedArtworkAsset>> {
+            Ok(None)
+        }
     }
 
     fn codec() -> Arc<StreamTokenCodec> {

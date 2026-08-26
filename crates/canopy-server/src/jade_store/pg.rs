@@ -26,13 +26,15 @@ use async_trait::async_trait;
 use canopy_core::{
     AudioAsset, AudioAssetRepository, CanopyError, CanopyResult, CatalogIngest, CatalogRepository,
     DiscoveryRepository, IngestBatchResult, InstanceSettingsRepository, LibraryItem,
-    LibraryRepository, LikeRepository, LikedTrackItem, LikedTrackPage, MediaItem, MediaPage, Page,
-    PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackHistoryRepository,
-    Playlist, PlaylistPage, PlaylistRepository, PlaylistTrackItem, PlaylistTrackPage,
-    PreferencesRepository, ProfilePreferences, ProfileRepository, ProviderTrack, SavedTrackItem,
-    SavedTrackPage, TrackAccessScope, TrackLike, UserProfile,
+    LibraryRepository, LikeRepository, LikedTrackItem, LikedTrackPage, MediaArtwork, MediaItem,
+    MediaPage, Page, PlaybackHistoryEntry, PlaybackHistoryEvent, PlaybackHistoryPage,
+    PlaybackHistoryRepository, Playlist, PlaylistPage, PlaylistRepository, PlaylistTrackItem,
+    PlaylistTrackPage, PreferencesRepository, ProfilePreferences, ProfileRepository, ProviderTrack,
+    SavedTrackItem, SavedTrackPage, TrackAccessScope, TrackLike, UserProfile,
 };
 use sqlx::{AssertSqlSafe, Row, Transaction};
+
+use super::pg_artwork::upsert_artwork_asset;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,17 +76,26 @@ fn media_item_from_row(row: &sqlx::postgres::PgRow) -> MediaItem {
         0
     };
 
+    let artwork_id = row.try_get::<Option<uuid::Uuid>, _>("artwork_id").ok().flatten();
+    let artwork_content_hash = row
+        .try_get::<Option<String>, _>("artwork_content_hash")
+        .ok()
+        .flatten()
+        .filter(|hash| !hash.is_empty());
+    let artwork = match (artwork_id, artwork_content_hash) {
+        (Some(id), Some(content_hash)) => Some(MediaArtwork {
+            id: id.to_string(),
+            content_hash,
+        }),
+        _ => None,
+    };
+
     MediaItem {
         id: uuid_string(row, "track_id"),
         title: row.try_get("track_title").unwrap_or_default(),
         artist: row.try_get("artist_name").unwrap_or_default(),
         album: row.try_get("album_title").unwrap_or_default(),
-        artwork_uri: format!(
-            "content://com.adrianrusu.mediaapp.audio/artwork/{}",
-            row.try_get::<Option<String>, _>("artwork_storage_key")
-                .unwrap_or_default()
-                .unwrap_or_default()
-        ),
+        artwork,
         duration_ms: track_duration_ms as i64,
         bitrate_kbps,
         mime_type: row
@@ -261,6 +272,11 @@ async fn find_or_insert_album(
     artist_id: uuid::Uuid,
     track: &ProviderTrack,
 ) -> Result<uuid::Uuid, sqlx::Error> {
+    let album_artwork_id = match track.album_artwork_storage_key.as_deref() {
+        Some(key) => upsert_artwork_asset(tx, key, None).await?,
+        None => None,
+    };
+
     if let Some(id) = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
             SELECT id
@@ -279,13 +295,15 @@ async fn find_or_insert_album(
             r#"
                 UPDATE albums
                 SET release_year = COALESCE($2, release_year),
-                    artwork_storage_key = COALESCE($3, artwork_storage_key)
+                    artwork_storage_key = COALESCE($3, artwork_storage_key),
+                    artwork_id = COALESCE($4, artwork_id)
                 WHERE id = $1
             "#,
         )
         .bind(id)
         .bind(track.release_year)
         .bind(&track.album_artwork_storage_key)
+        .bind(album_artwork_id)
         .execute(&mut **tx)
         .await?;
 
@@ -294,8 +312,8 @@ async fn find_or_insert_album(
 
     sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
-            INSERT INTO albums (title, artist_id, release_year, artwork_storage_key)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO albums (title, artist_id, release_year, artwork_storage_key, artwork_id)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id
         "#,
     )
@@ -303,6 +321,7 @@ async fn find_or_insert_album(
     .bind(artist_id)
     .bind(track.release_year)
     .bind(&track.album_artwork_storage_key)
+    .bind(album_artwork_id)
     .fetch_one(&mut **tx)
     .await
 }
@@ -353,11 +372,14 @@ impl CatalogRepository for PgCatalogRepository {
             SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
                 al.title AS album_title, t.duration_ms AS track_duration_ms,
                 t.is_explicit AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes
             FROM tracks t
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE t.ingest_status = 'ready'
               AND (
@@ -408,12 +430,15 @@ impl CatalogRepository for PgCatalogRepository {
             SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
                 al.title AS album_title, t.duration_ms AS track_duration_ms,
                 t.is_explicit AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes,
                 GREATEST(similarity(t.title, $2), similarity(a.name, $2), similarity(al.title, $2)) AS rank
             FROM tracks t
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE (t.title % $2 OR a.name % $2 OR al.title % $2)
               AND t.ingest_status = 'ready'
@@ -474,11 +499,14 @@ impl CatalogRepository for PgCatalogRepository {
             SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
                 al.title AS album_title, t.duration_ms AS track_duration_ms,
                 t.is_explicit AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes
             FROM tracks t
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE t.id = $2
               AND t.ingest_status = 'ready'
@@ -509,11 +537,14 @@ impl CatalogRepository for PgCatalogRepository {
             SELECT t.id AS track_id, t.title AS track_title, a.name AS artist_name,
                 al.title AS album_title, t.duration_ms AS track_duration_ms,
                 t.is_explicit AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type AS asset_content_type, aa.size_bytes AS asset_size_bytes
             FROM tracks t
             JOIN artists a ON t.artist_id = a.id
             JOIN albums al ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE t.owner_profile_id = $1
               AND t.visibility = 'personal' AND t.ingest_status = 'ready'
@@ -570,6 +601,12 @@ impl CatalogIngest for PgCatalogRepository {
         .map_err(db_err)?;
 
         let track_id = if let Some(track_id) = existing_track_id {
+            let track_artwork_id = match track.artwork_storage_key.as_deref() {
+                Some(key) => upsert_artwork_asset(&mut tx, key, None)
+                    .await
+                    .map_err(db_err)?,
+                None => None,
+            };
             sqlx::query(
                 r#"
                     UPDATE tracks
@@ -580,6 +617,7 @@ impl CatalogIngest for PgCatalogRepository {
                         license_id = $6,
                         is_explicit = $7,
                         artwork_storage_key = $8,
+                        artwork_id = $9,
                         visibility = 'quarantined',
                         ingest_status = 'quarantined',
                         updated_at = NOW()
@@ -594,20 +632,27 @@ impl CatalogIngest for PgCatalogRepository {
             .bind(license_id)
             .bind(track.is_explicit)
             .bind(&track.artwork_storage_key)
+            .bind(track_artwork_id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
 
             track_id
         } else {
+            let track_artwork_id = match track.artwork_storage_key.as_deref() {
+                Some(key) => upsert_artwork_asset(&mut tx, key, None)
+                    .await
+                    .map_err(db_err)?,
+                None => None,
+            };
             let track_id = sqlx::query_scalar::<_, uuid::Uuid>(
                 r#"
                     INSERT INTO tracks (
                         title, artist_id, album_id, duration_ms,
-                        license_id, is_explicit, artwork_storage_key,
+                        license_id, is_explicit, artwork_storage_key, artwork_id,
                         visibility, ingest_status
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'quarantined', 'quarantined')
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'quarantined', 'quarantined')
                     RETURNING id
                 "#,
             )
@@ -618,6 +663,7 @@ impl CatalogIngest for PgCatalogRepository {
             .bind(license_id)
             .bind(track.is_explicit)
             .bind(&track.artwork_storage_key)
+            .bind(track_artwork_id)
             .fetch_one(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -732,12 +778,15 @@ impl DiscoveryRepository for PgCatalogRepository {
                     al.title AS album_title,
                     t.duration_ms AS track_duration_ms,
                     t.is_explicit AS track_explicit,
-                    COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                    COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                     aa.content_type AS asset_content_type,
                     aa.size_bytes AS asset_size_bytes
                 FROM accessible t
                 JOIN artists a ON t.artist_id = a.id
                 JOIN albums al ON t.album_id = al.id
+                LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+                LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
                 {REPRESENTATIVE_ASSET_JOIN}
                 ORDER BY t.daily_rank, t.id
                 "#
@@ -758,7 +807,8 @@ impl DiscoveryRepository for PgCatalogRepository {
                 album_title,
                 track_duration_ms,
                 track_explicit,
-                artwork_storage_key,
+                artwork_id,
+                artwork_content_hash,
                 asset_content_type,
                 asset_size_bytes
             FROM mv_discovery_pool
@@ -780,12 +830,15 @@ impl DiscoveryRepository for PgCatalogRepository {
                     al.title         AS album_title,
                     t.duration_ms    AS track_duration_ms,
                     t.is_explicit    AS track_explicit,
-                    COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                    COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                     aa.content_type  AS asset_content_type,
                     aa.size_bytes    AS asset_size_bytes
                 FROM tracks t
                 JOIN artists a     ON t.artist_id = a.id
                 JOIN albums al     ON t.album_id = al.id
+                LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+                LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
                 {REPRESENTATIVE_ASSET_JOIN}
                 WHERE t.is_explicit = FALSE
                   AND t.visibility = 'release_safe'
@@ -1158,13 +1211,16 @@ impl PlaybackHistoryRepository for PgPlaybackHistoryRepository {
                     al.title AS album_title,
                     t.duration_ms AS track_duration_ms,
                     t.is_explicit AS track_explicit,
-                    COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                    COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                     aa.content_type AS asset_content_type,
                     aa.size_bytes AS asset_size_bytes
                 FROM playback_history ph
                 JOIN tracks t ON ph.track_id = t.id
                 JOIN artists a ON t.artist_id = a.id
                 JOIN albums al ON t.album_id = al.id
+                LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+                LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
                 {REPRESENTATIVE_ASSET_JOIN}
                 WHERE ph.profile_id = $1
                   AND t.ingest_status = 'ready'
@@ -1344,7 +1400,8 @@ impl LibraryRepository for PgLibraryRepository {
                 al.title         AS album_title,
                 t.duration_ms    AS track_duration_ms,
                 t.is_explicit    AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type  AS asset_content_type,
                 aa.size_bytes    AS asset_size_bytes,
                 (EXTRACT(EPOCH FROM pli.added_at) * 1000)::bigint AS saved_at_epoch_ms
@@ -1352,6 +1409,8 @@ impl LibraryRepository for PgLibraryRepository {
             JOIN tracks t      ON pli.track_id = t.id
             JOIN artists a     ON t.artist_id = a.id
             JOIN albums al     ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE pli.profile_id = $1
               AND t.ingest_status = 'ready'
@@ -1536,7 +1595,8 @@ impl LikeRepository for PgLikeRepository {
                 al.title         AS album_title,
                 t.duration_ms    AS track_duration_ms,
                 t.is_explicit    AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type  AS asset_content_type,
                 aa.size_bytes    AS asset_size_bytes,
                 (EXTRACT(EPOCH FROM ptl.liked_at) * 1000)::bigint AS liked_at_epoch_ms
@@ -1544,6 +1604,8 @@ impl LikeRepository for PgLikeRepository {
             JOIN tracks t      ON ptl.track_id = t.id
             JOIN artists a     ON t.artist_id = a.id
             JOIN albums al     ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE ptl.profile_id = $1
               AND t.ingest_status = 'ready'
@@ -1947,13 +2009,16 @@ impl PlaylistRepository for PgPlaylistRepository {
                 al.title              AS album_title,
                 t.duration_ms         AS track_duration_ms,
                 t.is_explicit         AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type       AS asset_content_type,
                 aa.size_bytes         AS asset_size_bytes
             FROM profile_playlist_tracks ppt
             JOIN tracks t      ON ppt.track_id = t.id
             JOIN artists a     ON t.artist_id = a.id
             JOIN albums al     ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE ppt.playlist_id = $1 AND ppt.track_id = $2
               AND t.ingest_status = 'ready'
@@ -2136,13 +2201,16 @@ impl PlaylistRepository for PgPlaylistRepository {
                 al.title         AS album_title,
                 t.duration_ms    AS track_duration_ms,
                 t.is_explicit    AS track_explicit,
-                COALESCE(t.artwork_storage_key, al.artwork_storage_key) AS artwork_storage_key,
+                COALESCE(t_art.id, al_art.id) AS artwork_id,
+                COALESCE(t_art.checksum_sha256, al_art.checksum_sha256) AS artwork_content_hash,
                 aa.content_type  AS asset_content_type,
                 aa.size_bytes    AS asset_size_bytes
             FROM profile_playlist_tracks ppt
             JOIN tracks t      ON ppt.track_id = t.id
             JOIN artists a     ON t.artist_id = a.id
             JOIN albums al     ON t.album_id = al.id
+            LEFT JOIN artwork_assets t_art ON t.artwork_id = t_art.id
+            LEFT JOIN artwork_assets al_art ON al.artwork_id = al_art.id
             {REPRESENTATIVE_ASSET_JOIN}
             WHERE ppt.playlist_id = $1
               AND t.ingest_status = 'ready'

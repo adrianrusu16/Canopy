@@ -103,7 +103,7 @@ async fn nginx_serves_ranges_and_rechecks_revoked_policy() {
     use canopy_core::StreamAudience;
     use canopy_server::{
         jade_store::PgPlayableAssetRepository,
-        stream::{StreamAuthorizer, StreamTokenCodec, serve_stream_auth, stream_auth_router},
+        stream::{ArtworkAuthorizer, StreamAuthorizer, StreamTokenCodec, serve_stream_auth, stream_auth_router},
     };
 
     let database_url =
@@ -116,14 +116,15 @@ async fn nginx_serves_ranges_and_rechecks_revoked_policy() {
     let (track_id, asset_id) = seed_public_stream_asset(&pool).await;
     let repository = Arc::new(PgPlayableAssetRepository::new(pool.clone()));
     let codec = Arc::new(StreamTokenCodec::new(STREAM_SECRET).unwrap());
-    let authorizer = Arc::new(StreamAuthorizer::new(codec.clone(), repository));
+    let authorizer = Arc::new(StreamAuthorizer::new(codec.clone(), repository.clone()));
+    let artwork_authorizer = Arc::new(ArtworkAuthorizer::new(repository));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:18081")
         .await
         .unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_stream_auth(
         listener,
-        stream_auth_router(authorizer),
+        stream_auth_router(authorizer, artwork_authorizer),
         async {
             let _ = shutdown_rx.await;
         },

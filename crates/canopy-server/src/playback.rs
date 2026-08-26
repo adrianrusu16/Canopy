@@ -211,6 +211,14 @@ mod tests {
         ) -> CanopyResult<Option<AuthorizedStreamAsset>> {
             Ok(None)
         }
+
+        async fn authorize_artwork(
+            &self,
+            _artwork_id: &str,
+            _content_hash: &str,
+        ) -> CanopyResult<Option<canopy_core::AuthorizedArtworkAsset>> {
+            Ok(None)
+        }
     }
 
     fn asset(track: &str, codec: &str, _legacy_key: &str) -> PlayableAsset {

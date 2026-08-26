@@ -9,6 +9,8 @@ use canopy_core::{
     CanopyError, CanopyResult, MediaImportRepository, PendingImportOutcome, PendingMediaImport,
 };
 
+use super::pg_artwork::upsert_artwork_asset;
+
 #[derive(Clone)]
 pub struct PgMediaImportRepository {
     pool: Arc<sqlx::PgPool>,
@@ -120,14 +122,25 @@ impl MediaImportRepository for PgMediaImportRepository {
             .map_err(db_err)?,
         };
 
+        let artwork_id = match pending.artwork_storage_key.as_deref() {
+            Some(key) => upsert_artwork_asset(
+                &mut tx,
+                key,
+                pending.artwork_checksum_sha256.as_deref(),
+            )
+            .await
+            .map_err(db_err)?,
+            None => None,
+        };
+
         sqlx::query(
             r#"
                 INSERT INTO tracks (
                     id, title, artist_id, album_id, duration_ms,
-                    artwork_storage_key, visibility, ingest_status,
+                    artwork_storage_key, artwork_id, visibility, ingest_status,
                     owner_profile_id, ingest_source
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, 'personal', 'pending', $7, 'local_admin')
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'personal', 'pending', $8, 'local_admin')
             "#,
         )
         .bind(track_id)
@@ -136,6 +149,7 @@ impl MediaImportRepository for PgMediaImportRepository {
         .bind(album_id)
         .bind(duration_ms)
         .bind(&pending.artwork_storage_key)
+        .bind(artwork_id)
         .bind(owner_profile_id)
         .execute(&mut *tx)
         .await

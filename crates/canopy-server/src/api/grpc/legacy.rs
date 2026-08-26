@@ -116,7 +116,10 @@ fn to_proto_item(item: DomainMediaItem) -> ProtoMediaItem {
         title: item.title,
         artist: item.artist,
         album: item.album,
-        artwork_uri: item.artwork_uri,
+        artwork_uri: item
+            .artwork
+            .map(|artwork| artwork.id)
+            .unwrap_or_default(),
         duration_ms: item.duration_ms,
         bitrate_kbps: item.bitrate_kbps,
         mime_type: item.mime_type,

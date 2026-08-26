@@ -26,6 +26,7 @@ fn audited_v1_common_messages_have_platform_neutral_shapes() {
         explicit: false,
         artwork: Some(ArtworkRef {
             id: "artwork-1".into(),
+            content_hash: "a".repeat(64),
         }),
     };
     let playback = ResolvePlaybackRequest {

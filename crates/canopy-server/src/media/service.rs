@@ -136,6 +136,7 @@ impl MediaImportService {
             album: inspected.album,
             duration_ms: inspected.duration_ms,
             artwork_storage_key: staged.artwork_storage_key.clone(),
+            artwork_checksum_sha256: staged.artwork_checksum_sha256.clone(),
             audio: AudioAsset {
                 track_id: track_id.clone(),
                 codec: "mp3".into(),

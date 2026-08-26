@@ -14,17 +14,27 @@ use axum::{
 use canopy_core::CanopyError;
 use tokio::net::TcpListener;
 
-use super::StreamAuthorizer;
+use super::{ArtworkAuthorizer, StreamAuthorizer};
 
 const TOKEN_HEADER: &str = "x-canopy-stream-token";
 const ORIGINAL_URI_HEADER: &str = "x-canopy-original-uri";
 const INTERNAL_REDIRECT_HEADER: &str = "x-accel-redirect";
 const CONTENT_TYPE_HINT_HEADER: &str = "x-canopy-content-type";
 
-pub fn stream_auth_router(authorizer: Arc<StreamAuthorizer>) -> Router {
+#[derive(Clone)]
+struct AuthState {
+    stream: Arc<StreamAuthorizer>,
+    artwork: Arc<ArtworkAuthorizer>,
+}
+
+pub fn stream_auth_router(
+    stream: Arc<StreamAuthorizer>,
+    artwork: Arc<ArtworkAuthorizer>,
+) -> Router {
     Router::new()
         .route("/internal/stream/authorize", get(authorize_stream))
-        .with_state(authorizer)
+        .route("/internal/artwork/authorize", get(authorize_artwork))
+        .with_state(AuthState { stream, artwork })
 }
 
 pub async fn serve_stream_auth(
@@ -38,14 +48,14 @@ pub async fn serve_stream_auth(
 }
 
 async fn authorize_stream(
-    State(authorizer): State<Arc<StreamAuthorizer>>,
+    State(state): State<AuthState>,
     headers: HeaderMap,
 ) -> Response {
     let Some(token) = stream_token(&headers) else {
         return forbidden();
     };
 
-    match authorizer.authorize(token, now_epoch_ms()).await {
+    match state.stream.authorize(token, now_epoch_ms()).await {
         Ok(grant) => {
             let Ok(internal_uri) = HeaderValue::from_str(&grant.internal_uri) else {
                 return unavailable();
@@ -74,6 +84,65 @@ async fn authorize_stream(
         ) => forbidden(),
         Err(CanopyError::Storage(_) | CanopyError::Internal(_)) => unavailable(),
     }
+}
+
+
+async fn authorize_artwork(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((artwork_id, content_hash)) = artwork_from_headers(&headers) else {
+        return forbidden();
+    };
+
+    match state.artwork.authorize(artwork_id, content_hash).await {
+        Ok(grant) => {
+            let Ok(internal_uri) = HeaderValue::from_str(&grant.internal_uri) else {
+                return unavailable();
+            };
+            let Ok(content_type) = HeaderValue::from_str(&grant.content_type) else {
+                return unavailable();
+            };
+
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response
+                .headers_mut()
+                .insert(INTERNAL_REDIRECT_HEADER, internal_uri);
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE_HINT_HEADER, content_type);
+            response.headers_mut().remove(header::CONTENT_TYPE);
+            response
+        }
+        Err(
+            CanopyError::Unauthenticated(_)
+            | CanopyError::InvalidArgument(_)
+            | CanopyError::FailedPrecondition(_)
+            | CanopyError::Aborted(_)
+            | CanopyError::RateLimited(_)
+            | CanopyError::NotFound { .. },
+        ) => forbidden(),
+        Err(CanopyError::Storage(_) | CanopyError::Internal(_)) => unavailable(),
+    }
+}
+
+fn artwork_from_headers(headers: &HeaderMap) -> Option<(&str, &str)> {
+    headers
+        .get(ORIGINAL_URI_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(artwork_from_original_uri)
+}
+
+fn artwork_from_original_uri(original_uri: &str) -> Option<(&str, &str)> {
+    let path = original_uri.strip_prefix("/artwork/")?;
+    let (artwork_id, content_hash) = path.split_once('/')?;
+    if artwork_id.is_empty()
+        || content_hash.is_empty()
+        || content_hash.bytes().any(|byte| matches!(byte, b'/' | b'?' | b'#'))
+    {
+        return None;
+    }
+    Some((artwork_id, content_hash))
 }
 
 fn stream_token(headers: &HeaderMap) -> Option<&str> {
@@ -167,15 +236,22 @@ mod tests {
         ) -> CanopyResult<Option<AuthorizedStreamAsset>> {
             self.result.lock().unwrap().take().unwrap()
         }
+
+        async fn authorize_artwork(
+            &self,
+            _artwork_id: &str,
+            _content_hash: &str,
+        ) -> CanopyResult<Option<canopy_core::AuthorizedArtworkAsset>> {
+            Ok(None)
+        }
     }
 
     fn router(result: CanopyResult<Option<AuthorizedStreamAsset>>) -> (Router, StreamTokenCodec) {
         let codec = StreamTokenCodec::new(SECRET).unwrap();
-        let authorizer = StreamAuthorizer::new(
-            Arc::new(codec.clone()),
-            Arc::new(FakeRepository::new(result)),
-        );
-        (stream_auth_router(Arc::new(authorizer)), codec)
+        let assets = Arc::new(FakeRepository::new(result));
+        let stream = StreamAuthorizer::new(Arc::new(codec.clone()), assets.clone());
+        let artwork = ArtworkAuthorizer::new(assets);
+        (stream_auth_router(Arc::new(stream), Arc::new(artwork)), codec)
     }
 
     fn request(token: Option<&str>) -> Request<Body> {

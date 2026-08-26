@@ -109,7 +109,7 @@ pub struct StagedMedia {
     pub audio_storage_key: String,
     pub artwork_storage_key: Option<String>,
     audio_checksum_sha256: String,
-    artwork_checksum_sha256: Option<String>,
+    pub artwork_checksum_sha256: Option<String>,
 }
 
 impl StagedMedia {

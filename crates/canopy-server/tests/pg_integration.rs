@@ -2365,6 +2365,7 @@ fn pending_local_import(owner_profile_id: &str, checksum: &str) -> PendingMediaI
         album: "Local Import Album".into(),
         duration_ms: 1_000,
         artwork_storage_key: Some(format!("artwork/aa/bb/{checksum}.jpg")),
+        artwork_checksum_sha256: Some(checksum.clone()),
         audio: AudioAsset {
             track_id,
             codec: "mp3".into(),

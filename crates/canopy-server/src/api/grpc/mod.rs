@@ -108,8 +108,15 @@ pub(crate) fn to_track_summary(item: MediaItem) -> TrackSummary {
         id: String::new(),
         title: item.album,
     });
-    let artwork = (!item.artwork_uri.is_empty()).then_some(ArtworkRef {
-        id: item.artwork_uri,
+    let artwork = item.artwork.and_then(|artwork| {
+        if artwork.id.is_empty() || artwork.content_hash.is_empty() {
+            None
+        } else {
+            Some(ArtworkRef {
+                id: artwork.id,
+                content_hash: artwork.content_hash,
+            })
+        }
     });
 
     TrackSummary {
@@ -231,7 +238,7 @@ const LEGACY_ADAPTER_PATH: &str = "legacy.rs";
 
 #[cfg(test)]
 mod tests {
-    use canopy_core::MediaItem;
+    use canopy_core::{MediaArtwork, MediaItem};
     use canopy_proto::PageRequest;
 
     use super::*;
@@ -247,14 +254,20 @@ mod tests {
             title: "Track".into(),
             artist: "Artist".into(),
             album: "Album".into(),
-            artwork_uri: "artwork/track.jpg".into(),
+            artwork: Some(MediaArtwork {
+                id: "018f0000-0000-7000-8000-0000000000aa".into(),
+                content_hash: "a".repeat(64),
+            }),
             duration_ms: -1,
             is_explicit: true,
             ..MediaItem::default()
         });
 
         assert_eq!(summary.duration_ms, 0);
-        assert_eq!(summary.artwork.unwrap().id, "artwork/track.jpg");
+        assert_eq!(
+            summary.artwork.unwrap().id,
+            "018f0000-0000-7000-8000-0000000000aa"
+        );
     }
 
     #[test]

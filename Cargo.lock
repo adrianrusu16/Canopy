@@ -1507,9 +1507,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "pandawave_canopy-api_community_neoeinstein-prost"
-version = "0.5.0-00000000000000-af019e2d7fa2.2"
+version = "0.5.0-00000000000000-ff8940d1a15b.2"
 source = "sparse+https://buf.build/gen/cargo/"
-checksum = "48bc07bba50879a6269c2fe02a99b7c1747fcd2a714f152fa0066af99870dcfb"
+checksum = "3bc91b0f1d816797b52927ebbf6d7c8f5b126ecc5c0d763461389f1e7465ce4c"
 dependencies = [
  "prost",
  "prost-types",
@@ -1517,9 +1517,9 @@ dependencies = [
 
 [[package]]
 name = "pandawave_canopy-api_community_neoeinstein-tonic"
-version = "0.5.0-00000000000000-af019e2d7fa2.4"
+version = "0.5.0-00000000000000-ff8940d1a15b.4"
 source = "sparse+https://buf.build/gen/cargo/"
-checksum = "a787a31e3719d067698b8b47ffb5942eb244a60ad8b82e386232135445f5f7a4"
+checksum = "fd9ccc72ffc96b202afb74d99844b7c48bf91a73abddf4dba48a124b7c01d51e"
 dependencies = [
  "pandawave_canopy-api_community_neoeinstein-prost",
  "tonic",

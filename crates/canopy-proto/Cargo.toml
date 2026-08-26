@@ -6,8 +6,8 @@ license.workspace = true
 description = "Canopy facade over the published canopy.v1 gRPC contract."
 
 [dependencies]
-canopy-api-prost = { package = "pandawave_canopy-api_community_neoeinstein-prost", version = "=0.5.0-00000000000000-af019e2d7fa2.2", registry = "buf" }
-canopy-api-tonic = { package = "pandawave_canopy-api_community_neoeinstein-tonic", version = "=0.5.0-00000000000000-af019e2d7fa2.4", registry = "buf" }
+canopy-api-prost = { package = "pandawave_canopy-api_community_neoeinstein-prost", version = "=0.5.0-00000000000000-ff8940d1a15b.2", registry = "buf" }
+canopy-api-tonic = { package = "pandawave_canopy-api_community_neoeinstein-tonic", version = "=0.5.0-00000000000000-ff8940d1a15b.4", registry = "buf" }
 
 [dev-dependencies]
 tonic = { workspace = true }

@@ -12,6 +12,18 @@ use crate::{CanopyError, CanopyResult};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Opaque artwork identity projected to `canopy.v1.ArtworkRef`.
+///
+/// Does not include storage keys or platform URIs. Consumers derive display
+/// URLs from their media origin plus `id` and `content_hash`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaArtwork {
+    /// Stable artwork resource id (`ArtworkRef.id`).
+    pub id: String,
+    /// Lowercase SHA-256 hex of the artwork bytes (`ArtworkRef.content_hash`).
+    pub content_hash: String,
+}
+
 /// A single browsable / playable catalog entry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaItem {
@@ -23,8 +35,8 @@ pub struct MediaItem {
     pub artist: String,
     /// Album the track belongs to.
     pub album: String,
-    /// Artwork URI the Android resolver understands.
-    pub artwork_uri: String,
+    /// Optional artwork identity (track override, else album).
+    pub artwork: Option<MediaArtwork>,
     /// Duration in milliseconds (`-1` if unknown).
     pub duration_ms: i64,
     /// Bitrate in kbps.
@@ -221,6 +233,17 @@ pub struct AuthorizedStreamAsset {
     /// Validated relative key within the managed media library.
     pub storage_key: String,
     /// MIME type served for the asset.
+    pub content_type: String,
+}
+
+/// Storage metadata returned only after artwork identity + content hash match.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedArtworkAsset {
+    /// Stable artwork asset identifier.
+    pub artwork_id: String,
+    /// Validated relative key within the managed media library.
+    pub storage_key: String,
+    /// MIME type served for the artwork.
     pub content_type: String,
 }
 
@@ -464,6 +487,8 @@ pub struct PendingMediaImport {
     pub duration_ms: u64,
     /// Optional validated relative artwork key in managed storage.
     pub artwork_storage_key: Option<String>,
+    /// Optional lowercase SHA-256 of artwork bytes (from staging when present).
+    pub artwork_checksum_sha256: Option<String>,
     /// Managed MP3 asset metadata.
     pub audio: AudioAsset,
 }

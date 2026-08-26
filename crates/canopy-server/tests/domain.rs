@@ -11,7 +11,7 @@ use canopy_core::{
     UserIdentity,
 };
 use canopy_server::catalog::CatalogService;
-use canopy_server::discovery::DiscoveryService;
+use canopy_server::discovery::{DiscoveryService, FeedChannel};
 use canopy_server::jade_store::{
     InMemoryAudioAssetEntry, InMemoryAudioAssetStore, InMemoryCatalog, InMemoryCatalogEntry,
     InMemoryInstanceSettingsStore, InMemoryLibraryStore, InMemoryPlaylistStore,
@@ -75,6 +75,7 @@ fn pending_media_import_carries_only_managed_metadata() {
         album: "Importer Fixtures".into(),
         duration_ms: 1_000,
         artwork_storage_key: Some("artwork/aa/bb/hash.jpg".into()),
+        artwork_checksum_sha256: None,
         audio: AudioAsset {
             track_id: "018f0000-0000-7000-8000-000000000001".into(),
             codec: "mp3".into(),
@@ -515,6 +516,7 @@ async fn owner_discovery_includes_public_and_owned_personal_tracks() {
     )));
     let feed = discovery
         .feed(
+            FeedChannel::Discovery,
             &TrackAccessScope::Owner {
                 profile_id: "owner-a".into(),
             },
@@ -527,13 +529,9 @@ async fn owner_discovery_includes_public_and_owned_personal_tracks() {
         .await
         .unwrap();
 
-    assert_eq!(
-        feed.items
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["owner-ready", "public-ready"]
-    );
+    let mut ids: Vec<_> = feed.items.iter().map(|item| item.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["owner-ready", "public-ready"]);
 }
 
 #[tokio::test]
@@ -824,8 +822,9 @@ async fn discovery_excludes_recently_played() {
 
 #[tokio::test]
 async fn discovery_spreads_artists() {
-    // Two tracks per artist, interleaved so a naive pass would repeat an
-    // artist; the service must alternate them.
+    // Two tracks per artist. Channel reorder may rearrange the pool; the
+    // service must still avoid consecutive same-artist picks when alternatives
+    // exist.
     let items = vec![
         MediaItem {
             id: "a1".into(),
@@ -842,19 +841,21 @@ async fn discovery_spreads_artists() {
             artist: "B".into(),
             ..MediaItem::default()
         },
+        MediaItem {
+            id: "b2".into(),
+            artist: "B".into(),
+            ..MediaItem::default()
+        },
     ];
     let discovery = DiscoveryService::new(Arc::new(InMemoryCatalog::with_items(items)));
 
     let result = discovery
-        .next(&TrackAccessScope::Public, &[], 3)
+        .next(&TrackAccessScope::Public, &[], 4)
         .await
         .unwrap();
-    assert_eq!(result.items.len(), 3);
+    assert_eq!(result.items.len(), 4);
     for pair in result.items.windows(2) {
-        // Where an alternative exists, neighbours differ in artist.
-        if pair[0].artist == "A" {
-            assert_ne!(pair[0].artist, pair[1].artist);
-        }
+        assert_ne!(pair[0].artist, pair[1].artist);
     }
 }
 
@@ -862,12 +863,29 @@ async fn discovery_spreads_artists() {
 async fn discovery_feed_applies_offset_after_diversification() {
     let discovery = DiscoveryService::new(Arc::new(InMemoryCatalog::with_items(sample_items())));
 
+    let full = discovery
+        .feed(
+            FeedChannel::Discovery,
+            &TrackAccessScope::Public,
+            &[],
+            page(10, 0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full.items.len(), 2);
+
     let result = discovery
-        .feed(&TrackAccessScope::Public, &[], page(1, 1))
+        .feed(
+            FeedChannel::Discovery,
+            &TrackAccessScope::Public,
+            &[],
+            page(1, 1),
+        )
         .await
         .unwrap();
 
-    assert_eq!(result.items[0].id, "trk_2");
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].id, full.items[1].id);
     assert!(!result.has_more);
 }
 

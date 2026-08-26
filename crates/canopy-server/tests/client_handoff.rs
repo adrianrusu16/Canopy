@@ -3,12 +3,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const EXPECTED_BSR_MODULE: &str = "buf.build/pandawave/canopy-api";
-const EXPECTED_RELEASE: &str = "v0.2.0";
-const EXPECTED_COMMIT: &str = "af019e2d7fa245a2a7d9fc21a4dd9afa";
+const EXPECTED_RELEASE: &str = "v0.3.0";
+const EXPECTED_COMMIT: &str = "ff8940d1a15b4034bb430fd47dd45cdc";
 const EXPECTED_PROST_PACKAGE: &str = "pandawave_canopy-api_community_neoeinstein-prost";
-const EXPECTED_PROST_VERSION: &str = "=0.5.0-00000000000000-af019e2d7fa2.2";
+const EXPECTED_PROST_VERSION: &str = "=0.5.0-00000000000000-ff8940d1a15b.2";
 const EXPECTED_TONIC_PACKAGE: &str = "pandawave_canopy-api_community_neoeinstein-tonic";
-const EXPECTED_TONIC_VERSION: &str = "=0.5.0-00000000000000-af019e2d7fa2.4";
+const EXPECTED_TONIC_VERSION: &str = "=0.5.0-00000000000000-ff8940d1a15b.4";
 
 const FORBIDDEN_KEYS: &[&str] = &[
     "database_url",

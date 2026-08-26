@@ -89,7 +89,10 @@ fn demo_catalog() -> InMemoryCatalog {
         title: "Demo Track".into(),
         artist: "Demo Artist".into(),
         album: "Demo Album".into(),
-        artwork_uri: "content://com.adrianrusu.mediaapp.audio/artwork/demo-1".into(),
+        artwork: Some(canopy_core::MediaArtwork {
+            id: "demo-artwork-1".into(),
+            content_hash: "0".repeat(64),
+        }),
         duration_ms: 240_000,
         bitrate_kbps: 320,
         mime_type: "audio/mp4".into(),
@@ -337,8 +340,12 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             ..ResolverConfig::default()
         },
     );
-    let authorizer = Arc::new(stream::StreamAuthorizer::new(tokens, playable_asset_repo));
-    let stream_router = stream::stream_auth_router(authorizer);
+    let authorizer = Arc::new(stream::StreamAuthorizer::new(
+        tokens,
+        playable_asset_repo.clone(),
+    ));
+    let artwork_authorizer = Arc::new(stream::ArtworkAuthorizer::new(playable_asset_repo));
+    let stream_router = stream::stream_auth_router(authorizer, artwork_authorizer);
     let stream_listener = tokio::net::TcpListener::bind(config.stream.auth_addr).await?;
 
     // Health service is already created above (with or without DB pool).

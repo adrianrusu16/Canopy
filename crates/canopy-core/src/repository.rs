@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use crate::access::TrackAccessScope;
 use crate::error::CanopyResult;
 use crate::model::{
-    AudioAsset, AuthorizedStreamAsset, LibraryItem, LikedTrackPage, MediaItem, MediaPage, Page,
+    AudioAsset, AuthorizedArtworkAsset, AuthorizedStreamAsset, LibraryItem, LikedTrackPage,
+    MediaItem, MediaPage, Page,
     PendingImportOutcome, PendingMediaImport, PlayableAsset, PlaybackHistoryEvent,
     PlaybackHistoryPage, Playlist, PlaylistPage, PlaylistTrackItem, PlaylistTrackPage,
     ProfilePreferences, ProviderTrack, SavedTrackPage, StreamAudience, TrackLike, UserProfile,
@@ -90,6 +91,13 @@ pub trait PlayableAssetRepository: Send + Sync {
         asset_id: &str,
         audience: StreamAudience,
     ) -> CanopyResult<Option<AuthorizedStreamAsset>>;
+
+    /// Looks up artwork by opaque id + content hash before exposing storage metadata.
+    async fn authorize_artwork(
+        &self,
+        artwork_id: &str,
+        content_hash: &str,
+    ) -> CanopyResult<Option<AuthorizedArtworkAsset>>;
 }
 
 /// Persistence of durable logged-in user profiles.

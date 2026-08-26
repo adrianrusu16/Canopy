@@ -29,8 +29,9 @@ pub use identity_repository::{
     StoredAuthenticatedSession,
 };
 pub use model::{
-    AudioAsset, AuthorizedStreamAsset, IngestStatus, LibraryItem, LikedTrackItem, LikedTrackPage,
-    MediaItem, MediaPage, MediaVisibility, Page, PageTokenCodec, PendingImportOutcome,
+    AudioAsset, AuthorizedArtworkAsset, AuthorizedStreamAsset, IngestStatus, LibraryItem,
+    LikedTrackItem, LikedTrackPage, MediaArtwork, MediaItem, MediaPage, MediaVisibility, Page,
+    PageTokenCodec, PendingImportOutcome,
     PendingMediaImport, PlayableAsset, PlaybackHistoryEntry, PlaybackHistoryEvent,
     PlaybackHistoryPage, PlaybackSource, Playlist, PlaylistPage, PlaylistTrack, PlaylistTrackItem,
     PlaylistTrackPage, ProfilePreferences, ProviderAudioAsset, ProviderLicense, ProviderTrack,

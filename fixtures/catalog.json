@@ -55,6 +55,843 @@
       ],
       "artwork_storage_key": "artwork/tracks/musopen/vivaldi-four-seasons-spring.png",
       "album_artwork_storage_key": "artwork/albums/musopen/vivaldi-four-seasons.png"
+    },
+    {
+      "provider_id": "personal-001",
+      "provider": "fixture",
+      "title": "A Place for My Head",
+      "artist": "Linkin Park",
+      "album": "Hybrid Theory",
+      "release_year": 2000,
+      "duration_ms": 185051,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/linkin-park-a-place-for-my-head.mp3",
+          "size_bytes": 2944702,
+          "checksum_sha256": "c6e8dddfb4be2c43ac1a2d30053dec54906cc6f9191df4902fabfca6a73c7c45",
+          "duration_ms": 185051
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/linkin-park-a-place-for-my-head.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/hybrid-theory.jpg"
+    },
+    {
+      "provider_id": "personal-002",
+      "provider": "fixture",
+      "title": "Bring Me to Life",
+      "artist": "Eric Cartman",
+      "album": "Unofficial cover",
+      "release_year": 2003,
+      "duration_ms": 228023,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/eric-cartman-bring-me-to-life.mp3",
+          "size_bytes": 3344685,
+          "checksum_sha256": "46f78d51d6f1fceb2aea86858584286779a583031b47fee149a9448100a06c11",
+          "duration_ms": 228023
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/eric-cartman-bring-me-to-life.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/fallen.jpg"
+    },
+    {
+      "provider_id": "personal-003",
+      "provider": "fixture",
+      "title": "Going Under",
+      "artist": "Evanescence",
+      "album": "Fallen",
+      "release_year": 2003,
+      "duration_ms": 218253,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/evanescence-going-under.mp3",
+          "size_bytes": 3503001,
+          "checksum_sha256": "1f7ddf8e0c7d630bf8ba301462d45952f39078d2649265f8d3a10640a6b7a120",
+          "duration_ms": 218253
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/evanescence-going-under.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/fallen.jpg"
+    },
+    {
+      "provider_id": "personal-004",
+      "provider": "fixture",
+      "title": "Blind",
+      "artist": "Korn",
+      "album": "Korn",
+      "release_year": 1994,
+      "duration_ms": 256313,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/korn-blind.mp3",
+          "size_bytes": 6152287,
+          "checksum_sha256": "b4dc3a5fe74182b8f5a9d186e5a75e2ac17707020212bad783fa273d66446a27",
+          "duration_ms": 256313
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/korn-blind.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/korn.jpg"
+    },
+    {
+      "provider_id": "personal-005",
+      "provider": "fixture",
+      "title": "Did My Time",
+      "artist": "Korn",
+      "album": "Take a Look in the Mirror",
+      "release_year": 2003,
+      "duration_ms": 240509,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/korn-did-my-time.mp3",
+          "size_bytes": 5772989,
+          "checksum_sha256": "ca60272073c2ac33d4ec45c72f00a7e1c888bbebc50580012aa9d86b34f1e9d0",
+          "duration_ms": 240509
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/korn-did-my-time.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/take-a-look-in-the-mirror.jpg"
+    },
+    {
+      "provider_id": "personal-006",
+      "provider": "fixture",
+      "title": "Freak on a Leash",
+      "artist": "Korn",
+      "album": "Follow the Leader",
+      "release_year": 1998,
+      "duration_ms": 255480,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/korn-freak-on-a-leash.mp3",
+          "size_bytes": 4087917,
+          "checksum_sha256": "a20ae308451354513147d9bed08dcadab22eb1215838d6e251e87e5e893a5748",
+          "duration_ms": 255480
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/korn-freak-on-a-leash.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/follow-the-leader.jpg"
+    },
+    {
+      "provider_id": "personal-007",
+      "provider": "fixture",
+      "title": "Liar",
+      "artist": "Korn",
+      "album": "See You on the Other Side",
+      "release_year": 2005,
+      "duration_ms": 254824,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/korn-liar.mp3",
+          "size_bytes": 6116551,
+          "checksum_sha256": "04d119d2a8d95406aac8277f7cfbbd2280b9b4ce3e6c996f3caf8b7732d1b58b",
+          "duration_ms": 254824
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/korn-liar.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/see-you-on-the-other-side.jpg"
+    },
+    {
+      "provider_id": "personal-008",
+      "provider": "fixture",
+      "title": "Die with a Smile",
+      "artist": "Lady Gaga & Bruno Mars",
+      "album": "MAYHEM",
+      "release_year": 2024,
+      "duration_ms": 252395,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/lady-gaga-bruno-mars-die-with-a-smile.mp3",
+          "size_bytes": 6058246,
+          "checksum_sha256": "b041c5c88a3c1f694beab06faee54cc342716852c31c6c7d9bd1640c6b1f1a41",
+          "duration_ms": 252395
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/lady-gaga-bruno-mars-die-with-a-smile.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/mayhem.jpg"
+    },
+    {
+      "provider_id": "personal-009",
+      "provider": "fixture",
+      "title": "Lost",
+      "artist": "Linkin Park",
+      "album": "Meteora 20",
+      "release_year": 2023,
+      "duration_ms": 198165,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/linkin-park-lost.mp3",
+          "size_bytes": 3099591,
+          "checksum_sha256": "31711239746c1c1104e3ee21f0b3ded7b4196625e0ee631b23903c8841ffc4a2",
+          "duration_ms": 198165
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/linkin-park-lost.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/meteora-20.jpg"
+    },
+    {
+      "provider_id": "personal-010",
+      "provider": "fixture",
+      "title": "Points of Authority",
+      "artist": "Linkin Park",
+      "album": "Hybrid Theory",
+      "release_year": 2000,
+      "duration_ms": 200280,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/linkin-park-points-of-authority.mp3",
+          "size_bytes": 4807341,
+          "checksum_sha256": "6e0ddf66b79c3413717110353db41785f982d7cbce061f126fe11091d78b8d9d",
+          "duration_ms": 200280
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/linkin-park-points-of-authority.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/hybrid-theory.jpg"
+    },
+    {
+      "provider_id": "personal-011",
+      "provider": "fixture",
+      "title": "APT.",
+      "artist": "ROSÉ & Bruno Mars",
+      "album": "rosie",
+      "release_year": 2024,
+      "duration_ms": 173424,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/rose-bruno-mars-apt.mp3",
+          "size_bytes": 4162797,
+          "checksum_sha256": "39a6dcfff01000232b0be64ff16e0c0324356aee086272a250daabdc719d5454",
+          "duration_ms": 173424
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/rose-bruno-mars-apt.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/rosie.jpg"
+    },
+    {
+      "provider_id": "personal-012",
+      "provider": "fixture",
+      "title": "Custer",
+      "artist": "Slipknot",
+      "album": ".5: The Gray Chapter",
+      "release_year": 2014,
+      "duration_ms": 254537,
+      "is_explicit": true,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-custer.mp3",
+          "size_bytes": 6109655,
+          "checksum_sha256": "1dcaa9311178e62ab8e20bfbbed8026b0a4349cbed249a000df2dee16d7bb20a",
+          "duration_ms": 254537
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-custer.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/the-gray-chapter.jpg"
+    },
+    {
+      "provider_id": "personal-013",
+      "provider": "fixture",
+      "title": "Duality",
+      "artist": "Slipknot",
+      "album": "Vol. 3: (The Subliminal Verses)",
+      "release_year": 2004,
+      "duration_ms": 214674,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-duality.mp3",
+          "size_bytes": 3565266,
+          "checksum_sha256": "368e9735232f30651ab8e5d3cea6bfd9e74f9ca1e7057802211bb80e1d9751cf",
+          "duration_ms": 214674
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-duality.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/vol-3-the-subliminal-verses.jpg"
+    },
+    {
+      "provider_id": "personal-014",
+      "provider": "fixture",
+      "title": "Eyeless",
+      "artist": "Slipknot",
+      "album": "Slipknot",
+      "release_year": 1999,
+      "duration_ms": 236400,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-eyeless.mp3",
+          "size_bytes": 3782637,
+          "checksum_sha256": "91ced8c70e844145f5fe9ef6bb072391cc826a1b39758978b1455cc3b58f6c89",
+          "duration_ms": 236400
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-eyeless.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/slipknot.jpg"
+    },
+    {
+      "provider_id": "personal-015",
+      "provider": "fixture",
+      "title": "Killpop",
+      "artist": "Slipknot",
+      "album": ".5: The Gray Chapter",
+      "release_year": 2014,
+      "duration_ms": 245002,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-killpop.mp3",
+          "size_bytes": 5880822,
+          "checksum_sha256": "8309355e6ebdd0872141808598c050ff59c931825eb1d579443fb098a88df108",
+          "duration_ms": 245002
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-killpop.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/the-gray-chapter.jpg"
+    },
+    {
+      "provider_id": "personal-016",
+      "provider": "fixture",
+      "title": "People = Shit",
+      "artist": "Slipknot",
+      "album": "Iowa",
+      "release_year": 2001,
+      "duration_ms": 215928,
+      "is_explicit": true,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-people-equals-shit.mp3",
+          "size_bytes": 5183039,
+          "checksum_sha256": "1fb3bb617618353b13c7bc79f8b4e76687979c41ead454e6b413bf4098b02cd2",
+          "duration_ms": 215928
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-people-equals-shit.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/iowa.jpg"
+    },
+    {
+      "provider_id": "personal-017",
+      "provider": "fixture",
+      "title": "Psychosocial",
+      "artist": "Slipknot",
+      "album": "All Hope Is Gone",
+      "release_year": 2008,
+      "duration_ms": 302420,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-psychosocial.mp3",
+          "size_bytes": 7258834,
+          "checksum_sha256": "b22bc1af11b3e4af2d4c83e9bcecee58e91304f921de66de735466bea215327c",
+          "duration_ms": 302420
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-psychosocial.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/all-hope-is-gone.jpg"
+    },
+    {
+      "provider_id": "personal-018",
+      "provider": "fixture",
+      "title": "Snuff",
+      "artist": "Slipknot",
+      "album": "All Hope Is Gone",
+      "release_year": 2008,
+      "duration_ms": 372924,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-snuff.mp3",
+          "size_bytes": 8950942,
+          "checksum_sha256": "d593200b3281d78410985244a4a515b3041a41d2dfa98641a97b436d5b91d020",
+          "duration_ms": 372924
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-snuff.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/all-hope-is-gone.jpg"
+    },
+    {
+      "provider_id": "personal-019",
+      "provider": "fixture",
+      "title": "Solway Firth",
+      "artist": "Slipknot",
+      "album": "We Are Not Your Kind",
+      "release_year": 2019,
+      "duration_ms": 365819,
+      "is_explicit": true,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-solway-firth.mp3",
+          "size_bytes": 5853446,
+          "checksum_sha256": "55c8db1f755a737b179dfd6f964c2ad9d5c8504a27b6c22a0d7884fa4a48fd76",
+          "duration_ms": 365819
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-solway-firth.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/we-are-not-your-kind.jpg"
+    },
+    {
+      "provider_id": "personal-020",
+      "provider": "fixture",
+      "title": "The Blister Exists",
+      "artist": "Slipknot",
+      "album": "Vol. 3: (The Subliminal Verses)",
+      "release_year": 2004,
+      "duration_ms": 320287,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-the-blister-exists.mp3",
+          "size_bytes": 7687660,
+          "checksum_sha256": "69ed75e42c2dff073a39adfa60bbc5c573522cdd050e76cc01be073e224eb24e",
+          "duration_ms": 320287
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-the-blister-exists.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/vol-3-the-subliminal-verses.jpg"
+    },
+    {
+      "provider_id": "personal-021",
+      "provider": "fixture",
+      "title": "The Negative One",
+      "artist": "Slipknot",
+      "album": ".5: The Gray Chapter",
+      "release_year": 2014,
+      "duration_ms": 326583,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-the-negative-one.mp3",
+          "size_bytes": 7838752,
+          "checksum_sha256": "c19c14c68e215d18c79852108e297012b7b4ae5994c6af3c3fc8b4ef2dd00fa8",
+          "duration_ms": 326583
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-the-negative-one.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/the-gray-chapter.jpg"
+    },
+    {
+      "provider_id": "personal-022",
+      "provider": "fixture",
+      "title": "Unsainted",
+      "artist": "Slipknot",
+      "album": "We Are Not Your Kind",
+      "release_year": 2019,
+      "duration_ms": 285231,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-unsainted.mp3",
+          "size_bytes": 4464298,
+          "checksum_sha256": "9d606602f494226bd9490e8e446239a7d57808b815413f90500ae3bfac125c79",
+          "duration_ms": 285231
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-unsainted.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/we-are-not-your-kind.jpg"
+    },
+    {
+      "provider_id": "personal-023",
+      "provider": "fixture",
+      "title": "Vermilion Pt. 2",
+      "artist": "Slipknot",
+      "album": "Vol. 3: (The Subliminal Verses)",
+      "release_year": 2004,
+      "duration_ms": 232176,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/slipknot-vermilion-pt-2.mp3",
+          "size_bytes": 5572845,
+          "checksum_sha256": "c5e57ffca6f6f97bc0c7b28b31e8c1fd42fda10b0b3fa6774e281617198c40e6",
+          "duration_ms": 232176
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/slipknot-vermilion-pt-2.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/vol-3-the-subliminal-verses.jpg"
+    },
+    {
+      "provider_id": "personal-024",
+      "provider": "fixture",
+      "title": "Alors on danse",
+      "artist": "Stromae",
+      "album": "Cheese",
+      "release_year": 2010,
+      "duration_ms": 234893,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/stromae-alors-on-danse.mp3",
+          "size_bytes": 5638197,
+          "checksum_sha256": "7ab566d3238d4aef0b6b4adf7d7f491e975a56896b16afe7140868d73a5ed337",
+          "duration_ms": 234893
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/stromae-alors-on-danse.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/cheese.jpg"
+    },
+    {
+      "provider_id": "personal-025",
+      "provider": "fixture",
+      "title": "Aerials",
+      "artist": "System of a Down",
+      "album": "Toxicity",
+      "release_year": 2001,
+      "duration_ms": 243696,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/system-of-a-down-aerials.mp3",
+          "size_bytes": 5849475,
+          "checksum_sha256": "d98b67657a42bab9e2f6e72ffea39390228aace9d98f081baa516bbbfc0eea61",
+          "duration_ms": 243696
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/system-of-a-down-aerials.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/toxicity.jpg"
+    },
+    {
+      "provider_id": "personal-026",
+      "provider": "fixture",
+      "title": "Cigaro",
+      "artist": "System of a Down",
+      "album": "Mezmerize",
+      "release_year": 2005,
+      "duration_ms": 133296,
+      "is_explicit": true,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/system-of-a-down-cigaro.mp3",
+          "size_bytes": 3199725,
+          "checksum_sha256": "272d0e906e9d61c505a8576d80b086238aea7123ab73b279bdd8d2e345f9a2f2",
+          "duration_ms": 133296
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/system-of-a-down-cigaro.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/mezmerize.jpg"
+    },
+    {
+      "provider_id": "personal-027",
+      "provider": "fixture",
+      "title": "Forest",
+      "artist": "System of a Down",
+      "album": "Toxicity",
+      "release_year": 2001,
+      "duration_ms": 240144,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/system-of-a-down-forest.mp3",
+          "size_bytes": 5764212,
+          "checksum_sha256": "2c2b8629661fefd70b4a835a150f1692095cac9e3f4c7de1e91158eb2d6f77eb",
+          "duration_ms": 240144
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/system-of-a-down-forest.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/toxicity.jpg"
+    },
+    {
+      "provider_id": "personal-028",
+      "provider": "fixture",
+      "title": "Lonely Day",
+      "artist": "System of a Down",
+      "album": "Hypnotize",
+      "release_year": 2005,
+      "duration_ms": 171102,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/system-of-a-down-lonely-day.mp3",
+          "size_bytes": 4107213,
+          "checksum_sha256": "8f3a33e91f3834e42e75d6b92f74c1d6eea3fb2adbfb81fd4b4a21dd100c26a6",
+          "duration_ms": 171102
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/system-of-a-down-lonely-day.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/hypnotize.jpg"
+    },
+    {
+      "provider_id": "personal-029",
+      "provider": "fixture",
+      "title": "Toxicity",
+      "artist": "System of a Down",
+      "album": "Toxicity",
+      "release_year": 2001,
+      "duration_ms": 224470,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/system-of-a-down-toxicity.mp3",
+          "size_bytes": 5388048,
+          "checksum_sha256": "4d8c76ff3262201ebdccb73dbde0f01b1275398779119600818b807e35825f22",
+          "duration_ms": 224470
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/system-of-a-down-toxicity.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/toxicity.jpg"
+    },
+    {
+      "provider_id": "personal-030",
+      "provider": "fixture",
+      "title": "Vicinity of Obscenity",
+      "artist": "System of a Down",
+      "album": "Hypnotize",
+      "release_year": 2005,
+      "duration_ms": 171860,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/system-of-a-down-vicinity-of-obscenity.mp3",
+          "size_bytes": 4125394,
+          "checksum_sha256": "f36512fbaf08d57a147a5062801eb9cac06dad6c47f040476074b7789a3bf5b0",
+          "duration_ms": 171860
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/system-of-a-down-vicinity-of-obscenity.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/hypnotize.jpg"
+    },
+    {
+      "provider_id": "personal-031",
+      "provider": "fixture",
+      "title": "The Emptiness Machine",
+      "artist": "Linkin Park",
+      "album": "From Zero",
+      "release_year": 2024,
+      "duration_ms": 200496,
+      "is_explicit": false,
+      "license": {
+        "license_type": "AllRightsReserved",
+        "source_url": "https://example.invalid/local-personal-library",
+        "attribution_text": "Local personal library - not for distribution"
+      },
+      "assets": [
+        {
+          "codec": "mp3",
+          "content_type": "audio/mpeg",
+          "storage_key": "audio/tracks/personal/linkin-park-the-emptiness-machine.mp3",
+          "size_bytes": 4812525,
+          "checksum_sha256": "a49fc65be78421bfa091a304c03587a83130fb17f890c5c2686971a08c1741b6",
+          "duration_ms": 200496
+        }
+      ],
+      "artwork_storage_key": "artwork/tracks/personal/linkin-park-the-emptiness-machine.jpg",
+      "album_artwork_storage_key": "artwork/albums/personal/from-zero.jpg"
     }
   ]
 }

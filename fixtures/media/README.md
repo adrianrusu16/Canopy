@@ -35,3 +35,8 @@ ffmpeg -i fixtures/media/test-tone.mp3 -i fixtures/media/cover.jpg \
 2c92506da715009ab80b900244aba42b935bf5028a424adbb5f1c4a559cac1b3  cover.jpg
 785090597e739d0ec824dc66223d33f26ae4be8da5fc5711f202d5a41dafffb5  cover.png
 ```
+
+## Personal artwork (local only)
+
+Personal cover art lives under `fixtures/media/personal/artwork/` (gitignored with `personal/`).
+Regenerate with `scripts/download-personal-artwork.sh` from Cover Art Archive for local personal use only.

@@ -120,16 +120,19 @@ without a checksum-aware recovery procedure.
 `-- quarantine/
 ```
 
-Storage keys are validated relative paths within the expected media class.
-Nginx receives a read-only mount of library/ and serves files only after Canopy
-authorizes the current capability.
+Storage keys are validated relative paths within the expected media class and
+remain internal. Clients receive opaque `ArtworkRef.id` values and fetch bytes
+from `/artwork/{id}/{content_hash}`; Nginx auth_request looks up `artwork_assets`
+and issues an internal redirect to library/ without exposing storage keys.
+Audio streaming continues to use short-lived `/stream/{capability}` tokens.
 
 ## Current Limitations
 
 - No administrative reconciliation or repair command.
 - No recursive directory import.
 - MP3 is the only accepted source format.
-- Artwork delivery and universal fallback remain incomplete client-facing work.
+- Artwork universal fallback for tracks without cover art is still missing;
+  `ArtworkRef.content_hash` awaits the next published canopy-api SDK bump.
 - Local import is an owner-only administrative path, not a general upload API.
 - RustFS is not an import destination or active playback store.
 

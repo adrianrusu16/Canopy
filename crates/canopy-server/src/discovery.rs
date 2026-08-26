@@ -6,8 +6,10 @@
 //! production design, so the hot path never pays for `ORDER BY random()`).
 //!
 //! This service owns the transport- and backend-agnostic concerns layered on
-//! top of that pool: dropping recently played tracks, spreading items so the
-//! same artist does not play back-to-back, and clamping the page size. Keeping
+//! top of that pool: dropping recently played tracks, applying a
+//! channel-specific deterministic reorder so Discovery / For You /
+//! Recommendations present distinct sequences, spreading items so the same
+//! artist does not play back-to-back, and clamping the page size. Keeping
 //! that logic here means it survives the move from the in-memory prototype to
 //! the real materialized view unchanged.
 
@@ -17,6 +19,28 @@ use std::sync::Arc;
 use canopy_core::{
     CanopyResult, DiscoveryRepository, MediaItem, MediaPage, Page, TrackAccessScope,
 };
+use sha2::{Digest, Sha256};
+
+/// Named feed surface that shares the discovery pool but uses its own order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeedChannel {
+    /// Canonical discovery shuffle feed.
+    Discovery,
+    /// For You product surface.
+    ForYou,
+    /// Recommendations product surface.
+    Recommendations,
+}
+
+impl FeedChannel {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::ForYou => "for_you",
+            Self::Recommendations => "recommendations",
+        }
+    }
+}
 
 /// Application service for the discovery shuffle channel.
 #[derive(Clone)]
@@ -47,13 +71,23 @@ impl DiscoveryService {
         recently_played: &[String],
         limit: u32,
     ) -> CanopyResult<MediaPage> {
-        self.feed(scope, recently_played, Page { limit, offset: 0 })
-            .await
+        self.feed(
+            FeedChannel::Discovery,
+            scope,
+            recently_played,
+            Page { limit, offset: 0 },
+        )
+        .await
     }
 
     /// Returns an offset page from the diversified discovery pool.
+    ///
+    /// `channel` selects a deterministic permutation of the eligible pool so
+    /// Discovery, For You, and Recommendations can return distinct orders
+    /// while sharing the same candidates and pagination semantics.
     pub async fn feed(
         &self,
+        channel: FeedChannel,
         scope: &TrackAccessScope,
         recently_played: &[String],
         page: Page,
@@ -62,13 +96,15 @@ impl DiscoveryService {
         let offset = page.offset as usize;
         let excluded: HashSet<&str> = recently_played.iter().map(String::as_str).collect();
 
-        let candidates: Vec<MediaItem> = self
+        let mut candidates: Vec<MediaItem> = self
             .repo
             .shuffle_pool(scope)
             .await?
             .into_iter()
             .filter(|item| !excluded.contains(item.id.as_str()))
             .collect();
+
+        reorder_for_channel(&mut candidates, channel);
 
         let total = candidates.len();
         let items: Vec<_> = diversify(candidates, total)
@@ -92,6 +128,22 @@ impl DiscoveryService {
             n => n.min(Self::MAX_LIMIT),
         }
     }
+}
+
+/// Deterministically permutes `candidates` using a channel-specific key so each
+/// feed surface gets a stable but distinct order.
+fn reorder_for_channel(candidates: &mut [MediaItem], channel: FeedChannel) {
+    candidates.sort_by(|left, right| {
+        channel_rank(channel, &left.id).cmp(&channel_rank(channel, &right.id))
+    });
+}
+
+fn channel_rank(channel: FeedChannel, track_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(channel.tag().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(track_id.as_bytes());
+    hasher.finalize().into()
 }
 
 /// Greedily reorders `candidates` (preserving the pool's relative order) so
@@ -119,7 +171,7 @@ fn diversify(mut candidates: Vec<MediaItem>, limit: usize) -> Vec<MediaItem> {
 
 #[cfg(test)]
 mod tests {
-    use super::diversify;
+    use super::{FeedChannel, diversify, reorder_for_channel};
     use canopy_core::MediaItem;
 
     fn item(id: &str, artist: &str) -> MediaItem {
@@ -128,6 +180,10 @@ mod tests {
             artist: artist.into(),
             ..MediaItem::default()
         }
+    }
+
+    fn ids(items: &[MediaItem]) -> Vec<&str> {
+        items.iter().map(|item| item.id.as_str()).collect()
     }
 
     #[test]
@@ -159,5 +215,35 @@ mod tests {
         let pool = vec![item("1", "A"), item("2", "B"), item("3", "C")];
         let out = diversify(pool, 2);
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn reorder_for_channel_is_stable_within_channel() {
+        let mut first = vec![item("a", "A"), item("b", "B"), item("c", "C")];
+        let mut second = first.clone();
+        reorder_for_channel(&mut first, FeedChannel::Discovery);
+        reorder_for_channel(&mut second, FeedChannel::Discovery);
+        assert_eq!(ids(&first), ids(&second));
+    }
+
+    #[test]
+    fn reorder_for_channel_differs_across_channels() {
+        let pool: Vec<_> = (0..20)
+            .map(|n| item(&format!("track-{n}"), "A"))
+            .collect();
+        let mut discovery = pool.clone();
+        let mut for_you = pool.clone();
+        let mut recommendations = pool;
+        reorder_for_channel(&mut discovery, FeedChannel::Discovery);
+        reorder_for_channel(&mut for_you, FeedChannel::ForYou);
+        reorder_for_channel(&mut recommendations, FeedChannel::Recommendations);
+
+        let discovery_ids = ids(&discovery);
+        let for_you_ids = ids(&for_you);
+        let recommendation_ids = ids(&recommendations);
+
+        assert_ne!(discovery_ids, for_you_ids);
+        assert_ne!(discovery_ids, recommendation_ids);
+        assert_ne!(for_you_ids, recommendation_ids);
     }
 }

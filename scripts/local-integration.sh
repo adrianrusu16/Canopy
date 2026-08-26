@@ -104,7 +104,10 @@ prepare_state() {
   rm -rf -- "$state_root"
   mkdir -p \
     "$state_root/certs" \
-    "$state_root/media/library/audio/tracks/musopen"
+    "$state_root/media/library/audio/tracks/musopen" \
+    "$state_root/media/library/audio/tracks/personal" \
+    "$state_root/media/library/artwork/tracks/personal" \
+    "$state_root/media/library/artwork/albums/personal"
 
   openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 2 \
     -subj "/CN=Canopy Local Integration CA" \
@@ -126,6 +129,24 @@ prepare_state() {
 
   cp "$repo_root/fixtures/media/test-tone.mp3" \
     "$state_root/media/library/audio/tracks/musopen/beethoven-moonlight-sonata.mp3"
+
+  # The personal library is untracked, so a fresh clone has no audio here. The
+  # catalog fixture still lists those tracks; they simply fail to stream until
+  # the files are restored.
+  if compgen -G "$repo_root/fixtures/media/personal/*.mp3" >/dev/null; then
+    cp "$repo_root"/fixtures/media/personal/*.mp3 \
+      "$state_root/media/library/audio/tracks/personal/"
+  fi
+
+  if [[ -d "$repo_root/fixtures/media/personal/artwork/tracks" ]]; then
+    mkdir -p "$state_root/media/library/artwork/tracks/personal" \
+             "$state_root/media/library/artwork/albums/personal"
+    cp "$repo_root"/fixtures/media/personal/artwork/tracks/*.jpg \
+      "$state_root/media/library/artwork/tracks/personal/" 2>/dev/null || true
+    cp "$repo_root"/fixtures/media/personal/artwork/albums/*.jpg \
+      "$state_root/media/library/artwork/albums/personal/" 2>/dev/null || true
+  fi
+
   chmod -R a+rX "$state_root/media"
 
   local postgres_password smtp_password signing_key outbox_key stream_secret

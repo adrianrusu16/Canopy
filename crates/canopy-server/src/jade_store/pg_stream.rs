@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use canopy_core::{
-    AuthorizedStreamAsset, CanopyError, CanopyResult, PlayableAsset, PlayableAssetRepository,
-    StreamAudience,
+    AuthorizedArtworkAsset, AuthorizedStreamAsset, CanopyError, CanopyResult, PlayableAsset,
+    PlayableAssetRepository, StreamAudience,
 };
 
 #[derive(Clone)]
@@ -152,6 +152,39 @@ impl PlayableAssetRepository for PgPlayableAssetRepository {
             StreamAudience::Public => self.authorize_public(asset_id).await,
             StreamAudience::Personal => self.authorize_personal(asset_id).await,
         }
+    }
+
+    async fn authorize_artwork(
+        &self,
+        artwork_id: &str,
+        content_hash: &str,
+    ) -> CanopyResult<Option<AuthorizedArtworkAsset>> {
+        let artwork_id = parse_uuid(artwork_id, "artwork_id")?;
+        let content_hash = content_hash.to_ascii_lowercase();
+        if content_hash.len() != 64 || !content_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+
+        // v1: any artwork_assets row matching id + checksum is authorized.
+        let row = sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+            r#"
+                SELECT id, storage_key, content_type
+                FROM artwork_assets
+                WHERE id = $1
+                  AND checksum_sha256 = $2
+            "#,
+        )
+        .bind(artwork_id)
+        .bind(&content_hash)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(db_err)?;
+
+        Ok(row.map(|(id, storage_key, content_type)| AuthorizedArtworkAsset {
+            artwork_id: id.to_string(),
+            storage_key,
+            content_type,
+        }))
     }
 }
 
