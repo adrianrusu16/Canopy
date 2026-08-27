@@ -76,7 +76,10 @@ fn media_item_from_row(row: &sqlx::postgres::PgRow) -> MediaItem {
         0
     };
 
-    let artwork_id = row.try_get::<Option<uuid::Uuid>, _>("artwork_id").ok().flatten();
+    let artwork_id = row
+        .try_get::<Option<uuid::Uuid>, _>("artwork_id")
+        .ok()
+        .flatten();
     let artwork_content_hash = row
         .try_get::<Option<String>, _>("artwork_content_hash")
         .ok()
@@ -617,7 +620,7 @@ impl CatalogIngest for PgCatalogRepository {
                         license_id = $6,
                         is_explicit = $7,
                         artwork_storage_key = $8,
-                        artwork_id = $9,
+                        artwork_id = COALESCE($9, artwork_id),
                         visibility = 'quarantined',
                         ingest_status = 'quarantined',
                         updated_at = NOW()

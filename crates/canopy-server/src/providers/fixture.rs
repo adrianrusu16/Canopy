@@ -98,3 +98,54 @@ impl ProviderAdapter for TestFixtureProvider {
         Ok(self.tracks.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::ProviderAdapter;
+
+    const TRACK: &str = r#"{
+        "provider_id": "demo-1",
+        "provider": "fixture",
+        "title": "Demo Track",
+        "artist": "Demo Artist",
+        "album": "Demo Album",
+        "release_year": 2024,
+        "duration_ms": 240000,
+        "is_explicit": false,
+        "license": {
+            "license_type": "CC0",
+            "source_url": "https://musopen.org",
+            "attribution_text": "Public Domain"
+        },
+        "assets": []
+    }"#;
+
+    fn write_catalog(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn reads_wrapped_catalog_object() {
+        let (_dir, path) = write_catalog(&format!(
+            r#"{{"schema_version":"1","tracks":[{TRACK},{TRACK}]}}"#
+        ));
+        let provider = TestFixtureProvider::new(path).unwrap();
+        let tracks = provider.fetch_catalog().await.unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].provider, "fixture");
+        assert_eq!(tracks[0].provider_id, "demo-1");
+    }
+
+    #[tokio::test]
+    async fn reads_bare_track_array() {
+        let (_dir, path) = write_catalog(&format!("[{TRACK}]"));
+        let provider = TestFixtureProvider::new(path).unwrap();
+        let tracks = provider.fetch_catalog().await.unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].provider_id, "demo-1");
+    }
+}

@@ -123,13 +123,11 @@ impl MediaImportRepository for PgMediaImportRepository {
         };
 
         let artwork_id = match pending.artwork_storage_key.as_deref() {
-            Some(key) => upsert_artwork_asset(
-                &mut tx,
-                key,
-                pending.artwork_checksum_sha256.as_deref(),
-            )
-            .await
-            .map_err(db_err)?,
+            Some(key) => {
+                upsert_artwork_asset(&mut tx, key, pending.artwork_checksum_sha256.as_deref())
+                    .await
+                    .map_err(db_err)?
+            }
             None => None,
         };
 

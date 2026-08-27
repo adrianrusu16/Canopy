@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use canopy_core::{
     AudioAsset, AudioAssetRepository, AuthorizedStreamAsset, CanopyError, CatalogRepository,
-    IngestStatus, InstanceSettingsRepository, MediaItem, MediaVisibility, Page, PageTokenCodec,
-    PendingImportOutcome, PendingMediaImport, PlayableAsset, PlayableAssetRepository,
-    LibraryRepository, PlaylistRepository, ProfileRepository, StreamAudience, TrackAccessScope,
-    UserIdentity,
+    IngestStatus, InstanceSettingsRepository, LibraryRepository, MediaItem, MediaVisibility, Page,
+    PageTokenCodec, PendingImportOutcome, PendingMediaImport, PlayableAsset,
+    PlayableAssetRepository, PlaylistRepository, ProfileRepository, StreamAudience,
+    TrackAccessScope, UserIdentity,
 };
 use canopy_server::catalog::CatalogService;
 use canopy_server::discovery::{DiscoveryService, FeedChannel};
@@ -295,17 +295,9 @@ async fn track_visibility_is_consistent_across_every_read_and_playback_surface()
     let search = SearchService::new(catalog.clone());
     let discovery = DiscoveryService::new(catalog.clone());
     let library_store = Arc::new(InMemoryLibraryStore::new(catalog.clone()));
-    let library = LibraryService::new(
-        profiles.clone(),
-        library_store.clone(),
-        principal.clone(),
-    );
+    let library = LibraryService::new(profiles.clone(), library_store.clone(), principal.clone());
     let playlist_store = Arc::new(InMemoryPlaylistStore::new(catalog.clone()));
-    let playlists = PlaylistService::new(
-        profiles,
-        playlist_store.clone(),
-        principal,
-    );
+    let playlists = PlaylistService::new(profiles, playlist_store.clone(), principal);
     let owner = UserIdentity {
         user_id: OWNER.into(),
     };
@@ -898,6 +890,13 @@ async fn fixture_provider_reads_wrapped_catalog_file() {
     let provider = TestFixtureProvider::new(path).unwrap();
 
     let tracks = provider.fetch_catalog().await.unwrap();
-    assert_eq!(tracks.len(), 2);
+    assert!(
+        !tracks.is_empty(),
+        "wrapped fixtures/catalog.json should deserialize to tracks"
+    );
     assert_eq!(tracks[0].provider, "fixture");
+    assert!(
+        tracks.iter().any(|track| track.provider_id == "fixture-001"),
+        "catalog fixture should still include the public-domain seed track"
+    );
 }

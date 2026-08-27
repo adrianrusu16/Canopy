@@ -30,7 +30,9 @@ pub(crate) async fn upsert_artwork_asset(
     checksum_sha256: Option<&str>,
 ) -> Result<Option<uuid::Uuid>, sqlx::Error> {
     let (checksum, content_type) = match checksum_sha256 {
-        Some(checksum) if checksum.len() == 64 && checksum.chars().all(|c| c.is_ascii_hexdigit()) => {
+        Some(checksum)
+            if checksum.len() == 64 && checksum.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
             let content_type = match storage_key.rsplit_once('.') {
                 Some((_, "png" | "PNG")) => "image/png".to_string(),
                 Some((_, "jpg" | "JPG" | "jpeg" | "JPEG")) => "image/jpeg".to_string(),

@@ -103,7 +103,10 @@ async fn nginx_serves_ranges_and_rechecks_revoked_policy() {
     use canopy_core::StreamAudience;
     use canopy_server::{
         jade_store::PgPlayableAssetRepository,
-        stream::{ArtworkAuthorizer, StreamAuthorizer, StreamTokenCodec, serve_stream_auth, stream_auth_router},
+        stream::{
+            ArtworkAuthorizer, StreamAuthorizer, StreamTokenCodec, serve_stream_auth,
+            stream_auth_router,
+        },
     };
 
     let database_url =

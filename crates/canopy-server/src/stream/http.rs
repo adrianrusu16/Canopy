@@ -47,10 +47,7 @@ pub async fn serve_stream_auth(
         .await
 }
 
-async fn authorize_stream(
-    State(state): State<AuthState>,
-    headers: HeaderMap,
-) -> Response {
+async fn authorize_stream(State(state): State<AuthState>, headers: HeaderMap) -> Response {
     let Some(token) = stream_token(&headers) else {
         return forbidden();
     };
@@ -86,11 +83,7 @@ async fn authorize_stream(
     }
 }
 
-
-async fn authorize_artwork(
-    State(state): State<AuthState>,
-    headers: HeaderMap,
-) -> Response {
+async fn authorize_artwork(State(state): State<AuthState>, headers: HeaderMap) -> Response {
     let Some((artwork_id, content_hash)) = artwork_from_headers(&headers) else {
         return forbidden();
     };
@@ -138,7 +131,9 @@ fn artwork_from_original_uri(original_uri: &str) -> Option<(&str, &str)> {
     let (artwork_id, content_hash) = path.split_once('/')?;
     if artwork_id.is_empty()
         || content_hash.is_empty()
-        || content_hash.bytes().any(|byte| matches!(byte, b'/' | b'?' | b'#'))
+        || content_hash
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'?' | b'#'))
     {
         return None;
     }
@@ -251,7 +246,10 @@ mod tests {
         let assets = Arc::new(FakeRepository::new(result));
         let stream = StreamAuthorizer::new(Arc::new(codec.clone()), assets.clone());
         let artwork = ArtworkAuthorizer::new(assets);
-        (stream_auth_router(Arc::new(stream), Arc::new(artwork)), codec)
+        (
+            stream_auth_router(Arc::new(stream), Arc::new(artwork)),
+            codec,
+        )
     }
 
     fn request(token: Option<&str>) -> Request<Body> {

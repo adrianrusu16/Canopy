@@ -31,11 +31,11 @@ pub use identity_repository::{
 pub use model::{
     AudioAsset, AuthorizedArtworkAsset, AuthorizedStreamAsset, IngestStatus, LibraryItem,
     LikedTrackItem, LikedTrackPage, MediaArtwork, MediaItem, MediaPage, MediaVisibility, Page,
-    PageTokenCodec, PendingImportOutcome,
-    PendingMediaImport, PlayableAsset, PlaybackHistoryEntry, PlaybackHistoryEvent,
-    PlaybackHistoryPage, PlaybackSource, Playlist, PlaylistPage, PlaylistTrack, PlaylistTrackItem,
-    PlaylistTrackPage, ProfilePreferences, ProviderAudioAsset, ProviderLicense, ProviderTrack,
-    SavedTrackItem, SavedTrackPage, StreamAudience, TrackLike, UserIdentity, UserProfile,
+    PageTokenCodec, PendingImportOutcome, PendingMediaImport, PlayableAsset, PlaybackHistoryEntry,
+    PlaybackHistoryEvent, PlaybackHistoryPage, PlaybackSource, Playlist, PlaylistPage,
+    PlaylistTrack, PlaylistTrackItem, PlaylistTrackPage, ProfilePreferences, ProviderAudioAsset,
+    ProviderLicense, ProviderTrack, SavedTrackItem, SavedTrackPage, StreamAudience, TrackLike,
+    UserIdentity, UserProfile,
 };
 pub use repository::{
     AudioAssetRepository, CatalogIngest, CatalogRepository, DiscoveryRepository, IngestBatchResult,

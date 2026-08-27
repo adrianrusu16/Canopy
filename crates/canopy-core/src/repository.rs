@@ -10,10 +10,10 @@ use crate::access::TrackAccessScope;
 use crate::error::CanopyResult;
 use crate::model::{
     AudioAsset, AuthorizedArtworkAsset, AuthorizedStreamAsset, LibraryItem, LikedTrackPage,
-    MediaItem, MediaPage, Page,
-    PendingImportOutcome, PendingMediaImport, PlayableAsset, PlaybackHistoryEvent,
-    PlaybackHistoryPage, Playlist, PlaylistPage, PlaylistTrackItem, PlaylistTrackPage,
-    ProfilePreferences, ProviderTrack, SavedTrackPage, StreamAudience, TrackLike, UserProfile,
+    MediaItem, MediaPage, Page, PendingImportOutcome, PendingMediaImport, PlayableAsset,
+    PlaybackHistoryEvent, PlaybackHistoryPage, Playlist, PlaylistPage, PlaylistTrackItem,
+    PlaylistTrackPage, ProfilePreferences, ProviderTrack, SavedTrackPage, StreamAudience,
+    TrackLike, UserProfile,
 };
 
 /// Read access to public and owner-scoped catalog partitions.

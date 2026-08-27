@@ -228,9 +228,7 @@ mod tests {
 
     #[test]
     fn reorder_for_channel_differs_across_channels() {
-        let pool: Vec<_> = (0..20)
-            .map(|n| item(&format!("track-{n}"), "A"))
-            .collect();
+        let pool: Vec<_> = (0..20).map(|n| item(&format!("track-{n}"), "A")).collect();
         let mut discovery = pool.clone();
         let mut for_you = pool.clone();
         let mut recommendations = pool;

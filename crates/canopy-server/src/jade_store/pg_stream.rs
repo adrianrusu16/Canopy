@@ -180,11 +180,13 @@ impl PlayableAssetRepository for PgPlayableAssetRepository {
         .await
         .map_err(db_err)?;
 
-        Ok(row.map(|(id, storage_key, content_type)| AuthorizedArtworkAsset {
-            artwork_id: id.to_string(),
-            storage_key,
-            content_type,
-        }))
+        Ok(
+            row.map(|(id, storage_key, content_type)| AuthorizedArtworkAsset {
+                artwork_id: id.to_string(),
+                storage_key,
+                content_type,
+            }),
+        )
     }
 }
 
