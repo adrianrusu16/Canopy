@@ -896,7 +896,9 @@ async fn fixture_provider_reads_wrapped_catalog_file() {
     );
     assert_eq!(tracks[0].provider, "fixture");
     assert!(
-        tracks.iter().any(|track| track.provider_id == "fixture-001"),
+        tracks
+            .iter()
+            .any(|track| track.provider_id == "fixture-001"),
         "catalog fixture should still include the public-domain seed track"
     );
 }

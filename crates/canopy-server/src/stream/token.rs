@@ -128,7 +128,7 @@ fn invalid_capability() -> CanopyError {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use canopy_core::CanopyError;
     use hmac::{Hmac, KeyInit, Mac};
     use serde_json::json;
