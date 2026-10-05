@@ -29,6 +29,21 @@ PostgreSQL is authoritative for metadata and policy. Managed media stays private
 
 ---
 
+## ⚡ 60-second reviewer path
+
+| If you want to inspect… | Start here |
+|---|---|
+| 🏗️ **Service boundaries** | [System shape](#️-system-shape) and [architecture guide](docs/architecture.md) |
+| 🔐 **Identity and session policy** | [Authentication](docs/authentication.md) |
+| ▶️ **Playback authorization** | [Control plane vs data plane](#-control-plane-vs-data-plane) and [playback guide](docs/playback.md) |
+| 🗄️ **Durable state / PostgreSQL** | [Workspace](#-workspace) and [development guide](docs/development.md) |
+| 🧪 **Verification** | [Quality gates](#-quality-gates) |
+| 🧭 **Guided project narrative** | [Canopy case study](https://adrianrusu.dev/projects/canopy/) |
+
+> **Core architectural idea:** gRPC carries control decisions; Nginx serves media bytes; PostgreSQL remains authoritative for durable policy and metadata.
+
+---
+
 ## 🧭 System shape
 
 ```mermaid
